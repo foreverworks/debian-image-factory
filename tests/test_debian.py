@@ -87,7 +87,7 @@ class ReleaseTest(unittest.TestCase):
             debian.release_files("Suite: trixie\n")
 
     def test_bad_lines(self) -> None:
-        for line in (f" {SHA_A} 12", f" nothex 12 path", f" {SHA_A} twelve path", f" {SHA_A} 12 path extra"):  # noqa: F541
+        for line in (f" {SHA_A} 12", " nothex 12 path", f" {SHA_A} twelve path", f" {SHA_A} 12 path extra"):
             with self.subTest(line=line), self.assertRaisesRegex(ValueError, "bad SHA256"):
                 debian.release_files(f"SHA256:\n{line}\n")
 

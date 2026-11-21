@@ -62,7 +62,7 @@ class Inst:
 
 
 def suites(suite: str) -> tuple[Suite, ...]:
-    """The suites a build snapshot covers: main, updates and security (DESIGN 2.1)."""
+    """The suites a build snapshot covers: main, updates and security (DESIGN section 2, goal 1)."""
     return (Suite("debian", suite), Suite("debian", f"{suite}-updates"), Suite("debian-security", f"{suite}-security"))
 
 

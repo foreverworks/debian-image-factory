@@ -30,6 +30,11 @@ class ProblemTest(unittest.TestCase):
     def test_accepts_several_codes(self) -> None:
         self.assertIsNone(check.problem("x = f()  # type: ignore[arg-type, misc]  # why"))
 
+    def test_noqa_needs_a_code_and_a_reason(self) -> None:
+        self.assertIsNone(check.problem("class Failed(Exception):  # noqa: N818  # named for its exit status"))
+        self.assertIn("reason", check.problem("x = 1  # noqa: F541"))
+        self.assertIn("rule code", check.problem("x = 1  # noqa"))
+
     def test_accepts_a_line_without_an_ignore(self) -> None:
         self.assertIsNone(check.problem("x = 1  # a normal comment"))
 

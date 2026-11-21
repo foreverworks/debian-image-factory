@@ -22,7 +22,7 @@ def sources_options(command: argparse.ArgumentParser) -> None:
     )
     command.add_argument("--keyring", type=Path, default=resolve.DEFAULT_KEYRING, help="the Debian archive keyring")
     command.add_argument(
-        "--cache", type=Path, default=commands.DEFAULT_CACHE, help="the content-addressed download cache"
+        "--cache", type=Path, help="the content-addressed download cache (default ~/.cache/debian-image-factory)"
     )
 
 
@@ -83,7 +83,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 def sources_of(arguments: argparse.Namespace) -> commands.Sources:
-    return commands.Sources(service=arguments.mirror, keyring=arguments.keyring, cache=arguments.cache)
+    cache = arguments.cache if arguments.cache is not None else commands.default_cache()
+    return commands.Sources(service=arguments.mirror, keyring=arguments.keyring, cache=cache)
 
 
 def dispatch(arguments: argparse.Namespace) -> int:
@@ -120,7 +121,10 @@ def dispatch(arguments: argparse.Namespace) -> int:
         if arguments.out is None:
             sys.stdout.write(buffer.getvalue())
         else:
-            Path(arguments.out).write_text(buffer.getvalue())
+            try:
+                Path(arguments.out).write_text(buffer.getvalue())
+            except OSError as error:
+                raise commands.Failed(f"{arguments.out}: {error.strerror or error}") from None
         return status
     raise commands.Usage("a command is needed: lock or plan")
 

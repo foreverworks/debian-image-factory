@@ -25,6 +25,11 @@ def request(definition: Definition, image: str) -> list[str]:
     return sorted({*KIND_DEFAULTS[spec.kind], *spec.packages})
 
 
+def core_request(packages: Sequence[str]) -> list[str]:
+    """What core's second transaction asks for; the first is the suite's Essential set (DESIGN 7.2)."""
+    return sorted({"apt", *packages})
+
+
 def package_changes(old: object, new: Sequence[input_lock.Package]) -> list[dict[str, JsonValue]]:
     """Packages added, removed or moved, by name, against a previous plan's list."""
     before: dict[str, str] = {}
@@ -88,7 +93,9 @@ def as_json(fields: Mapping[str, input_lock.Value]) -> dict[str, JsonValue]:
 
 def image_entry(definition: Definition, inputs: ImageInputs) -> dict[str, JsonValue]:
     spec = definition.images[inputs.name]
-    requested: list[JsonValue] = [*(request(definition, inputs.name) if spec.kind != "core" else sorted(spec.packages))]
+    requested: list[JsonValue] = [
+        *(request(definition, inputs.name) if spec.kind != "core" else core_request(spec.packages))
+    ]
     return {
         "kind": spec.kind,
         "parent": inputs.parent,
@@ -118,7 +125,14 @@ def state_of(
     if parent_state == "build":
         return {"state": "build", "because": [{"parent": parent, "state": "build"}]}
     if parent_state == "wait" and decision.state != "reuse":
-        return {"state": "wait", "waiting_for": [], "because": [{"parent": parent, "state": "wait"}]}
+        state: dict[str, JsonValue] = {
+            "state": "wait",
+            "waiting_for": [*decision.waiting_for] if decision.state == "wait" else [],
+            "because": [{"parent": parent, "state": "wait"}],
+        }
+        if decision.state == "wait":
+            state["artifact"] = decision.artifact
+        return state
     if decision.state == "reuse":
         return {"state": "reuse", "artifact": decision.artifact}
     if decision.state == "wait":

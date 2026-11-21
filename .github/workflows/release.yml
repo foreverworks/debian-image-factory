@@ -30,9 +30,7 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: apt and gpgv, which planning and the archive tests use
-
-        run: sudo apt-get install -y --no-install-recommends apt gpgv gnupg
-
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg
 
       - name: Development tools, pinned with hashes
         run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-dev.txt
@@ -56,6 +54,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.15"
+
+      - name: apt and gpgv, which planning and the archive tests use
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg
 
       - name: Integration tests (docker and the network)
         run: scripts/test integration

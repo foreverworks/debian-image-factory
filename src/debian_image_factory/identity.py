@@ -110,7 +110,7 @@ def params_read(
         if name not in RESERVED and module is not None and definition.modules[module].enabled_by is not None:
             names.add(str(definition.modules[module].enabled_by))
     for fact in scripts.values():
-        names.update(name for name in params if param_env(name) in fact.text)
+        names.update(name for name in params if re.search(rf"\b{param_env(name)}\b", fact.text))
     return {name: params[name] for name in sorted(names)}
 
 
@@ -134,13 +134,13 @@ def recipe(
         "engine": ENGINE,
         "tools": [list(tool) for tool in sorted(set(tools))],
         "kind": {"kind": spec.kind, spec.kind: dict(spec.kind_table)},
-        "image": dict(spec.section),
+        "image": {**spec.section, "packages": [*sorted(spec.packages)]} if spec.packages else dict(spec.section),
         "modules": {name: dict(definition.modules[name].table) for name in sorted(modules)},
         "files": {path: fact_json(fact) for path, fact in sorted(files.items())},
         "params": dict(sorted(params.items())),
         "debian": {
             "suite": debian.suite,
-            "components": list(debian.components),
+            "components": [*sorted(debian.components)],
             "architecture": debian.architectures[0],
             "source_date_epoch": debian.source_date_epoch,
         },

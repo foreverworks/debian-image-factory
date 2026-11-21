@@ -19,10 +19,17 @@ DEFAULT_PATHS = ("src", "tests", "scripts")
 IGNORE = re.compile(r"#\s*type:\s*ignore(?P<rest>.*)$")
 WITH_CODE = re.compile(r"\[(?P<codes>[^\]]*)\](?P<after>.*)$")
 REASON = re.compile(r"\s*#\s*\S")
+NOQA = re.compile(r"#\s*noqa(?::\s*(?P<codes>[A-Z]+[0-9]+(?:\s*,\s*[A-Z]+[0-9]+)*))?(?P<after>.*)$")
 
 
 def problem(line: str) -> str | None:
-    """What is wrong with the type: ignore comment on this line, or None."""
+    """What is wrong with the type: ignore or noqa comment on this line, or None."""
+    noqa = NOQA.search(line)
+    if noqa is not None:
+        if not noqa.group("codes"):
+            return "noqa without a rule code"
+        if REASON.match(noqa.group("after")) is None:
+            return "noqa without a reason after it (# noqa: CODE  # why)"
     found = IGNORE.search(line)
     if found is None:
         return None

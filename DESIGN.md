@@ -399,6 +399,10 @@ buildable and testable from the same definition.
 A module is shared source invoked on whichever images use its entries; it is never an image with
 two parents.
 
+In M1, `plan` refuses an image that installs a switched-on `builtin:deb` entry, naming it: resolving
+a vendor `.deb`'s dependencies needs the vendor's index stanza, which arrives with the `deb` module
+in M5. With the switch off (as in `examples/`), the entries leave every identity and the plan runs.
+
 ### 6.5 What a hook sees
 
 Inside the chroot a hook gets `/run/factory/inputs/<entry>/` holding each verified file it may use,
@@ -470,7 +474,8 @@ recipe digest = sha256(canonical_json({
   (on or off) and every `FACTORY_PARAM_<NAME>` its hooks and module scripts mention.
 - **Canonical JSON** is sorted keys, no whitespace, UTF-8. The definition enters parsed, not as
   bytes, so reformatting `factory.toml` or reordering its keys never rebuilds anything; the
-  referenced files enter by content.
+  referenced files enter by content. Lists that are sets (`packages`, `components`) enter sorted, so
+  reordering them rebuilds nothing either; `hooks` keep their order, which is the order they run in.
 
 ### 7.2 Resolving before building
 
@@ -487,8 +492,10 @@ The plan computes each package set without building anything and without privile
    resolved the way mmdebstrap's `apt` variant installs it, in two transactions: first every
    `Essential: yes` package of the suite itself (not of -updates or -security; mmdebstrap selects
    them with `?narrow` on the suite and sets `pkgCacheGen::ForceEssential ","`), then `apt` and the
-   definition's packages on top of that result. A child's request is its packages, its kind
-   defaults and its modules' dependencies, against a status holding its parent's set; an `Inst`
+   definition's packages on top of that result (the plan's `request` for core lists `apt` and the
+   packages). A child's request is its packages, its kind defaults and its modules' dependencies
+   (none in M1: `node-tarball` and `file` need no packages, and `deb` arrives with M5), against a
+   status holding its parent's set; an `Inst`
    line that upgrades a parent's package, or any `Remv`, is refused. apt's own solver answers, one
    `Inst` line per package, and this runs as an ordinary user.
 4. Compute identities top-down and look each one up where it would be published (7.4).

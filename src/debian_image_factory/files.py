@@ -19,12 +19,15 @@ def mode_of(info: int) -> str:
     return "0755" if info & 0o111 else "0644"
 
 
-def fact(path: Path, script: bool) -> FileFact:
+def fact(path: Path, script: bool) -> FileFact | None:
+    """What the recipe records about one path; None for what a tree cannot hold (a FIFO, a device)."""
     info = path.lstat()
     if stat.S_ISLNK(info.st_mode):
         return FileFact(None, "0777", link=str(path.readlink()))
     if stat.S_ISDIR(info.st_mode):
         return FileFact(None, mode_of(info.st_mode), directory=True)
+    if not stat.S_ISREG(info.st_mode):
+        return None
     content = path.read_bytes()
     return FileFact(
         hashlib.sha256(content).hexdigest(),
@@ -41,19 +44,32 @@ def read_files(root: Path, definition: Definition) -> tuple[dict[str, FileFact],
     scripts = {module.use for module in definition.modules.values() if not module.use.startswith("builtin:")}
     for image in definition.images.values():
         scripts.update(image.hooks)
+    inside = root.resolve()
     for relative in sorted(scripts):
         path = root / relative
-        if not path.is_file() or path.is_symlink():
+        if not path.resolve().is_relative_to(inside):
+            problems.append(f"{relative}: leaves the definition's directory (through a symbolic link)")
+            continue
+        script = fact(path, script=True) if path.is_file() and not path.is_symlink() else None
+        if script is None or script.sha256 is None:
             problems.append(f"{relative}: a hook or module script must be a regular file")
             continue
-        found[relative] = fact(path, script=True)
+        found[relative] = script
     trees = sorted({image.files for image in definition.images.values() if image.files is not None})
     for relative in trees:
         top = root / relative
+        if not top.resolve().is_relative_to(inside):
+            problems.append(f"{relative}: leaves the definition's directory (through a symbolic link)")
+            continue
         if not top.is_dir() or top.is_symlink():
             problems.append(f"{relative}: a file tree must be a directory")
             continue
-        found[relative] = fact(top, script=False)
+        found[relative] = FileFact(None, "0755", directory=True)
         for path in sorted(top.rglob("*")):
-            found[path.relative_to(root).as_posix()] = fact(path, script=False)
+            name = path.relative_to(root).as_posix()
+            one = fact(path, script=False)
+            if one is None:
+                problems.append(f"{name}: a file tree holds regular files, directories and links only")
+            else:
+                found[name] = one
     return found, problems

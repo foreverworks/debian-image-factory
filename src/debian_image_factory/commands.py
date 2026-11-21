@@ -6,6 +6,7 @@ validation failed (every problem named), 2 usage.
 
 import hashlib
 import json
+import os
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -22,7 +23,17 @@ from .files import read_files
 from .identity import FileFact
 
 ARCHIVES: Final = ("debian", "debian-security")
-DEFAULT_CACHE: Final = Path.home() / ".cache" / "debian-image-factory"
+
+
+def default_cache() -> Path:
+    """`$XDG_CACHE_HOME/debian-image-factory`, else `~/.cache/...`, else a directory under the temp dir."""
+    base = os.environ.get("XDG_CACHE_HOME")
+    if base:
+        return Path(base) / "debian-image-factory"
+    try:
+        return Path.home() / ".cache" / "debian-image-factory"
+    except RuntimeError:  # no home directory: a container run with a uid that has no passwd entry
+        return Path(tempfile.gettempdir()) / "debian-image-factory-cache"
 
 
 class Failed(Exception):  # noqa: N818  # named for its exit status
@@ -39,7 +50,7 @@ class Sources:
 
     service: str = resolve.SNAPSHOT_SERVICE
     keyring: Path = resolve.DEFAULT_KEYRING
-    cache: Path = DEFAULT_CACHE
+    cache: Path = field(default_factory=default_cache)
     read: Callable[[str], bytes] = field(default=remote.read_url)
 
 
@@ -54,17 +65,16 @@ class Loaded:
 def load(lock_path: Path, definition_path: Path) -> Loaded:
     """The definition, the files it references and the lock's JSON. Raises Failed naming every problem."""
     try:
-        parsed = definition.parse(definition_path.read_text())
-    except OSError as error:
-        raise Failed(f"{definition_path}: {error.strerror}") from None
+        parsed = definition.parse(read_text(definition_path))
     except DefinitionError as error:
         raise Failed("\n".join(f"{definition_path}: {line}" for line in str(error).splitlines())) from None
     root = definition_path.resolve().parent
-    files, file_problems = read_files(root, parsed)
     try:
-        data = input_lock.loads(lock_path.read_text())
+        files, file_problems = read_files(root, parsed)
     except OSError as error:
-        raise Failed(f"{lock_path}: {error.strerror}") from None
+        raise Failed(f"{error.filename}: {error.strerror or error}") from None
+    try:
+        data = input_lock.loads(read_text(lock_path))
     except input_lock.LockError as error:
         raise Failed(f"{lock_path}: {error}") from None
     found = [f"{definition_path.name}: {line}" for line in file_problems]
@@ -72,6 +82,16 @@ def load(lock_path: Path, definition_path: Path) -> Loaded:
     if found:
         raise Failed("\n".join(found))
     return Loaded(root, parsed, files, data)
+
+
+def read_text(path: Path) -> str:
+    """A file's text, or Failed naming the file: unreadable and non-UTF-8 files are problems, not tracebacks."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise Failed(f"{path}: {error.strerror or error}") from None
+    except UnicodeDecodeError as error:
+        raise Failed(f"{path}: not UTF-8 text ({error.reason} at byte {error.start})") from None
 
 
 def checked_lock(loaded: Loaded) -> Lock:
@@ -150,8 +170,8 @@ def write_lock(lock_path: Path, data: object) -> None:
 def lock_snapshot(lock_path: Path, choice: str, sources: Sources, out: TextIO) -> int:
     """Move the build snapshot to the newest completed ID (`latest`) or to a given one."""
     try:
-        data = input_lock.parse(lock_path.read_text())
-    except (OSError, input_lock.LockError) as error:
+        data = input_lock.parse(read_text(lock_path))
+    except input_lock.LockError as error:
         raise Failed(f"{lock_path}: {error}") from None
     found_listings = read_listings(sources)
     try:
@@ -168,10 +188,8 @@ def lock_snapshot(lock_path: Path, choice: str, sources: Sources, out: TextIO) -
 def lock_baseline(lock_path: Path, definition_path: Path, snapshot_id: str, sources: Sources, out: TextIO) -> int:
     """Move the baseline snapshot: the reserved entry's version and the sha256 of its InRelease."""
     try:
-        parsed = definition.parse(definition_path.read_text())
-        data = input_lock.parse(lock_path.read_text())
-    except OSError as error:
-        raise Failed(f"{error.filename}: {error.strerror}") from None
+        parsed = definition.parse(read_text(definition_path))
+        data = input_lock.parse(read_text(lock_path))
     except (DefinitionError, input_lock.LockError) as error:
         raise Failed(str(error)) from None
     issues = snapshots.problems(snapshot_id, read_listings(sources))
@@ -258,18 +276,27 @@ def resolve_all(
                     )
             else:
                 resolved[name] = resolve.resolve_child(opened, resolved[image.parent], plan.request(spec, name), name)
-    except (archive.ArchiveError, resolve.ResolveError, OSError) as error:
+    except (archive.ArchiveError, resolve.ResolveError, OSError, ValueError, KeyError) as error:
         raise Failed(str(error)) from None
     return resolved
 
 
-def lookups(
-    against: Sequence[str], loaded: Loaded, inputs: Mapping[str, identity.ImageInputs]
-) -> tuple[dict[str, published.Decision], dict[str, list[str]]]:
+def parse_targets(against: Sequence[str]) -> list[published.Target]:
+    """The targets, refused before anything is resolved when this release cannot read one."""
     try:
-        parsed_targets = [published.parse_target(target) for target in against]
+        parsed = [published.parse_target(target) for target in against]
     except ValueError as error:
         raise Usage(str(error)) from None
+    for target in parsed:
+        if not isinstance(target, published.DirTarget):
+            scheme = "oci" if isinstance(target, published.OciTarget) else "github-release"
+            raise Usage(f"{scheme} targets arrive in a later release; this release reads dir:// targets")
+    return parsed
+
+
+def lookups(
+    parsed_targets: Sequence[published.Target], loaded: Loaded, inputs: Mapping[str, identity.ImageInputs]
+) -> tuple[dict[str, published.Decision], dict[str, list[str]]]:
     debian = loaded.definition.debian
     decisions: dict[str, published.Decision] = {}
     rejected: dict[str, list[str]] = {}
@@ -280,6 +307,8 @@ def lookups(
                 found = targets.lookup(target, name, debian.suite, debian.architectures[0], image_inputs.identity)
             except NotImplementedError as error:
                 raise Usage(str(error)) from None
+            except OSError as error:
+                raise Failed(f"cannot read target {target}: {error.strerror or error}") from None
             artifacts.extend(found.artifacts)
             rejected.setdefault(name, []).extend(f"{one.name}: {one.reason}" for one in found.rejected)
         required = definition.required_checks(loaded.definition, name, bool(image_inputs.entries))
@@ -331,6 +360,7 @@ def plan_command(
     unknown = sorted(set(rebuild) - set(loaded.definition.images))
     if unknown:
         raise Usage(f"--rebuild names {unknown}, which are not images")
+    parsed_targets = parse_targets(against)
     unsupported = unsupported_modules(lock, loaded, params)
     if unsupported:
         raise Failed("\n".join(unsupported))
@@ -341,13 +371,13 @@ def plan_command(
     previous: object = None
     if previous_path is not None:
         try:
-            previous = json.loads(previous_path.read_text())
-        except (OSError, ValueError) as error:
+            previous = json.loads(read_text(previous_path))
+        except ValueError as error:
             raise Usage(f"--previous {previous_path}: {error}") from None
     with tempfile.TemporaryDirectory(prefix="debian-image-factory-plan-") as scratch:
         resolved = resolve_all(lock, loaded, snapshot_id, sources, Path(scratch))
     inputs = compute_inputs(lock, loaded, resolved, params)
-    decisions, rejected = lookups(against, loaded, inputs)
+    decisions, rejected = lookups(parsed_targets, loaded, inputs)
     document = plan.build_plan(
         loaded.definition,
         snapshot=snapshot_id,

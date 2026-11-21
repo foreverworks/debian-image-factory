@@ -59,7 +59,8 @@ OCI_KEYS: Final[Mapping[str, str]] = {
 
 NAME: Final = re.compile(r"[a-z0-9][a-z0-9-]*")
 PARAM: Final = re.compile(r"[a-z][a-z0-9_]*")
-PACKAGE: Final = re.compile(r"[a-z0-9][a-z0-9+.-]+")
+PACKAGE: Final = re.compile(r"[a-z0-9][a-z0-9+.-]*[a-z0-9+]")
+"""A Debian package name. A trailing `-` is refused: apt would read `name-` as "remove name"."""
 KERNEL: Final = re.compile(r"linux-image-.*")
 IMAGE_KEYS: Final = frozenset(("kind", "parent", "packages", "files", "hooks", "apt_sources", "compression"))
 TOP_LEVEL: Final = frozenset(("schema", "debian", "params", "modules", "images", "checks"))
@@ -400,10 +401,9 @@ def parse_param_value(name: str, raw: str, default: Param) -> Param:
             raise ValueError(f"parameter {name} is a boolean: true or false, not {raw!r}")
         return raw == "true"
     if isinstance(default, int):
-        try:
-            return int(raw)
-        except ValueError:
-            raise ValueError(f"parameter {name} is an integer, not {raw!r}") from None
+        if not re.fullmatch(r"-?[0-9]+", raw):
+            raise ValueError(f"parameter {name} is an integer, not {raw!r}")
+        return int(raw)
     return raw
 
 

@@ -12,7 +12,9 @@ only what needs the definition:
   `debian-baseline`: its `version` is the snapshot ID and it pins the debian archive's `InRelease`
   for the suite at that ID by sha256 (input-lock 0.1 has no top-level field for a second snapshot).
 
-Pure functions over the lock's data and a parsed definition.
+Pure functions over the lock's data and a parsed definition. `SNAPSHOT_ID` and `entry_problems`
+come from `input_lock.lock`, outside the package's `__all__`: the pinned version is what they are
+read from, and a test fails if a new release moves them.
 """
 
 from collections.abc import Mapping
