@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch the input-lock release pins.json names, check its sha256, and unpack its package into .vendor/.
+"""Fetch the input-lock release lock.json names, check its sha256, and unpack its package into .vendor/.
 
 The factory never re-implements the lock: it imports input-lock at the pinned version, from
 .vendor/ while developing and from inside its own .pyz once built. Standard library only, so it
@@ -22,14 +22,14 @@ CACHE = ROOT / ".vendor"
 
 
 def main(argv: list[str]) -> int:
-    entry = json.loads((ROOT / "pins.json").read_text())["inputs"]["input-lock"]
+    entry = json.loads((ROOT / "lock.json").read_text())["inputs"]["input-lock"]
     version, expected = entry["version"], entry["sha256"]
     url = entry["url"].replace("{version}", version)
     pyz = CACHE / f"input-lock-{version}.pyz"
     CACHE.mkdir(exist_ok=True)
     if not pyz.exists() or hashlib.sha256(pyz.read_bytes()).hexdigest() != expected:
         if not url.startswith("https://"):
-            raise SystemExit(f"pins.json: input-lock url is not https: {url}")
+            raise SystemExit(f"lock.json: input-lock url is not https: {url}")
         with urllib.request.urlopen(url, timeout=60) as response:
             data = response.read()
         actual = hashlib.sha256(data).hexdigest()

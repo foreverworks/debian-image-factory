@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
-dependencies = []  # input-lock is bundled into the .pyz at the version pins.json names
+dependencies = []  # input-lock is bundled into the .pyz at the version lock.json names
 
 [project.urls]
 Homepage = "https://github.com/foreverworks/debian-image-factory"
@@ -30,7 +30,7 @@ strict = true
 disallow_any_explicit = true
 warn_unused_ignores = true
 enable_error_code = ["ignore-without-code"]
-files = ["src", "tests", "scripts/check-ignores"]
+files = ["src", "tests"]
 mypy_path = "src:.vendor"
 
 [tool.ruff]
