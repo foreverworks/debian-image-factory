@@ -413,6 +413,7 @@ recipe digest = sha256(canonical_json({
   "tools":      sorted (name, version, architecture) of the builder's byte-writing tools,
   "kind":       the kind and its own table from the definition, parsed,
   "image":      the image's definition section, parsed,
+  "modules":    { name: its [modules.*] table, parsed } for every module the image uses,
   "files":      { path: sha256 } of every hook, module script and file tree it references,
   "params":     { name: value } of the parameters it reads,
   "debian":     suite, components, architecture, source_date_epoch,
@@ -538,7 +539,9 @@ service).
 | The baseline snapshot moved | the images with `baseline` or `baseline-except-security` sources, and their children |
 | A lock entry's version, digest, checksum or URL | the images in its `used_by` and their children |
 | A field added to a lock entry, even one the factory does not know | the images in its `used_by` and their children |
-| A Renovate hint, or another image added to an entry's `used_by` | nothing |
+| A Renovate hint | nothing |
+| Another image added to an entry's `used_by` | nothing for the images already listed; the added image, which now installs the entry, and its children |
+| A module's table (`use`, `prefix` or any other key) | the images that use the module and their children |
 | A hook file's content | that image and its children |
 | `factory.toml` reformatted, comments edited, keys reordered | nothing |
 | A parameter flipped | the images that read it and their children |
@@ -908,7 +911,7 @@ Each runs on the exact artifact and emits one test result.
 | `sbom-complete` | all | the SBOM lists every installed package and locked input |
 | `ancestry` | children | the parent's filesystem is the base: for OCI, the parent's layers are the first layers by digest; elsewhere, the parent's files are present unless the child's own records say it removed them |
 | `same-resolution` | core | a second resolution of the same lock gives the same package set |
-| `no-build-snapshot` | all | the build snapshot ID appears nowhere in the artifact's bytes |
+| `no-build-snapshot` | all | the build snapshot ID appears nowhere in the artifact's bytes, including the build-time `file://` source, which the `apt_sources` rendering replaces before the image is packed; skipped with a note when the baseline ID equals the build ID. A release test also builds one package set at two different build snapshots and compares the bytes |
 | `byte-equal` | all, optional | two builds from the same inputs give the same digest; WARNED, never FAILED, when they differ |
 | `oci-run` | oci | runs under rootless Docker: declared user and entrypoint, `cmd` exits 0 |
 | `incus-boot` | incus | in an Incus host inside a VM: cloud-init finishes through NoCloud from both `cloud-init.user-data` and `user.user-data`, creates the user, runs commands, an IPv4 address is reported, all still true after a restart |
@@ -920,8 +923,8 @@ move, and `prune` deletes it once its checks end.
 
 ## 12. Test plan
 
-The rule: per-push CI never gets slower. Fast checks run on every push; the full Python matrix and
-the slow integration tests run on a schedule and gate a release. Every tier can be run locally with
+The rule: per-push CI never gets slower. Fast checks run on every push; the full Python matrix runs
+weekly; the matrix and the slow integration tests gate a release. Every tier can be run locally with
 one command, so nobody waits on CI to learn what a change broke.
 
 **Supported Python.** Upstream sets the window: the factory supports the Python versions upstream
