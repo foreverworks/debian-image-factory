@@ -43,6 +43,7 @@ Debug::NoLocking "true";
 APT::Architecture "{ARCH}";
 APT::Architectures "{ARCH}";
 Acquire::Check-Valid-Until "false";
+APT::Sandbox::User "root";
 """
 
 

@@ -74,6 +74,8 @@ matrix() {
     for version in 3.13 3.15; do
         echo "== unit tier on Python $version"
         docker run --rm -v "$root:/source:ro" "python:$version" bash -ec '
+            # the archive tests verify signatures with gpgv, which apt in Debian 13 no longer pulls in
+            command -v gpgv >/dev/null || { apt-get -qq update && apt-get -qq install -y gpgv; } >/dev/null
             cp -a /source /work
             rm -rf /work/.git /work/dist
             git config --global --add safe.directory /work

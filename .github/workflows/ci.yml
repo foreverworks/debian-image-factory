@@ -30,6 +30,11 @@ jobs:
         with:
           python-version: "3.15"
 
+      - name: apt and gpgv, which planning and the archive tests use
+
+        run: sudo apt-get install -y --no-install-recommends apt gpgv gnupg
+
+
       - name: Development tools, pinned with hashes
         run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-dev.txt
 

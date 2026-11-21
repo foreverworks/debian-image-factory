@@ -88,6 +88,7 @@ APT::Architectures "{arch}";
 APT::Install-Recommends "false";
 Acquire::Languages "none";
 Acquire::Check-Valid-Until "false";
+APT::Sandbox::User "root";
 pkgCacheGen::ForceEssential ",";
 """
 
