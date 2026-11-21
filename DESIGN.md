@@ -1095,29 +1095,30 @@ M3, M4 and M5 are independent once M2 lands and can run side by side.
 21. **Per-push CI stays one fast job.** The floor is checked statically; the matrix and the slow
     builds run weekly and on release tags, where they gate the publish.
 
-## 16. Open questions
+## 16. Questions settled, and the one still open
 
-Each has a recommendation, which the design above already follows, and what changes if it is
-decided the other way.
+Each was raised as an open question with a recommendation; all but the last are now decided, and
+each says what would change had it gone the other way.
 
-1. **Builder tools from the Debian snapshot, or upstream's newest.** mmdebstrap 1.5.7 and oras
-   1.2.0 as Debian 13 ships them, against upstream's 1.7.0 and 1.4.0. Recommendation: Debian's. The
-   builder is then one more image from one snapshot, locked, reproducible and recorded like every
-   other, and its tools change only when a factory release moves its snapshot. Consequence: upstream
-   fixes and features arrive with the next Debian release or a deliberate backport; choosing upstream
-   means a second, unlocked source of tools inside every identity.
-2. **Does this repository publish ready-made public images** (a core OCI base, a Node runtime)?
-   Recommendation: not before 1.0; the repository publishes the tool and its builder image, and its
-   release tests build the example definition into a throwaway registry. Consequence: strangers
-   build their own images; nobody depends on images this project would then have to patch forever.
-3. **Signing the factory's own releases.** Recommendation: sign the `.pyz` and the builder image
-   with Sigstore keyless from v0.1, even though consumer artifacts stay unsigned by default.
-   Consequence: strangers can verify the tool they run, at no cost to consumers.
-4. **Inputs bundles: on or off by default.** Recommendation: off (`--bundle` turns them on).
-   Consequence: hundreds of megabytes per retained good build where they are on; dependence on
-   snapshot.debian.org (or the consumer's cache) for replay where they are off.
-5. **Making the repository public.** It stays private until its maintainers decide. Before that:
-   every file passes a scan for private data, and the examples use example.com names only.
+1. **Builder tools come from the Debian snapshot** (decided 2026-11-21): mmdebstrap 1.5.7 and oras
+   1.2.0 as Debian 13 ships them, not upstream's 1.7.0 and 1.4.0. The builder is one more image
+   from one snapshot, locked, reproducible and recorded like every other, and its tools change only
+   when a factory release moves its snapshot. This is a deliberate exception to taking the newest
+   upstream release, for these tools only. Upstream fixes and features arrive with the next Debian
+   release or a deliberate backport.
+2. **No ready-made public images from this repository before 1.0** (decided): it publishes the
+   tool and its builder image, and its release tests build the example definition into a throwaway
+   registry. Strangers build their own images, and nobody depends on images this project would then
+   have to patch forever. Ready-made images, if any, live in a repository of their own.
+3. **The factory's own releases are signed** (decided): the `.pyz` and the builder image are signed
+   with Sigstore keyless from v0.1, while consumer artifacts stay unsigned by default. Strangers
+   can verify the tool they run, at no cost to consumers.
+4. **Inputs bundles are off by default** (decided; `--bundle` turns them on). Where they are off,
+   replay depends on snapshot.debian.org or the consumer's cache; where they are on, they cost
+   hundreds of megabytes per retained good build.
+5. **Still open: making the repository public.** It stays private until its maintainers decide.
+   Before that, every file passes a scan for private data, and the examples use example.com names
+   only.
 
 ## Versions read for this design
 
