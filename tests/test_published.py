@@ -39,9 +39,10 @@ def prov(identity: str = IDENTITY, image: str = "node-26", digest: str = DIGEST,
     metadata = {"finishedOn": finished} if finished else {}
     predicate = provenance(
         "https://example.com/build-type",
-        {"image": image, "identity": identity},
+        {"image": image},
         [],
         "https://example.com/builder",
+        internal_parameters={"identity": identity},
         metadata=metadata,  # type: ignore[arg-type]  # a test passes a plain dict where the TypedDict is declared
     )
     return jsonl([envelope(statement([subject(NAME, digest)], PROVENANCE_PREDICATE, predicate))])
@@ -222,12 +223,17 @@ class ParseRecordsTest(unittest.TestCase):
             variant(predicateType=PROVENANCE_PREDICATE, predicate={"buildDefinition": {"externalParameters": {}}}),
             variant(
                 predicateType=PROVENANCE_PREDICATE,
-                predicate={"buildDefinition": {"externalParameters": {"image": "a", "identity": "xyz"}}},
+                predicate={
+                    "buildDefinition": {"externalParameters": {"image": "a"}, "internalParameters": {"identity": "xyz"}}
+                },
             ),
             variant(
                 predicateType=PROVENANCE_PREDICATE,
                 predicate={
-                    "buildDefinition": {"externalParameters": {"image": "a", "identity": IDENTITY}},
+                    "buildDefinition": {
+                        "externalParameters": {"image": "a"},
+                        "internalParameters": {"identity": IDENTITY},
+                    },
                     "runDetails": {"metadata": {"finishedOn": "yesterday"}},
                 },
             ),

@@ -3,9 +3,11 @@
 **Every Debian image you ship, built from one archive snapshot, rebuilt only when something in it
 actually changed, and carrying standard records of what is inside and how it was made.**
 
-> **Status: design, not yet usable.** There is no code in this repository yet. The full design is
-> in [DESIGN.md](DESIGN.md); this README describes what the factory will do once its first
-> releases land. If something here is unclear, that is a bug in the design: please open an issue.
+> **Status: the contract works, nothing is built yet.** The first milestone is in: it checks your
+> lock and definition, resolves every image's exact package set from a snapshot, computes each
+> image's input identity and tells you what would be built and why. Building images comes with the
+> next milestones. The full design is in [DESIGN.md](DESIGN.md). If something here is unclear,
+> please open an issue.
 
 ## The problem
 
@@ -98,8 +100,7 @@ up as a diff you review.
 ```json
 {
   "schema": 1,
-  "debian_snapshot": "20261121T005332Z",
-  "debian_baseline": "20261108T000000Z",
+  "debian_snapshot": "20261121T004329Z",
   "inputs": {
     "node-26": {
       "module": "node",
@@ -110,19 +111,19 @@ up as a diff you review.
     },
     "node-release-keys": {
       "module": "node",
-      "version": "main",
-      "digest": "<commit sha>",
-      "url": "https://raw.githubusercontent.com/nodejs/release-keys/{digest}/gpg-only-active-keys/pubring.kbx",
-      "sha256": "<sha256 of pubring.kbx>",
+      "version": "481637f813e912c4aa3622d7964ab426c97b8e8d",
+      "url": "https://raw.githubusercontent.com/nodejs/release-keys/{version}/gpg-only-active-keys/pubring.kbx",
+      "sha256": "140f2ad5260fd62773b6243ce8e1d3009645d558f121b8262c55e383dc285932",
       "used_by": ["node-26"]
     }
   }
 }
 ```
 
-The Node.js checksum is the real one for 26.13.1; values in angle brackets are placeholders. The
-build snapshot moves as often as you like and never ends up inside an image; the baseline is the
-snapshot your images' own apt sources may point at, and you move it on purpose. The lock format is
+The checksums are real (Node.js 26.13.1, and the keyring at that commit of nodejs/release-keys).
+The build snapshot moves as often as you like and never ends up inside an image. If your images'
+own apt sources should point at a snapshot too, that is a second, deliberate one, the baseline:
+`debian-image-factory lock baseline --id <ID>` adds it as one more entry. The lock format is
 shared with [input-lock](https://github.com/foreverworks/input-lock), a small library the factory
 bundles.
 
@@ -156,11 +157,21 @@ parent = "core"
 packages = ["openssh-server", "sudo"]
 ```
 
-Then, once there is a release to run (nothing to install yet):
+Then:
 
 ```sh
-debian-image-factory lock check          # the lock and the definition agree
-debian-image-factory plan > plan.json    # what would be built, and exactly why
+debian-image-factory lock check          # the lock and the definition agree; snapshot IDs still valid
+debian-image-factory plan > plan.json    # every image's package set and identity, and what would be built
+```
+
+Planning needs only python3 3.13 or newer, apt and gpgv, so any Debian or Ubuntu machine will do.
+[examples/](examples/) has a lock and a definition covering every kind; run the two commands there.
+Until the first release is tagged, run the source directly: `scripts/vendor-input-lock` once, then
+`PYTHONPATH=src:.vendor python3 -m debian_image_factory`.
+
+The next milestones add the rest:
+
+```sh
 debian-image-factory fetch plan.json
 debian-image-factory build plan.json --out out/
 debian-image-factory test out/
@@ -224,13 +235,15 @@ it runs on the python3 Debian already ships. It is distributed as a single `.pyz
 
 ## Status and roadmap
 
-Design. The first milestone (identities, `lock check` and `plan`, plus a minimal pinned builder; no
-image builds yet) starts once the lock format is frozen. After that come core builds with records,
-then OCI, Incus, installer and OS images, then the nightly "rebuild only what changed" loop. The
-milestones are in [DESIGN.md, section 14](DESIGN.md#14-milestones).
+The first milestone is in: the lock and definition checks, identities, `lock check`, `lock
+snapshot`, `lock baseline` and `plan`, and a minimal pinned builder image. No image is built yet.
+Next come core builds with records, then OCI, Incus, installer and OS images, then the nightly
+"rebuild only what changed" loop. The milestones are in
+[DESIGN.md, section 14](DESIGN.md#14-milestones).
 
-Issues and questions about the design are welcome. Code contributions will be once there is code
-to contribute to.
+`scripts/test static`, `scripts/test unit` and `scripts/test integration` run the same checks CI
+does (the last needs Docker and network access to snapshot.debian.org). Issues and questions are
+welcome.
 
 ## License
 

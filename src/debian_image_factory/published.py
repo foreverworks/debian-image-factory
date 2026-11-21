@@ -315,10 +315,11 @@ def _provenance(predicate: object) -> BuildClaim:
     body = _object(predicate, "provenance predicate")
     definition = _object(body.get("buildDefinition"), "buildDefinition")
     parameters = _object(definition.get("externalParameters"), "buildDefinition.externalParameters")
+    internal = _object(definition.get("internalParameters"), "buildDefinition.internalParameters")
     image = _text(parameters.get("image"), "externalParameters.image")
-    identity = _text(parameters.get("identity"), "externalParameters.identity")
+    identity = _text(internal.get("identity"), "internalParameters.identity")
     if not HEX64.fullmatch(identity):
-        raise RecordsError("externalParameters.identity is not 64 lowercase hex characters")
+        raise RecordsError("internalParameters.identity is not 64 lowercase hex characters")
     finished: str | None = None
     details = body.get("runDetails")
     if details is not None:

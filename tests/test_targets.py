@@ -49,9 +49,10 @@ def write_artifact(
                     PROVENANCE_PREDICATE,
                     provenance(
                         "https://example.com/build-type",
-                        {"image": image, "identity": identity},
+                        {"image": image},
                         [],
                         "https://example.com/builder",
+                        internal_parameters={"identity": identity},
                         metadata={"finishedOn": finished},
                     ),
                 )
@@ -123,9 +124,10 @@ class DirLookupTest(unittest.TestCase):
                         PROVENANCE_PREDICATE,
                         provenance(
                             "https://example.com/b",
-                            {"image": "core", "identity": IDENTITY},
+                            {"image": "core"},
                             [],
                             "https://example.com/x",
+                            internal_parameters={"identity": IDENTITY},
                         ),
                     )
                 )
@@ -155,9 +157,10 @@ class DirLookupTest(unittest.TestCase):
                         PROVENANCE_PREDICATE,
                         provenance(
                             "https://example.com/b",
-                            {"image": "node-26", "identity": IDENTITY},
+                            {"image": "node-26"},
                             [],
                             "https://example.com/x",
+                            internal_parameters={"identity": IDENTITY},
                         ),
                     )
                 )
