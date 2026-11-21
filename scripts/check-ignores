@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Fail on a `# type: ignore` that does not say which error it silences and why.
+
+The accepted form is `# type: ignore[code]  # reason`. A bare `# type: ignore`, one without a code
+and one without a reason after it are all reported as file:line. Checks src/, tests/ and scripts/.
+
+    scripts/check-ignores [<directory or file>...]
+"""
+
+import io
+import re
+import sys
+import tokenize
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PATHS = ("src", "tests", "scripts")
+IGNORE = re.compile(r"#\s*type:\s*ignore(?P<rest>.*)$")
+WITH_CODE = re.compile(r"\[(?P<codes>[^\]]*)\](?P<after>.*)$")
+REASON = re.compile(r"\s*#\s*\S")
+
+
+def problem(line: str) -> str | None:
+    """What is wrong with the type: ignore comment on this line, or None."""
+    found = IGNORE.search(line)
+    if found is None:
+        return None
+    coded = WITH_CODE.match(found.group("rest"))
+    if coded is None or not coded.group("codes").strip():
+        return "type: ignore without an error code"
+    if REASON.match(coded.group("after")) is None:
+        return "type: ignore without a reason after it (# type: ignore[code]  # why)"
+    return None
+
+
+def problems(name: str, text: str) -> list[str]:
+    """Every faulty type: ignore in the comments of this source (strings and docstrings are not comments)."""
+    found: list[str] = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.type == tokenize.COMMENT:
+                message = problem(token.string)
+                if message is not None:
+                    found.append(f"{name}:{token.start[0]}: {message}")
+    except (tokenize.TokenError, IndentationError, SyntaxError) as error:
+        found.append(f"{name}: cannot read as Python: {error}")
+    return found
+
+
+def python_files(paths: Iterable[Path]) -> list[Path]:
+    files: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            files.extend(p for p in path.rglob("*") if p.is_file() and is_python(p))
+        elif path.is_file() and is_python(path):
+            files.append(path)
+    return sorted(set(files))
+
+
+def is_python(path: Path) -> bool:
+    if path.suffix == ".py":
+        return True
+    if path.suffix:
+        return False
+    with path.open("rb") as handle:
+        first = handle.readline()
+    return first.startswith(b"#!") and b"python" in first
+
+
+def main(argv: Sequence[str]) -> int:
+    paths = [Path(a) for a in argv] or [ROOT / name for name in DEFAULT_PATHS]
+    found: list[str] = []
+    for path in python_files(paths):
+        shown = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+        found.extend(problems(shown, path.read_text(encoding="utf-8")))
+    for message in found:
+        print(message, file=sys.stderr)
+    return 1 if found else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

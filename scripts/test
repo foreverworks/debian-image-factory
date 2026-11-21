@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Every test tier, runnable locally with one command (DESIGN 12): nobody waits on CI to learn what a change broke.
+#
+#   scripts/test static        ruff, ruff format, mypy, check-ignores, shellcheck
+#   scripts/test unit          the unit tests (seconds, no network, no root)
+#   scripts/test integration   the slow tests, DIF_INTEGRATION=1 (network, docker)
+#   scripts/test matrix        the unit tier in docker on the Python floor and on the newest stable
+#   scripts/test all           static, unit and matrix (add integration by naming it)
+#
+# Tools come from PATH (what CI installs from requirements-dev.txt) or, when missing, from uvx at the
+# version requirements-dev.in pins. Test output goes to dist/test-<tier>.log, then is printed.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+export PYTHONDONTWRITEBYTECODE=1
+
+# One version pin, read from requirements-dev.in.
+pinned() { grep -m1 "^$1==" requirements-dev.in | cut -d= -f3; }
+
+# tool <name> <arguments...>: the tool on PATH, else the pinned one through uvx.
+tool() {
+    local name=$1
+    shift
+    if command -v "$name" >/dev/null 2>&1; then
+        "$name" "$@"
+    else
+        uvx "$name@$(pinned "$name")" "$@"
+    fi
+}
+
+# The scripts with a shebang, whatever their suffix: ruff and mypy only see .py files by themselves.
+scripts_with() {
+    local f
+    for f in scripts/* examples/*; do
+        [ -f "$f" ] && head -n1 "$f" | grep -Eq "$1" && printf '%s\n' "$f"
+    done
+    return 0
+}
+
+static() {
+    local python_scripts shell_scripts
+    mapfile -t python_scripts < <(scripts_with '^#!.*python')
+    mapfile -t shell_scripts < <(scripts_with '^#!.*(ba|da)?sh')
+    echo "== ruff check"
+    tool ruff check . "${python_scripts[@]}"
+    echo "== ruff format --check"
+    tool ruff format --check . "${python_scripts[@]}"
+    echo "== mypy"
+    tool mypy
+    echo "== check-ignores"
+    python3 scripts/check-ignores
+    echo "== shellcheck"
+    if [ "${#shell_scripts[@]}" -gt 0 ]; then
+        tool shellcheck "${shell_scripts[@]}"
+    fi
+}
+
+# unit_like <name> [VAR=value...]: unittest discover, output to a file, printed, exit with its status.
+unit_like() {
+    local name=$1
+    shift
+    mkdir -p dist
+    local log=dist/test-$name.log status=0
+    env "$@" PYTHONPATH=src:.vendor python3 -m unittest discover -s tests -t . >"$log" 2>&1 || status=$?
+    cat "$log"
+    return "$status"
+}
+
+# The unit tier on the floor (3.13, Debian 13's python3) and the newest stable, in docker. The worktree
+# is mounted read-only and copied to a scratch repository inside the container, so the run writes nothing
+# back and build-pyz has a commit to take its time stamps from.
+matrix() {
+    local version
+    for version in 3.13 3.15; do
+        echo "== unit tier on Python $version"
+        docker run --rm -v "$root:/source:ro" "python:$version" bash -ec '
+            cp -a /source /work
+            rm -rf /work/.git /work/dist
+            git config --global --add safe.directory /work
+            cd /work
+            git init -q
+            git add -A
+            git -c user.name=test -c user.email=test@example.com commit -qm test
+            scripts/test unit
+        '
+    done
+}
+
+tier=${1:-}
+python3 scripts/vendor-input-lock
+case "$tier" in
+static) static ;;
+unit) unit_like unit ;;
+integration) unit_like integration DIF_INTEGRATION=1 ;;
+matrix) matrix ;;
+all)
+    static
+    unit_like unit
+    matrix
+    ;;
+*)
+    sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//' >&2
+    exit 2
+    ;;
+esac

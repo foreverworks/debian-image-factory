@@ -30,7 +30,7 @@ strict = true
 disallow_any_explicit = true
 warn_unused_ignores = true
 enable_error_code = ["ignore-without-code"]
-files = ["src", "tests"]
+files = ["src", "tests", "scripts/check-ignores"]
 mypy_path = "src:.vendor"
 
 [tool.ruff]

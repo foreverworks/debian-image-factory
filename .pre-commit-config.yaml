@@ -1,0 +1,32 @@
+# The same static checks as `scripts/test static`, run before each commit. Everything runs from the tools
+# on PATH (pip install --require-hashes -r requirements-dev.txt), so pre-commit, CI and scripts/test agree
+# on the versions: requirements-dev.txt is the one place they are pinned.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        language: system
+        entry: ruff check
+        types: [python]
+      - id: ruff-format
+        name: ruff format --check
+        language: system
+        entry: ruff format --check
+        types: [python]
+      - id: mypy
+        name: mypy
+        language: system
+        entry: mypy
+        types: [python]
+        pass_filenames: false
+      - id: check-ignores
+        name: type ignores carry a code and a reason
+        language: system
+        entry: scripts/check-ignores
+        types: [python]
+      - id: shellcheck
+        name: shellcheck
+        language: system
+        entry: shellcheck
+        types: [shell]
