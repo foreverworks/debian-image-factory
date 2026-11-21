@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=84.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "debian-image-factory"
+dynamic = ["version"]
+description = "Every Debian image you ship, built from one archive snapshot and rebuilt only when its inputs change."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+dependencies = []  # input-lock is bundled into the .pyz at the version pins.json names
+
+[project.urls]
+Homepage = "https://github.com/foreverworks/debian-image-factory"
+
+[project.scripts]
+debian-image-factory = "debian_image_factory.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "debian_image_factory.__version__" }
+
+[tool.setuptools.package-data]
+debian_image_factory = ["py.typed", "builder/*.json"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+disallow_any_explicit = true
+warn_unused_ignores = true
+enable_error_code = ["ignore-without-code"]
+files = ["src", "tests", "scripts/check-ignores"]
+mypy_path = "src:.vendor"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+extend-exclude = ["*.md", ".vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "N"]
+ignore = ["N815"]  # JSON field names (externalParameters, predicateType) are the formats' own
+
+[tool.ruff.lint.isort]
+known-third-party = ["input_lock"]
