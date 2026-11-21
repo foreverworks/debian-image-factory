@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Spike for DESIGN 7.5: does snapshot.debian.org list a snapshot only after its import ends?
+
+Run against the live service:
+
+    PYTHONPATH=src:.vendor python3 scripts/spike-listing
+
+It checks, and prints a short report of:
+  1. each archive's listing is strictly ascending;
+  2. the newest completed ID right now, and for it, per suite: the InRelease is served, its Date
+     is at or before the served snapshot's timestamp, and a second fetch gives the same bytes;
+  3. per archive, its NEWEST listed snapshot (not completed): whether the InRelease and the
+     main/binary-amd64 Packages.xz it lists (by-hash path) are already fully served;
+  4. an unlisted ID between two listed ones serves the earlier snapshot.
+
+Exit status 1 when a check of 1, 2 or 4 fails. Part 3 only reports what it sees: a half-imported
+newest snapshot is allowed, that is what "completed" guards against.
+"""
+
+import hashlib
+import re
+import sys
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+
+from debian_image_factory import listings, remote, snapshots
+
+BASE = "https://snapshot.debian.org"
+SUITES: Mapping[str, Sequence[str]] = {
+    "debian": ("trixie", "trixie-updates"),
+    "debian-security": ("trixie-security",),
+}
+PACKAGES = "main/binary-amd64/Packages.xz"
+ID_FORMAT = "%Y%m%dT%H%M%SZ"
+
+type Reader = Callable[[str], bytes]
+
+
+@dataclass(frozen=True, slots=True)
+class Check:
+    name: str
+    ok: bool
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class Report:
+    hard: tuple[Check, ...]
+    """Assumptions the design relies on: each must hold."""
+    observed: tuple[Check, ...]
+    """What the newest, not yet completed snapshots look like: reported, never asserted."""
+    completed_id: str | None
+
+
+def inrelease_url(archive: str, snapshot_id: str, suite: str) -> str:
+    return f"{BASE}/archive/{archive}/{snapshot_id}/dists/{suite}/InRelease"
+
+
+def release_date(inrelease: bytes) -> datetime | None:
+    """The `Date:` field of an InRelease as an aware UTC datetime."""
+    match = re.search(rb"^Date: (.+)$", inrelease, re.MULTILINE)
+    if match is None:
+        return None
+    try:
+        return parsedate_to_datetime(match.group(1).decode("ascii")).astimezone(UTC)
+    except (ValueError, TypeError):
+        return None
+
+
+def sha256_entry(inrelease: bytes, name: str) -> tuple[str, int] | None:
+    """(sha256, size) the InRelease's SHA256 section lists for `name`."""
+    text = inrelease.decode("utf-8", errors="replace")
+    _, _, section = text.partition("\nSHA256:\n")
+    for line in section.splitlines():
+        if not line.startswith(" "):
+            break
+        fields = line.split()
+        if len(fields) == 3 and fields[2] == name:
+            return fields[0], int(fields[1])
+    return None
+
+
+def snapshot_time(snapshot_id: str) -> datetime:
+    return datetime.strptime(snapshot_id, ID_FORMAT).replace(tzinfo=UTC)
+
+
+def try_read(read: Reader, url: str) -> tuple[bytes | None, str]:
+    try:
+        return read(url), ""
+    except OSError as error:
+        return None, f"{url}: {error}"
+
+
+def check_completed_inrelease(
+    read: Reader, archive: str, suite: str, snapshot_id: str, serves: str
+) -> tuple[Check, ...]:
+    label = f"{archive}/{suite} at {snapshot_id}"
+    url = inrelease_url(archive, snapshot_id, suite)
+    first, failure = try_read(read, url)
+    if first is None:
+        return (Check(f"{label}: InRelease served", False, failure),)
+    found = [Check(f"{label}: InRelease served", True, f"{len(first)} bytes")]
+    date = release_date(first)
+    if date is None:
+        found.append(Check(f"{label}: Date at or before snapshot {serves}", False, "no readable Date field"))
+    else:
+        found.append(
+            Check(
+                f"{label}: Date at or before snapshot {serves}",
+                date <= snapshot_time(serves),
+                f"Date {date:%Y-%m-%d %H:%M:%S}Z",
+            )
+        )
+    second, failure = try_read(read, url)
+    found.append(Check(f"{label}: second fetch gives the same bytes", second == first, failure or "compared"))
+    return tuple(found)
+
+
+def observe_newest(read: Reader, archive: str, suite: str, newest: str) -> tuple[Check, ...]:
+    label = f"{archive}/{suite} newest {newest}"
+    inrelease, failure = try_read(read, inrelease_url(archive, newest, suite))
+    if inrelease is None:
+        return (Check(f"{label}: InRelease served", False, failure),)
+    found = [Check(f"{label}: InRelease served", True, f"{len(inrelease)} bytes")]
+    entry = sha256_entry(inrelease, PACKAGES)
+    if entry is None:
+        return (*found, Check(f"{label}: lists {PACKAGES}", False, "no SHA256 entry"))
+    digest, size = entry
+    url = f"{BASE}/archive/{archive}/{newest}/dists/{suite}/main/binary-amd64/by-hash/SHA256/{digest}"
+    body, failure = try_read(read, url)
+    if body is None:
+        return (*found, Check(f"{label}: {PACKAGES} by-hash fully served", False, failure))
+    whole = len(body) == size and hashlib.sha256(body).hexdigest() == digest
+    return (*found, Check(f"{label}: {PACKAGES} by-hash fully served", whole, f"{len(body)} of {size} bytes"))
+
+
+TITLE = re.compile(rb"<title>[^<]*? (\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d) - snapshot\.debian\.org</title>")
+
+
+def check_unlisted_redirect(read: Reader, archive: str, ids: Sequence[str], completed_id: str) -> Check:
+    """An ID between two listed ones serves the earlier: the directory page it ends on says which."""
+    last = max(index for index, value in enumerate(ids) if value <= completed_id)
+    earlier, later = ids[last - 1], ids[last]
+    middle = snapshot_time(earlier) + (snapshot_time(later) - snapshot_time(earlier)) / 2
+    middle_id = middle.strftime(ID_FORMAT)
+    label = f"unlisted {archive}/{middle_id} (between {earlier} and {later}) serves {earlier}"
+    page, failure = try_read(read, f"{BASE}/archive/{archive}/{middle_id}/")
+    if page is None:
+        return Check(label, False, failure)
+    title = TITLE.search(page)
+    if title is None:
+        return Check(label, False, "the page has no snapshot time in its title")
+    year, month, day, hour, minute, second = (int(part) for part in title.groups())
+    final = datetime(year, month, day, hour, minute, second, tzinfo=UTC).strftime(ID_FORMAT)
+    return Check(label, final == earlier, f"page for snapshot {final}")
+
+
+def run(read: Reader = remote.read_url, base: str = BASE) -> Report:
+    archives = list(SUITES)
+    live = listings.fetch_listings(archives, base=base, read=read)  # parse_listing checks ascending
+    hard = [Check(f"{archive} listing strictly ascending", True, f"{len(ids)} IDs") for archive, ids in live.items()]
+    completed_id = snapshots.latest_completed(live)
+    observed: list[Check] = []
+    if completed_id is None:
+        return Report((*hard, Check("a completed ID exists", False, "none")), (), None)
+    hard.append(Check("a completed ID exists", True, completed_id))
+    for archive, suites in SUITES.items():
+        serves = snapshots.served(completed_id, live[archive])
+        assert serves is not None  # latest_completed only answers when every archive serves it
+        for suite in suites:
+            hard.extend(check_completed_inrelease(read, archive, suite, completed_id, serves))
+    hard.append(check_unlisted_redirect(read, "debian", live["debian"], completed_id))
+    for archive, suites in SUITES.items():
+        for suite in suites:
+            observed.extend(observe_newest(read, archive, suite, live[archive][-1]))
+    return Report(tuple(hard), tuple(observed), completed_id)
+
+
+def render(report: Report) -> str:
+    lines = [f"newest completed ID: {report.completed_id}", "", "assumptions (must hold):"]
+    lines += [f"  {'ok  ' if check.ok else 'FAIL'} {check.name} [{check.detail}]" for check in report.hard]
+    lines += ["", "newest listed snapshots, not completed (observed only):"]
+    lines += [f"  {'yes ' if check.ok else 'no  '} {check.name} [{check.detail}]" for check in report.observed]
+    return "\n".join(lines)
+
+
+def main() -> int:
+    report = run()
+    print(render(report))
+    return 0 if all(check.ok for check in report.hard) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
