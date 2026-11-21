@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# The builder image: build it at the lock's snapshot, or list the byte-writing tools inside it.
+#   scripts/builder build [--tag TAG]   builds the image and prints its tag
+#   scripts/builder tools [--tag TAG]   prints [name, version, architecture] of the tools as JSON
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The binary packages whose versions decide the bytes the factory writes: the same list as
+# TOOL_PACKAGES in src/debian_image_factory/tools.py (a unit test keeps them equal).
+tool_packages=(mmdebstrap apt dpkg tar gzip cpio squashfs-tools python3 python3.13 python3.13-minimal
+  libpython3.13-stdlib libpython3.13-minimal zlib1g liblzma5)
+
+usage() {
+  echo "usage: scripts/builder build|tools [--tag TAG]" >&2
+  exit 2
+}
+
+[ $# -ge 1 ] || usage
+command="$1"
+shift
+tag=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tag) [ $# -ge 2 ] || usage; tag="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+snapshot="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["debian_snapshot"])' "$root/lock.json")"
+tag="${tag:-debian-image-factory-builder:$snapshot}"
+
+case "$command" in
+  build)
+    docker build --quiet --build-arg "SNAPSHOT=$snapshot" --tag "$tag" --file "$root/builder/Dockerfile" \
+      "$root/builder" >/dev/null
+    echo "$tag"
+    ;;
+  tools)
+    docker run --rm "$tag" dpkg-query -W -f '${Package}\t${Version}\t${Architecture}\n' "${tool_packages[@]}" |
+      python3 -c '
+import json, sys
+rows = sorted(line.rstrip("\n").split("\t") for line in sys.stdin if line.strip())
+print(json.dumps(rows, indent=2))
+'
+    ;;
+  *) usage ;;
+esac

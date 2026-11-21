@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# The resolver spike (DESIGN 7.2): build core for real with mmdebstrap at a snapshot and write the
+# resulting dpkg status, to compare with the plan's package set.
+#   scripts/spike-core --snapshot ID --out FILE [--tag TAG] [PACKAGE...]
+# FILE is a JSON sorted list of [name, version, architecture]; FILE.log is mmdebstrap's output.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+  echo "usage: scripts/spike-core --snapshot ID --out FILE [--tag TAG] [PACKAGE...]" >&2
+  exit 2
+}
+
+snapshot=""
+out=""
+tag=""
+packages=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --snapshot) [ $# -ge 2 ] || usage; snapshot="$2"; shift 2 ;;
+    --out) [ $# -ge 2 ] || usage; out="$2"; shift 2 ;;
+    --tag) [ $# -ge 2 ] || usage; tag="$2"; shift 2 ;;
+    -*) usage ;;
+    *) packages+=("$1"); shift ;;
+  esac
+done
+{ [ -n "$snapshot" ] && [ -n "$out" ]; } || usage
+
+if [ -z "$tag" ]; then
+  tag="debian-image-factory-builder:$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["debian_snapshot"])' "$root/lock.json")"
+fi
+
+include=""
+if [ "${#packages[@]}" -gt 0 ]; then
+  include="$(IFS=,; echo "${packages[*]}")"
+fi
+
+# The same three suites the builder image uses, at the given snapshot (see builder/Dockerfile).
+# shellcheck disable=SC2016  # the script is for the container's shell: nothing expands here
+inner='
+set -eu
+snapshot="$1"; include="$2"
+printf "%s\n" \
+  "Types: deb" \
+  "URIs: http://snapshot.debian.org/archive/debian/${snapshot}/" \
+  "Suites: trixie trixie-updates" \
+  "Components: main" \
+  "" \
+  "Types: deb" \
+  "URIs: http://snapshot.debian.org/archive/debian-security/${snapshot}/" \
+  "Suites: trixie-security" \
+  "Components: main" > /tmp/spike.sources
+set -- --mode=root --variant=apt --verbose --aptopt="Acquire::Check-Valid-Until \"false\""
+if [ -n "$include" ]; then set -- "$@" --include="$include"; fi
+mmdebstrap "$@" trixie /tmp/rootfs /tmp/spike.sources >&2
+dpkg-query --admindir=/tmp/rootfs/var/lib/dpkg -W -f "\${db:Status-Status}\t\${Package}\t\${Version}\t\${Architecture}\n"
+'
+
+mkdir -p "$(dirname "$out")"
+docker run --rm --privileged "$tag" bash -c "$inner" spike "$snapshot" "$include" 2>"$out.log" |
+  python3 -c '
+import json, sys
+rows = sorted(f[1:] for f in (line.rstrip("\n").split("\t") for line in sys.stdin if line.strip()) if f[0] == "installed")
+print(json.dumps(rows, indent=2))
+' > "$out"
+echo "$out: $(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$out") packages"
