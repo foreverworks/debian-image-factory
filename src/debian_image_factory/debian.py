@@ -120,3 +120,21 @@ def essential(stanzas: list[dict[str, str]], arch: str) -> list[str]:
         if field(stanza, "Architecture") in (arch, "all"):
             names.append(package)
     return names
+
+
+def installed_packages(status_text: str) -> list[tuple[str, str, str]]:
+    """(name, version, architecture) of every package a dpkg status file says is installed, sorted.
+
+    Only paragraphs whose `Status` ends in `installed` (`install ok installed`, `hold ok installed`)
+    count; config-files, half-installed and not-installed entries do not.
+    """
+    found: set[tuple[str, str, str]] = set()
+    for paragraph in parse_deb822(status_text):
+        status = field(paragraph, "Status")
+        if status is None or status.split()[-1:] != ["installed"]:
+            continue
+        name, version, arch = field(paragraph, "Package"), field(paragraph, "Version"), field(paragraph, "Architecture")
+        if not (name and version and arch):
+            raise ValueError(f"a status paragraph lacks Package, Version or Architecture: {paragraph!r}")
+        found.add((name, version, arch))
+    return sorted(found)
