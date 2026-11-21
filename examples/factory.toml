@@ -1,0 +1,57 @@
+# A build definition covering every kind: one core, an OCI base with a Node runtime child, an
+# Incus base, an installer kit and an OS root filesystem. Versions live only in lock.json.
+schema = 1
+
+[debian]
+suite = "trixie"                  # Debian 13
+components = ["main"]
+architectures = ["amd64"]
+source_date_epoch = 1754697600    # 2025-08-09, Debian 13's release; the default for trixie
+
+[params]
+vendor_tools = false              # a feature flag; images that read it carry its value in their identity
+
+[modules.node]
+use = "builtin:node-tarball"      # nodejs.org tarball, checked against the signed SHASUMS256.txt
+prefix = "/usr/local"
+
+[modules.vendor-deb]
+use = "builtin:deb"               # a vendor .deb from the lock, dependencies from the snapshot
+enabled_by = "vendor_tools"       # off: its entries are installed nowhere and leave every identity
+
+[images.core]
+kind = "core"
+packages = ["ca-certificates", "tzdata", "locales"]
+files = "files/core"              # copied over the root filesystem
+
+[images.oci-base]
+kind = "oci"
+parent = "core"
+oci = { user = "0:0", cmd = ["/bin/bash"], env = { LANG = "C.UTF-8" } }
+
+[images.node-26]
+kind = "oci"
+parent = "oci-base"
+oci = { cmd = ["node"] }
+
+[images.incus-base]
+kind = "incus"
+parent = "core"
+packages = ["openssh-server", "sudo", "curl"]
+
+[images.installer]
+kind = "installer"
+parent = "core"
+packages = ["linux-image-amd64", "kexec-tools", "gdisk", "dosfstools", "openssh-server"]
+hooks = ["hooks/installer-trim.sh"]   # runs in the chroot, no network
+
+[images.os]
+kind = "os"
+parent = "core"
+packages = ["linux-image-amd64", "grub-efi-amd64", "openssh-server", "sudo"]
+apt_sources = "baseline-except-security"   # main and updates at the baseline snapshot, security live
+
+[checks]
+# Which checks make a build "good". "builtin" is the kind's own set (DESIGN section 11).
+default = ["builtin"]
+os = ["builtin", "install-on-test-vm"]    # a check the consumer runs and attests itself

@@ -1,0 +1,56 @@
+{
+  "debian_snapshot": "20261121T004329Z",
+  "inputs": {
+    "debian-baseline": {
+      "description": "The baseline snapshot: apt sources written into images that ask for them point here.",
+      "sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
+      "url": "https://snapshot.debian.org/archive/debian/{version}/dists/trixie/InRelease",
+      "version": "20261108T000000Z"
+    },
+    "debian-image-factory": {
+      "datasource": "github-releases",
+      "depName": "foreverworks/debian-image-factory",
+      "description": "The factory release this lock is built with. Placeholder checksum until the first release.",
+      "extractVersion": "^v(?<version>.+)$",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "url": "https://github.com/foreverworks/debian-image-factory/releases/download/v{version}/debian-image-factory-{version}.pyz",
+      "version": "0.1.0"
+    },
+    "example-tool": {
+      "apt": "example-tool",
+      "datasource": "deb",
+      "depName": "example-tool",
+      "description": "A vendor .deb, made up for the example: the vendor and its checksum are placeholders.",
+      "module": "vendor-deb",
+      "registryUrl": "https://packages.example.com/debian?suite=trixie&components=main&binaryArch=amd64",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "url": "https://packages.example.com/debian/pool/main/e/example-tool/example-tool_{version_noepoch}_amd64.deb",
+      "used_by": [
+        "os"
+      ],
+      "version": "2.4.0-1"
+    },
+    "node-26": {
+      "datasource": "node-version",
+      "depName": "node",
+      "module": "node",
+      "sha256": "5c063e46bab0fbc1c17cc445d7ff129cbdcd0471be6ed83b6ab864f8143bc864",
+      "url": "https://nodejs.org/dist/v{version}/node-v{version}-linux-x64.tar.xz",
+      "used_by": [
+        "node-26"
+      ],
+      "version": "26.13.1"
+    },
+    "node-release-keys": {
+      "description": "The Node.js release keyring the node module verifies SHASUMS256.txt with. A trust root: moved by hand, as a reviewed diff, so no Renovate datasource.",
+      "module": "node",
+      "sha256": "140f2ad5260fd62773b6243ce8e1d3009645d558f121b8262c55e383dc285932",
+      "url": "https://raw.githubusercontent.com/nodejs/release-keys/{version}/gpg-only-active-keys/pubring.kbx",
+      "used_by": [
+        "node-26"
+      ],
+      "version": "481637f813e912c4aa3622d7964ab426c97b8e8d"
+    }
+  },
+  "schema": 1
+}

@@ -27,7 +27,7 @@ RUN set -eu; \
     apt-get update; \
     apt-get -y dist-upgrade; \
     apt-get -y install --no-install-recommends \
-      mmdebstrap apt dpkg tar gzip cpio squashfs-tools python3 gnupg util-linux \
+      mmdebstrap apt dpkg tar gzip cpio squashfs-tools python3 gnupg gpgv util-linux \
       debian-archive-keyring ca-certificates; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/apt/* /var/log/dpkg.log

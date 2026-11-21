@@ -27,13 +27,9 @@ class FileFact:
     """Permission bits in octal, `0755`: an executable bit that flips rebuilds."""
     link: str | None = None
     """The target of a symbolic link."""
+    directory: bool = False
     text: str = ""
     """Hook and module script text (empty for file trees), searched for the parameters it reads."""
-
-    def as_json(self) -> dict[str, JsonValue]:  # plain data out; no behaviour beyond the projection
-        if self.link is not None:
-            return {"link": self.link, "mode": self.mode}
-        return {"mode": self.mode, "sha256": self.sha256}
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +48,15 @@ class ImageInputs:
     identity: str
 
 
+def fact_json(fact: FileFact) -> dict[str, JsonValue]:
+    """How a file enters the recipe: content and mode, a link's target, or a directory's mode."""
+    if fact.link is not None:
+        return {"link": fact.link}
+    if fact.directory:
+        return {"directory": True, "mode": fact.mode}
+    return {"mode": fact.mode, "sha256": fact.sha256}
+
+
 def param_env(name: str) -> str:
     """FACTORY_PARAM_<NAME>, the variable a hook reads a parameter from (DESIGN 6.3)."""
     return "FACTORY_PARAM_" + re.sub(r"[^A-Z0-9]", "_", name.upper())
@@ -60,11 +65,15 @@ def param_env(name: str) -> str:
 def script_paths(definition: Definition, image: str, modules: Sequence[str]) -> list[str]:
     """The hooks and module scripts an image runs, in the order they run."""
     own = list(definition.images[image].hooks)
-    scripts = [definition.modules[name].use for name in modules if not definition.modules[name].use.startswith("builtin:")]
+    scripts = [
+        definition.modules[name].use for name in modules if not definition.modules[name].use.startswith("builtin:")
+    ]
     return [*scripts, *own]
 
 
-def referenced(definition: Definition, image: str, modules: Sequence[str], files: Mapping[str, FileFact]) -> dict[str, FileFact]:
+def referenced(
+    definition: Definition, image: str, modules: Sequence[str], files: Mapping[str, FileFact]
+) -> dict[str, FileFact]:
     """The files the image's recipe covers: its hooks, its module scripts, and its file tree."""
     paths = set(script_paths(definition, image, modules))
     tree = definition.images[image].files
@@ -127,7 +136,7 @@ def recipe(
         "kind": {"kind": spec.kind, spec.kind: dict(spec.kind_table)},
         "image": dict(spec.section),
         "modules": {name: dict(definition.modules[name].table) for name in sorted(modules)},
-        "files": {path: fact.as_json() for path, fact in sorted(files.items())},
+        "files": {path: fact_json(fact) for path, fact in sorted(files.items())},
         "params": dict(sorted(params.items())),
         "debian": {
             "suite": debian.suite,
