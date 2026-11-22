@@ -1,6 +1,6 @@
 """The command line (DESIGN 9.1). Exit codes: 0 done, 1 a check or validation failed, 2 usage.
 
-This release has `lock check`, `lock snapshot`, `lock baseline` and `plan`; the build stages
+This release has `lock check`, `lock snapshot`, `lock baseline`, `plan` and `test`; the build stages
 arrive in later releases.
 """
 
@@ -10,7 +10,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, commands, resolve
+from . import __version__, checks, commands, resolve
 
 
 def sources_options(command: argparse.ArgumentParser) -> None:
@@ -79,6 +79,14 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--reason", help="why --rebuild is needed (required with it)")
     plan.add_argument("--previous", type=Path, metavar="PLAN", help="an earlier plan.json, to say what moved")
     plan.add_argument("--out", type=Path, metavar="FILE", help="write plan.json here instead of standard output")
+
+    test = commands_.add_parser("test", help="run the built-in checks on the artifacts in OUT and attest each result")
+    test.add_argument("out", type=Path, metavar="OUT", help="a build's output directory (plan.json and the artifacts)")
+    sources_options(test)
+    test.add_argument(
+        "--check", action="append", default=[], metavar="NAME", help="run only this check (repeat); default: the plan's"
+    )
+    test.add_argument("--url", default="", help="the URL of this run, recorded in each test result")
     return top
 
 
@@ -126,7 +134,9 @@ def dispatch(arguments: argparse.Namespace) -> int:
             except OSError as error:
                 raise commands.Failed(f"{arguments.out}: {error.strerror or error}") from None
         return status
-    raise commands.Usage("a command is needed: lock or plan")
+    if arguments.command == "test":
+        return checks.test_command(arguments.out, arguments.check, sources_of(arguments), sys.stdout, url=arguments.url)
+    raise commands.Usage("a command is needed: lock, plan or test")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
