@@ -31,6 +31,7 @@ from input_lock import Value
 
 from debian_image_factory import modules, ocilayout, published, records
 from debian_image_factory.definition import Module
+from tests.support import builder_images
 
 from .test_core_build import EXAMPLES, ROOT, factory, files, sha256_of
 
@@ -115,9 +116,7 @@ class OciBuildTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.tag = subprocess.run(
-            [str(ROOT / "scripts" / "builder"), "build"], check=True, capture_output=True, text=True
-        ).stdout.split()[-1]
+        cls.tag = builder_images.image()
         (ROOT / "dist").mkdir(exist_ok=True)
         cls.scratch = tempfile.TemporaryDirectory(prefix="integration-oci-", dir=ROOT / "dist")
         cls.work = Path(cls.scratch.name)

@@ -44,6 +44,17 @@ def image_ids() -> set[str]:
     return set(docker("image", "ls", "--all", "--quiet", "--no-trunc").stdout.decode().split())
 
 
+def image_id(layout: Path) -> str:
+    """The ID docker gives the layout's image once loaded: the digest of its config blob. The tests below
+    look for their own image only, so another class loading an image into the same daemon at the same time
+    is not mistaken for a leak."""
+    index = json.loads((layout / "index.json").read_text())
+    manifest = json.loads(
+        (layout / "blobs" / "sha256" / index["manifests"][0]["digest"].removeprefix("sha256:")).read_text()
+    )
+    return str(manifest["config"]["digest"])
+
+
 def cmd(*words: str) -> oci.OciConfig:
     return oci.OciConfig("0:0", None, words)
 
@@ -60,11 +71,12 @@ class OciChecksTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.out = Path(self.tmp.name)
-        self.before = image_ids()
-        self.addCleanup(lambda: self.assertEqual(image_ids(), self.before, "the check left an image behind"))
 
     def built(self, config: oci.OciConfig) -> ocimage.Built:
-        return ocimage.write_oci(self.out, "app", [self.layer], config=config)
+        built = ocimage.write_oci(self.out, "app", [self.layer], config=config)
+        leaked = image_id(built.path)
+        self.addCleanup(lambda: self.assertNotIn(leaked, image_ids(), "the check left its image behind"))
+        return built
 
     def test_a_declared_image_that_exits_0_passes_oci_run_and_is_removed_by_its_id(self) -> None:
         built = self.built(cmd("/bin/sh", "-c", "exit 0"))
@@ -98,7 +110,11 @@ class OciChecksTest(unittest.TestCase):
         with container.loaded(built.path) as image:
             assert isinstance(image, container.Loaded), image
             found = container.oci_run(cmd("/bin/sleep", "60"), image, DOCKER, timeout=3)
-            names = docker("ps", "--all", "--quiet", "--filter", "name=dif-oci-run-").stdout.decode().split()
+            names = (
+                docker("ps", "--all", "--quiet", "--filter", "name=dif-oci-run-", "--filter", f"ancestor={image.image}")
+                .stdout.decode()
+                .split()
+            )
         assert isinstance(found, Result), found
         self.assertEqual(found.failed, ("exits-0: it did not exit within 3 seconds",))
         self.assertEqual(names, [])

@@ -22,7 +22,6 @@ import io
 import json
 import os
 import shutil
-import subprocess
 import tempfile
 import unittest
 import urllib.request
@@ -34,6 +33,7 @@ import input_lock
 from debian_image_factory import cli, debian
 from debian_image_factory.build import initrd
 from debian_image_factory.checks import packages, tarball
+from tests.support import builder_images
 
 from .test_booting_build import artifact_of, tar_file
 from .test_core_build import EXAMPLES, ROOT, factory
@@ -48,11 +48,6 @@ MOVED_BASELINE = "20261115T000000Z"
 
 BOOTING = ("installer", "os")
 OTHERS = ("core", "oci-base", "node-26", "incus-base")
-
-
-def scripts_builder(command: str) -> str:
-    ran = subprocess.run([str(ROOT / "scripts" / "builder"), command], check=True, capture_output=True, text=True)
-    return ran.stdout.split()[-1]
 
 
 def vendor_version() -> str:
@@ -134,7 +129,7 @@ class M5AcceptanceTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        builder, vm_image = scripts_builder("build"), scripts_builder("vm")
+        builder, vm_image = builder_images.image(), builder_images.image("vm")
         # Under dist/, not /tmp: the docker daemon mounts these paths from its own view of the host.
         (ROOT / "dist").mkdir(exist_ok=True)
         # DIF_KEEP=1 keeps the artifacts, the plans and any boot's serial log for a look after a failure.

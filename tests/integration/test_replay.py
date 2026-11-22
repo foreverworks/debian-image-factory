@@ -27,6 +27,7 @@ from pathlib import Path
 from unittest import mock
 
 from debian_image_factory import bundle, published, resolve
+from tests.support import builder_images
 
 from .test_core_build import EXAMPLES, ROOT, factory, sha256_of
 from .test_oci_build import manifest_digest
@@ -84,9 +85,7 @@ class ReplayTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.tag = subprocess.run(
-            [str(ROOT / "scripts" / "builder"), "build"], check=True, capture_output=True, text=True
-        ).stdout.split()[-1]
+        cls.tag = builder_images.image()
         (ROOT / "dist").mkdir(exist_ok=True)
         cls.scratch = tempfile.TemporaryDirectory(prefix="integration-replay-", dir=ROOT / "dist")
         cls.work = Path(cls.scratch.name).resolve()

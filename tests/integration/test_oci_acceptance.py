@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from debian_image_factory import cli, oci, ocilayout, published, records, registry, targets
+from tests.support import builder_images
 
 from .test_core_build import EXAMPLES, ROOT, factory, files, sha256_of
 from .test_oci_build import layout_of
@@ -62,9 +63,7 @@ class OciAcceptanceTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        tag = subprocess.run(
-            [str(ROOT / "scripts" / "builder"), "build"], check=True, capture_output=True, text=True
-        ).stdout.split()[-1]
+        tag = builder_images.image()
         (ROOT / "dist").mkdir(exist_ok=True)
         cls.scratch = tempfile.TemporaryDirectory(prefix="integration-acceptance-", dir=ROOT / "dist")
         cls.work = Path(cls.scratch.name)

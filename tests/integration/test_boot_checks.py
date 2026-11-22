@@ -9,7 +9,6 @@ two boots at once. Builds the builder and boot images (`scripts/builder build`, 
 import io
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -22,7 +21,7 @@ from debian_image_factory.checks import command, kit, packages, tarball, vmrun
 from debian_image_factory.checks.model import TWO_CLONES
 from debian_image_factory.commands import Sources
 from debian_image_factory.planfile import read_plan
-from tests.support import bootimages
+from tests.support import bootimages, builder_images
 from tests.support.ocimage import entry, plan_json
 from tests.support.rootfs import sbom_line
 
@@ -30,11 +29,6 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 STATIC = ("no-build-snapshot", "no-machine-identity", "package-set", "sbom-complete")
 PLAN_SNAPSHOT = "20261101T000000Z"
 """A build snapshot the fixture was not built at: `no-build-snapshot` must find it nowhere."""
-
-
-def scripts_builder(command_: str) -> str:
-    ran = subprocess.run([str(ROOT / "scripts" / "builder"), command_], check=True, capture_output=True, text=True)
-    return ran.stdout.split()[-1]
 
 
 def installed_in_root(path: Path) -> list[tuple[str, str, str]]:
@@ -52,8 +46,8 @@ class BootChecksTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        builder = scripts_builder("build")
-        cls.vm_image = scripts_builder("vm")
+        builder = builder_images.image()
+        cls.vm_image = builder_images.image("vm")
         # Under dist/, not /tmp: the docker daemon mounts these paths from its own view of the host, where
         # a private /tmp (systemd PrivateTmp, a sandbox) does not exist.
         (ROOT / "dist").mkdir(exist_ok=True)

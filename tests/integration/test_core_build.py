@@ -14,13 +14,15 @@ import io
 import json
 import os
 import shutil
-import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from debian_image_factory import ENGINE, cli, published, records
 from debian_image_factory.checks import tarball
+from tests.support import builder_images
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLES = ROOT / "examples"
@@ -47,8 +49,11 @@ CORE_CHECKS = (
 def factory(*argv: str) -> str:
     """Run the command line in this process and return what it printed; fail the test on a non-zero exit."""
     printed, errors = io.StringIO(), io.StringIO()
+    started = time.monotonic()
     with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(errors):
         status = cli.main(list(argv))
+    # progress for the job's log: a fixture runs many of these and the log says where its time went
+    print(f"  [{time.monotonic() - started:6.1f} s] debian-image-factory {argv[0]}", file=sys.stderr, flush=True)
     if status != 0:
         raise AssertionError(f"debian-image-factory {' '.join(argv)} exited {status}:\n{errors.getvalue()}")
     return printed.getvalue()
@@ -78,9 +83,7 @@ class CoreBuildTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        tag = subprocess.run(
-            [str(ROOT / "scripts" / "builder"), "build"], check=True, capture_output=True, text=True
-        ).stdout.split()[-1]
+        tag = builder_images.image()
         # Under dist/, not /tmp: the docker daemon mounts the build directory from its own view of the
         # host, where a private /tmp (systemd PrivateTmp, a sandbox) does not exist.
         (ROOT / "dist").mkdir(exist_ok=True)

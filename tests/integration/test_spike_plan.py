@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 
 from debian_image_factory import cli
+from tests.support import builder_images
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLES = ROOT / "examples"
@@ -37,7 +38,7 @@ class SpikeTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.tag = run(str(ROOT / "scripts" / "builder"), "build").splitlines()[-1]
+        cls.tag = builder_images.image()
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "plan.json"
             status = cli.main(

@@ -18,13 +18,13 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
 from debian_image_factory import fileartifacts, incus, published, squashfs
+from tests.support import builder_images
 
 from .test_core_build import EXAMPLES, ROOT, factory
 
@@ -83,9 +83,7 @@ class IncusBuildTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        tag = subprocess.run(
-            [str(ROOT / "scripts" / "builder"), "build"], check=True, capture_output=True, text=True
-        ).stdout.split()[-1]
+        tag = builder_images.image()
         (ROOT / "dist").mkdir(exist_ok=True)
         cls.scratch = tempfile.TemporaryDirectory(prefix="integration-incus-", dir=ROOT / "dist")
         cls.work = Path(cls.scratch.name)
