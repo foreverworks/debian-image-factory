@@ -1,0 +1,63 @@
+# The integration tier (real image builds and VM boots, DESIGN 12), as a matrix of shards. A release runs it
+# (release.yml calls this workflow) and it can be run by hand from the Actions tab, which publishes nothing.
+#
+# `scripts/test integration --shard I/N` runs the I-th of N shards: the tier's test classes are split by the
+# time each took (tests/durations.json) so the shards take about the same, and each shard runs its classes
+# in parallel on the runner's CPUs. The wall clock of the tier is its longest shard. Add a shard to the list
+# when the slowest one grows past about ten minutes, and refresh the timings with `scripts/test integration
+# --measure` after a change that moves time between classes.
+#
+# Where it runs: on GitHub's hosted ubuntu-26.04 runners, which are free for a public repository and have
+# /dev/kvm. Without KVM the boot tests fall back to TCG, slower but the same.
+name: integration
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: integration tier, shard ${{ matrix.shard }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
+    env:
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - name: System packages a bare runner lacks (git, gpgv and more)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils debian-archive-keyring
+          test -s /usr/share/keyrings/debian-archive-keyring.pgp || { echo "no Debian archive keyring at /usr/share/keyrings/debian-archive-keyring.pgp" >&2; exit 1; }
+
+      # A world-writable socket is safe here: the runner is a fresh VM that runs this one job and is thrown away
+      # after it, so no other user or job can reach the socket.
+      - name: Docker, installed when the runner has none
+        run: |
+          command -v docker >/dev/null || sudo apt-get install -y -q --no-install-recommends docker.io
+          docker info >/dev/null 2>&1 || sudo systemctl start docker >/dev/null 2>&1 || true
+          docker info >/dev/null 2>&1 || sudo chmod 666 /var/run/docker.sock
+
+      # The same holds for /dev/kvm: a single-job VM, nobody else on it.
+      - name: KVM for the runner's user, when the machine has it
+        run: |
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; else echo "no /dev/kvm: the boots run under TCG"; fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: "3.15"
+          activate-environment: true
+
+      - name: Integration tests (docker and the network), this shard
+        run: scripts/test integration --shard "$SHARD"

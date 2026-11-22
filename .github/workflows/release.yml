@@ -1,6 +1,7 @@
 # A tag vX.Y.Z on a commit of main publishes debian-image-factory-X.Y.Z.pyz, its .sha256 and its Sigstore
 # bundle as a GitHub release, and the builder image to ghcr.io signed with a keyless signature, once the
-# full matrix, the integration tier and the Incus boot contract (incus.yml) passed. The .pyz is reproducible: scripts/build-pyz.
+# full matrix, the integration tier (integration.yml, a matrix of shards run side by side) and the Incus boot
+# contract (incus.yml) passed. The .pyz is reproducible: scripts/build-pyz.
 # Runs on GitHub's hosted runners; see ci.yml. A tag runs every check first, and publishes only when they
 # all pass.
 name: release
@@ -47,43 +48,9 @@ jobs:
       - name: Unit tests
         run: scripts/test unit
 
+  # the integration tier: a matrix of shards, each parallel inside its runner; the publish job needs every one
   integration:
-    name: integration tier
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    # the tier boots images in QEMU (installer, OS): a runner with KVM, as boot.yml uses
-    runs-on: ubuntu-26.04
-    timeout-minutes: 120
-    steps:
-      - name: System packages a bare runner lacks (git, gpgv and more)
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils debian-archive-keyring
-          test -s /usr/share/keyrings/debian-archive-keyring.pgp || { echo "no Debian archive keyring at /usr/share/keyrings/debian-archive-keyring.pgp" >&2; exit 1; }
-
-      # A world-writable socket is safe here: the runner is a fresh VM that runs this one job and is thrown away
-      # after it, so no other user or job can reach the socket.
-      - name: Docker, installed when the runner has none
-        run: |
-          command -v docker >/dev/null || sudo apt-get install -y -q --no-install-recommends docker.io
-          docker info >/dev/null 2>&1 || sudo systemctl start docker >/dev/null 2>&1 || true
-          docker info >/dev/null 2>&1 || sudo chmod 666 /var/run/docker.sock
-
-      # The same holds for /dev/kvm: a single-job VM, nobody else on it.
-      - name: KVM for the runner's user, when the machine has it
-        run: |
-          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; else echo "no /dev/kvm: the boots run under TCG"; fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
-        with:
-          python-version: "3.15"
-          activate-environment: true
-
-      - name: Integration tests (docker and the network)
-        run: scripts/test integration
+    uses: ./.github/workflows/integration.yml
 
   # the Incus kind's boot contract on an Incus host in a VM, beside the integration tier
   incus:
