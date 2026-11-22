@@ -171,6 +171,15 @@ def records_name_for(digest: str) -> str:
     return f"{digest}.intoto.jsonl"
 
 
+_RECORDS_NAME: Final = re.compile(r"(?P<digest>[0-9a-f]{64})\.intoto\.jsonl")
+
+
+def records_digest(name: str) -> str | None:
+    """The digest (full hex) a records file name carries, or None when the name is not `<digest>.intoto.jsonl`."""
+    found = _RECORDS_NAME.fullmatch(name)
+    return found["digest"] if found else None
+
+
 # ---- targets ------------------------------------------------------------------------------------
 
 
@@ -383,6 +392,11 @@ def parse_envelopes(text: str) -> list[Record]:
         except RecordsError as error:
             raise RecordsError(f"line {number}: {error}") from None
     return found
+
+
+def statements_cover(statements: Sequence[Record], digests: Sequence[str]) -> bool:
+    """Whether one statement lists every one of `digests` among its subjects' sha256."""
+    return any(set(digests) <= {subject.sha256 for subject in one.subjects} for one in statements)
 
 
 def artifact_from_records(name: str, digest: str, image: str, identity: str, records: str) -> Artifact | Rejected:

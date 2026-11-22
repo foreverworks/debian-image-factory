@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Final
 
 from debian_image_factory import cli, commands, oci, ocilayout, publish, published, registry, targets
-from debian_image_factory.published import OciTarget
+from debian_image_factory.published import OciTarget, ReleaseTarget
 from tests.support import fake_registry
 from tests.support.fake_registry import Fake
 from tests.support.oci_fixtures import IDENTITY, make_core_file, make_image, result_line, tiny_layer
@@ -210,7 +210,9 @@ class TargetsTest(unittest.TestCase):
                 self.root / "out", [f"oci://{name}/team/app", f"dir://{self.root / 'dir'}"], "none", said
             )
             lines = said.getvalue().splitlines()
-            self.assertIn(f"{name}/team/app: {core.name} not published here, files publish to dir://", lines)
+            self.assertIn(
+                f"{name}/team/app: {core.name} not published here, files publish to dir:// or github-release://", lines
+            )
             self.assertTrue(any("not published here, OCI images publish to oci:// targets" in line for line in lines))
             self.assertTrue((self.root / "dir" / core.name).is_file())
             self.assertEqual(len([p for p in (self.root / "dir").iterdir() if p.suffix == ".oci"]), 0)
@@ -228,11 +230,6 @@ class TargetsTest(unittest.TestCase):
         with self.assertRaisesRegex(commands.Failed, "holds files only .*oci:// targets take OCI images"):
             publish.publish_command(self.root / "out", ["oci://127.0.0.1:9/team/app"], "none", io.StringIO())
 
-    def test_a_release_target_is_still_a_later_release(self) -> None:
-        make_image(self.root / "out")
-        with self.assertRaisesRegex(commands.Usage, "github-release:// targets arrive in a later release"):
-            publish.publish_command(self.root / "out", ["github-release://example/images@v1"], "none", io.StringIO())
-
     def test_every_target_is_checked_before_anything_is_written(self) -> None:
         make_core_file(self.root / "out")
         with self.assertRaises(commands.Failed):
@@ -241,13 +238,16 @@ class TargetsTest(unittest.TestCase):
             )
         self.assertFalse((self.root / "dir").exists())
 
-    def test_plan_reads_oci_targets_and_still_refuses_releases(self) -> None:
+    def test_plan_reads_oci_and_release_targets(self) -> None:
         self.assertEqual(
             commands.parse_targets(["oci://127.0.0.1:5000/team/app"]), [OciTarget("127.0.0.1:5000", "team/app")]
         )
         self.assertEqual(commands.parse_targets(["oci://[::1]:5000/team/app"]), [OciTarget("[::1]:5000", "team/app")])
-        with self.assertRaisesRegex(commands.Usage, "github-release targets arrive in a later release"):
-            commands.parse_targets(["github-release://example/images@v1"])
+        self.assertEqual(
+            commands.parse_targets(["github-release://example/images@v1"]), [ReleaseTarget("example", "images", "v1")]
+        )
+        with self.assertRaises(commands.Usage):
+            commands.parse_targets(["github-release://example/images"])
 
 
 class RefusalsTest(unittest.TestCase):

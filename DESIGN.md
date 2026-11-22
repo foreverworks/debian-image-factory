@@ -654,8 +654,8 @@ A child whose parent waits waits too, unless the child itself is reusable. Sever
 check count in file order, the last one wins; when several artifacts qualify, the newest
 `finishedOn` wins, ties by the smallest digest. The provenance names the image in
 `externalParameters.image` and the identity in `internalParameters.identity` (8.2), and a records
-file counts only when a statement's subject is the file's real sha256. `dir://` and `oci://`
-lookups are live; `github-release://` arrives with its publisher.
+file counts only when a statement's subject is the file's real sha256. `dir://`, `oci://` and
+`github-release://` lookups are live.
 
 ### 7.5 Choosing the build snapshot ID
 
@@ -1016,7 +1016,9 @@ where the archive keyring and the download cache are. M1 shipped `lock check`, `
 `lock baseline` and `plan`; M2 adds `fetch`, `build` for core, `test` with the core checks and
 `publish` to `dir://` targets; M3 adds `build` for the OCI kind with `--parents`, `plan --against
 oci://`, the OCI checks and `locked-inputs` (`test --definition` gives it the module tables),
-`publish` to `oci://` targets and `verify`. Each later command arrives with its milestone, `fetch
+`publish` to `oci://` targets and `verify`; M4 adds `publish` and `plan --against` for
+`github-release://` targets (the API is `GITHUB_API_URL`, the token `GITHUB_TOKEN` or else `GH_TOKEN`).
+Each later command arrives with its milestone, `fetch
 --bundle` with M6, and `lock checksums` with M5 (it is input-lock's `refresh` run against the
 definition).
 

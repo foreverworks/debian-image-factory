@@ -18,11 +18,12 @@ from input_lock import JsonValue
 from input_lock.records import TestOutcome
 
 from debian_image_factory import cli, commands, definition, publish
-from tests.support import fake_registry, fixture_archive
+from tests.support import fake_github, fake_registry, fixture_archive
 from tests.support.definitions import jsonable
+from tests.support.fake_github import Fake as GithubFake
 from tests.support.fake_registry import Fake
 from tests.support.fixture_archive import FIRST_ID, LATER_ID, SECOND_ID, Fixture
-from tests.support.oci_fixtures import make_image
+from tests.support.oci_fixtures import make_core_file, make_image
 
 FACTORY = """\
 schema = 1
@@ -343,6 +344,33 @@ class PlanTest(CliCase):
         self.assertEqual(run.plan()["core"]["artifact"], built.digest)
         self.assertEqual(run.plan()["app-a"]["state"], "build")
 
+    def test_against_a_tag_without_a_release_builds_too(self) -> None:
+        with fake_github.running(GithubFake()) as api, fake_github.environment(api):
+            run = self.run_plan("--snapshot", FIRST_ID, "--against", "github-release://example/images@v1")
+        self.assertEqual(run.code, 0)
+        self.assertEqual({entry["state"] for entry in run.plan().values()}, {"build"})
+
+    def test_against_a_release_that_holds_core_reuses_it(self) -> None:
+        identity = str(self.run_plan("--snapshot", FIRST_ID).plan()["core"]["identity"])
+        checks: list[tuple[str, TestOutcome]] = [(check, "PASSED") for check in definition.BUILTIN_CHECKS["core"]]
+        out = Path(tempfile.mkdtemp(dir=self.tmp))
+        built = make_core_file(out, identity=identity, checks=checks)
+        with fake_github.running(GithubFake()) as api, fake_github.environment(api):
+            publish.publish_command(out, ["github-release://example/images@v1"], "none", io.StringIO())
+            run = self.run_plan("--snapshot", FIRST_ID, "--against", "github-release://example/images@v1")
+        self.assertEqual(run.code, 0)
+        self.assertEqual(run.plan()["core"]["state"], "reuse")
+        self.assertEqual(run.plan()["core"]["artifact"], built.digest)
+        self.assertEqual(run.plan()["app-a"]["state"], "build")
+
+    def test_a_release_that_cannot_be_read_is_exit_1_naming_it(self) -> None:
+        down = GithubFake(fail_once=["GET /repos"] * 8)
+        with fake_github.running(down) as api, fake_github.environment(api):
+            run = self.run_plan("--snapshot", FIRST_ID, "--against", "github-release://example/images@v1")
+        self.assertEqual(run.code, 1)
+        self.assertIn("cannot read target", run.err)
+        self.assertIn("HTTP 503", run.err)
+
     def test_rebuild_with_a_reason_is_recorded(self) -> None:
         run = self.run_plan("--snapshot", FIRST_ID, "--rebuild", "app-b", "--reason", "key rotation")
         self.assertEqual(run.plan()["app-b"]["because"], [{"rebuild": "key rotation"}])
@@ -486,14 +514,9 @@ class ExitCodeTest(CliCase):
         self.assertEqual(run.code, 2)
         self.assertIn("unknown target scheme", run.err)
 
-    def test_a_target_not_read_yet_is_exit_2(self) -> None:
-        run = self.plan(self.workspace(), "--snapshot", FIRST_ID, "--against", "github-release://someone/repo@v1")
-        self.assertEqual(run.code, 2)
-        self.assertIn("arrive in a later release", run.err)
-
-    def test_a_target_not_read_yet_is_refused_before_anything_is_resolved(self) -> None:
+    def test_a_target_that_is_not_one_is_refused_before_anything_is_resolved(self) -> None:
         root = self.workspace()
-        for target in ("github-release://someone/repo@v1",):
+        for target in ("github-release://someone/repo", "github-release://someone@v1", "nonsense"):
             with self.subTest(target=target):
                 run = self.raw(
                     "plan", "--lock", str(root / "lock.json"), "--definition", str(root / "factory.toml"),
@@ -502,8 +525,7 @@ class ExitCodeTest(CliCase):
                 )  # fmt: skip
                 self.assertEqual(run.code, 2)  # not 1: the unreachable service was never asked
                 self.assertIn(
-                    "github-release targets arrive in a later release; this release reads dir:// and oci:// targets",
-                    run.err,
+                    "not a target" if target == "nonsense" else "github-release://<owner>/<repo>@<tag>", run.err
                 )
 
     def test_a_lock_that_is_not_utf8_is_exit_1_naming_the_file(self) -> None:

@@ -16,7 +16,6 @@ from input_lock.records import (
 
 from debian_image_factory.published import (
     DirTarget,
-    ReleaseTarget,
     artifact_name,
     decide,
     records_name_for,
@@ -195,16 +194,6 @@ class DirLookupTest(unittest.TestCase):
     def test_a_bad_identity_is_refused(self) -> None:
         with self.assertRaises(ValueError):
             lookup(DirTarget(str(self.dir)), "node-26", "trixie", "amd64", "abc")
-
-
-class LaterTargetsTest(unittest.TestCase):
-    def test_release_targets_say_they_come_later(self) -> None:
-        with self.assertRaises(NotImplementedError) as caught:
-            lookup(ReleaseTarget("example", "images", "v1"), "core", "trixie", "amd64", IDENTITY)
-        self.assertEqual(
-            str(caught.exception),
-            "github-release targets arrive in a later release; this release reads dir:// and oci:// targets",
-        )
 
 
 if __name__ == "__main__":

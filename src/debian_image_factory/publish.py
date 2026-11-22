@@ -1,5 +1,5 @@
-"""Publishing built artifacts and their records to targets (DESIGN 7.4, 8.2). This release writes `dir://`
-and `oci://`.
+"""Publishing built artifacts and their records to targets (DESIGN 7.4, 8.2). This release writes `dir://`,
+`oci://` and `github-release://`.
 
 A `dir://` target is a plain directory: each artifact keeps its name, and its records live beside it
 in `<digest>.intoto.jsonl`. Publishing the same artifact again adds only the record lines the target
@@ -12,6 +12,11 @@ An `oci://` target takes OCI image layouts (`<name>.oci/` directories) only. Eac
 the tags it is given, then each record (a line of `<manifest digest>.intoto.jsonl`, byte for byte) as
 a referrer of the manifest. A record the registry already holds, found by the digest of its envelope,
 is skipped, so publishing again adds only what is new.
+
+A `github-release://` target takes files only, as a `dir://` target does, with the release's assets as
+its files: the release is created when the tag has none, a file is uploaded unless an asset of that name
+already holds the same bytes (a different digest fails, naming both, and nothing is overwritten), and the
+records asset `<digest>.intoto.jsonl` is merged as a directory's is.
 """
 
 import hashlib
@@ -19,7 +24,7 @@ import os
 import shutil
 import tempfile
 import urllib.error
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,7 +32,7 @@ from typing import Literal, TextIO
 
 from input_lock.identity import HEX64
 
-from . import commands, fileartifacts, oci, ocilayout, published, registry
+from . import commands, fileartifacts, github, oci, ocilayout, published, registry
 
 
 def sha256_of(path: Path) -> str:
@@ -107,6 +112,92 @@ def publish_dir(out_dir: Path, target: Path, out: TextIO) -> None:
         if merged != present:
             write_atomically(held, merged.encode("utf-8"))
         print(f"{target}: {artifact.name} {state}, {added} record lines added", file=out)
+
+
+# ---- github-release:// -------------------------------------------------------------------------
+
+
+def release_conflicts(
+    client: github.Client,
+    out_dir: Path,
+    artifacts: Sequence[fileartifacts.FileArtifact],
+    held: Mapping[str, github.Asset],
+) -> None:
+    """Fail when a release asset has the name of a file to publish but other bytes. Nothing has been
+    written when this runs, so the release is left as it was."""
+    for artifact in artifacts:
+        for path in artifact.files:
+            asset = held.get(path.name)
+            if asset is None:
+                continue
+            theirs, ours = github.asset_sha256(client, asset), sha256_of(path)
+            if theirs != ours:
+                raise commands.Failed(
+                    f"{client.name}: the asset {path.name} holds sha256 {theirs}, but {out_dir / path.name} "
+                    f"is sha256 {ours}; nothing was overwritten"
+                )
+
+
+def publish_release(out_dir: Path, target: published.ReleaseTarget, out: TextIO) -> None:
+    """Upload every artifact of `out_dir` (each of its files) to the release `target`, create the release
+    when the tag has none, and merge each artifact's records into its records asset.
+
+    Assets are never overwritten: a file whose name is already an asset is skipped when the digest
+    matches, and a different one fails before anything is written. The records asset is read, merged
+    with `merged_lines` and, when that changed it, deleted and uploaded again (an asset cannot be
+    changed in place), so a reader can find it missing for a moment, and two publishers at the same
+    moment can lose a line; publishing again restores it."""
+    try:
+        client = github.connect(target)
+        artifacts = artifacts_in(out_dir)
+        release = github.release_by_tag(client)
+        held = {one["name"]: one for one in github.list_assets(client, release)} if release else {}
+        release_conflicts(client, out_dir, artifacts, held)
+        if release is None:
+            release = github.create_release(client)
+            print(f"{client.name}: release created", file=out)
+        for artifact in artifacts:
+            states: list[str] = []
+            for path in artifact.files:
+                if path.name in held:
+                    states.append("already there")
+                else:
+                    held[path.name] = github.upload_asset(client, release, path.name, path)
+                    states.append("uploaded")
+            state = "already there" if set(states) == {"already there"} else "uploaded"
+            added = merge_records(client, release, held, artifact.digest, out_dir)
+            print(f"{client.name}: {artifact.name} {state}, {added} record lines added", file=out)
+    except github.AlreadyExistsError as error:
+        raise commands.Failed(f"{error}; nothing was overwritten") from None
+    except github.GitHubError as error:
+        raise commands.Failed(str(error)) from None
+    except OSError as error:
+        raise commands.Failed(f"{target}: {describe(error)}") from None
+
+
+def merge_records(
+    client: github.Client, release: github.Release, held: dict[str, github.Asset], digest: str, out_dir: Path
+) -> int:
+    """Merge the records file of `out_dir` for `digest` into the release's records asset; the number of
+    lines added. `held` follows the release's assets."""
+    name = published.records_name_for(digest)
+    new = (out_dir / name).read_text(encoding="utf-8")
+    present = ""
+    if name in held:
+        try:
+            present = github.read_asset(client, held[name]).decode("utf-8")
+        except UnicodeDecodeError:
+            raise commands.Failed(f"{client.name}: the records asset {name} is not UTF-8") from None
+    merged = merged_lines(present, new)
+    if merged == present:
+        return 0
+    if name in held:
+        github.delete_asset(client, held.pop(name))
+    with tempfile.TemporaryDirectory(prefix="debian-image-factory-publish-") as scratch:
+        source = Path(scratch) / name
+        source.write_bytes(merged.encode("utf-8"))
+        held[name] = github.upload_asset(client, release, name, source)
+    return len(merged.splitlines()) - len([line for line in present.splitlines() if line.strip()])
 
 
 # ---- oci:// ------------------------------------------------------------------------------------
@@ -284,6 +375,10 @@ def publish_oci(
         print(f"{client.name}: {path.name} {report.state}, {report.records_added} records added", file=out)
 
 
+def target_scheme(target: published.Target) -> str:
+    return "dir://" if isinstance(target, published.DirTarget) else "github-release://"
+
+
 def publish_command(
     out_dir: Path,
     targets: Sequence[str],
@@ -299,24 +394,21 @@ def publish_command(
         parsed = [published.parse_target(target) for target in targets]
     except ValueError as error:
         raise commands.Usage(str(error)) from None
-    for one in parsed:
-        if isinstance(one, published.ReleaseTarget):
-            raise commands.Usage("github-release:// targets arrive in a later release; use dir:// or oci://")
     if not out_dir.is_dir():
         raise commands.Failed(f"{out_dir}: no such directory (build writes it)")
     files, layouts = artifacts_in(out_dir), layouts_in(out_dir)
     if not files and not layouts:
         raise commands.Failed(f"{out_dir}: no artifacts to publish")
     for one in parsed:  # every target is checked before anything is written
-        if isinstance(one, published.DirTarget) and not files:
+        if isinstance(one, published.DirTarget | published.ReleaseTarget) and not files:
             raise commands.Failed(
                 f"{out_dir}: holds OCI images only ({', '.join(p.name for p in layouts)}); "
-                "they publish to oci:// targets, a dir:// target takes files"
+                f"they publish to oci:// targets, a {target_scheme(one)} target takes files"
             )
         if isinstance(one, published.OciTarget) and not layouts:
             raise commands.Failed(
                 f"{out_dir}: holds files only ({', '.join(artifact.name for artifact in files)}); "
-                "oci:// targets take OCI images, publish these to dir://"
+                "oci:// targets take OCI images, publish these to dir:// or github-release://"
             )
     for one in parsed:
         if isinstance(one, published.DirTarget):
@@ -326,8 +418,17 @@ def publish_command(
         elif isinstance(one, published.OciTarget):
             for artifact in files:
                 print(
-                    f"{one.registry}/{one.repository}: {artifact.name} not published here, files publish to dir://",
+                    f"{one.registry}/{one.repository}: {artifact.name} not published here, "
+                    "files publish to dir:// or github-release://",
                     file=out,
                 )
             publish_oci(out_dir, one, layouts, out, connect)
+        else:
+            for path in layouts:
+                print(
+                    f"github-release://{one.owner}/{one.repo}@{one.tag}: {path.name} not published here, "
+                    "OCI images publish to oci:// targets",
+                    file=out,
+                )
+            publish_release(out_dir, one, out)
     return 0

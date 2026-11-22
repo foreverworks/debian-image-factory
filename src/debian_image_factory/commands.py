@@ -283,17 +283,11 @@ def resolve_all(
 
 
 def parse_targets(against: Sequence[str]) -> list[published.Target]:
-    """The targets, refused before anything is resolved when this release cannot read one."""
+    """The targets, refused before anything is resolved when one is not a target."""
     try:
-        parsed = [published.parse_target(target) for target in against]
+        return [published.parse_target(target) for target in against]
     except ValueError as error:
         raise Usage(str(error)) from None
-    for target in parsed:
-        if isinstance(target, published.ReleaseTarget):
-            raise Usage(
-                "github-release targets arrive in a later release; this release reads dir:// and oci:// targets"
-            )
-    return parsed
 
 
 def lookups(
@@ -307,8 +301,6 @@ def lookups(
         for target in parsed_targets:
             try:
                 found = targets.lookup(target, name, debian.suite, debian.architectures[0], image_inputs.identity)
-            except NotImplementedError as error:
-                raise Usage(str(error)) from None
             except OSError as error:
                 raise Failed(f"cannot read target {target}: {error.strerror or error}") from None
             artifacts.extend(found.artifacts)
