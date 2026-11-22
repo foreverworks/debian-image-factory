@@ -110,6 +110,14 @@ class ScriptTest(unittest.TestCase):
         self.assertNotIn(f"{oci_build.LAYER_PROGRAM} unpack", on_installer)
         self.assertNotIn("--full", on_installer)
 
+    def test_vendor_debs_go_through_the_same_apt_transaction_as_for_an_oci_child(self) -> None:
+        deb = f"{core.WORK}/run/inputs/vendor/vendor_1.0_amd64.deb"
+        text = script(request=(), debs=(deb,))
+        self.assertTrue(shell_is_valid(text))
+        self.assertIn("\n".join(oci_build.install_lines((), (deb,))), text)
+        self.assertIn(f'umount "$root{oci_build.CHILD_MIRROR}"', text, "a .deb alone mounts the mirror for apt")
+        self.assertNotIn("vendor_1.0_amd64.deb", script(request=()))
+
     def test_outputs_are_handed_back_where_the_container_root_is_the_host_root(self) -> None:
         self.assertIn(f"for output in {booting.ROOTFS} {oci_build.STATUS}; do", script(owner="1000:1000"))
         self.assertIn(f"for output in {booting.KIT} {oci_build.STATUS}; do", script(kind="installer", owner="1:1"))
