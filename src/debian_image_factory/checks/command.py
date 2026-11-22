@@ -396,8 +396,8 @@ def run_in_container(
 
 
 def file_parent(found: Found, plan: Plan, others: Sequence[Found]) -> Found | str:
-    """The parent artifact of an Incus image among the run's artifacts (the one the image's provenance names,
-    when the parent image has several), or why it is not available here."""
+    """The parent artifact of an Incus image among the run's artifacts, or why it is not available here
+    (none, or several builds of the parent image, which leave the comparison ambiguous)."""
     parent = plan["images"][found.image]["parent"]
     if parent is None:
         return "the image has no parent"
@@ -457,7 +457,10 @@ def run_incus_checks(
     imported: incus_host.Imported | str = "not needed"
     if hosted:
         problem = incus_host.incus_problem(effects.incus)
-        imported = problem or incus_host.import_image(found.path, rootfs, found.digest, effects.incus)
+        try:
+            imported = problem or incus_host.import_image(found.path, rootfs, found.digest, effects.incus)
+        except (OSError, subprocess.SubprocessError) as error:
+            imported = f"incus image import failed: {error}"
     try:
         for name in names:
             if name == PACKAGE_SET:
