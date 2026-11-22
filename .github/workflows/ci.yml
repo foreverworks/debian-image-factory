@@ -1,7 +1,11 @@
 # Every push and pull request: one job on the newest stable Python, with the static checks run against
 # the oldest supported one (3.13) through mypy's python_version and ruff's target-version. The full
-# matrix runs weekly (weekly.yml) and gates a release (release.yml). Nothing runs while the repository
-# is private.
+# matrix runs weekly (weekly.yml) and gates a release (release.yml).
+#
+# Where jobs run: while the repository is private, on the project's own self-hosted runners, picked by the
+# capability label debian-image-factory (debian-image-factory-kvm is the one for jobs that boot a VM); once
+# it is public, on GitHub's hosted ubuntu-26.04. A pull request from a fork never reaches the self-hosted
+# runners: every job skips it. The self-hosted runners start bare, so each job installs what it needs.
 name: ci
 
 on:
@@ -18,10 +22,15 @@ concurrency:
 jobs:
   check:
     name: static checks (3.13 floor) and unit tests on Python 3.15
-    if: ${{ !github.event.repository.private }}
-    runs-on: ubuntu-26.04
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ github.event.repository.private && 'debian-image-factory' || 'ubuntu-26.04' }}
     timeout-minutes: 15
     steps:
+      - name: System packages a bare runner lacks (git, gpgv, shellcheck and more)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils shellcheck
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -29,9 +38,6 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.15"
-
-      - name: apt and gpgv, which planning and the archive tests use
-        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg
 
       - name: Development tools, pinned with hashes
         run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-dev.txt

@@ -1,6 +1,8 @@
 # A tag vX.Y.Z on a commit of main publishes debian-image-factory-X.Y.Z.pyz, its .sha256 and its Sigstore
 # bundle as a GitHub release, and the builder image to ghcr.io signed with a keyless signature, once the
 # full matrix and the integration tier passed. The .pyz is reproducible: scripts/build-pyz.
+# Runs on the project's self-hosted runners (label debian-image-factory) while the repository is private,
+# on GitHub's hosted ones once it is public; see ci.yml.
 name: release
 
 on:
@@ -13,14 +15,19 @@ permissions:
 jobs:
   matrix:
     name: Python ${{ matrix.python }}
-    if: ${{ !github.event.repository.private }}
-    runs-on: ubuntu-26.04
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ github.event.repository.private && 'debian-image-factory' || 'ubuntu-26.04' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         python: ["3.13", "3.14", "3.15"]
     steps:
+      - name: System packages a bare runner lacks (git, gpgv, shellcheck and more)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils shellcheck
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -28,9 +35,6 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
-
-      - name: apt and gpgv, which planning and the archive tests use
-        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg
 
       - name: Development tools, pinned with hashes
         run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-dev.txt
@@ -43,10 +47,21 @@ jobs:
 
   integration:
     name: integration tier
-    if: ${{ !github.event.repository.private }}
-    runs-on: ubuntu-26.04
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ github.event.repository.private && 'debian-image-factory' || 'ubuntu-26.04' }}
     timeout-minutes: 60
     steps:
+      - name: System packages a bare runner lacks (git, gpgv and more)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils
+
+      - name: Docker, installed when the runner has none
+        run: |
+          command -v docker >/dev/null || sudo apt-get install -y -q --no-install-recommends docker.io
+          docker info >/dev/null 2>&1 || sudo systemctl start docker >/dev/null 2>&1 || true
+          docker info >/dev/null 2>&1 || sudo chmod 666 /var/run/docker.sock
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -55,17 +70,14 @@ jobs:
         with:
           python-version: "3.15"
 
-      - name: apt and gpgv, which planning and the archive tests use
-        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg
-
       - name: Integration tests (docker and the network)
         run: scripts/test integration
 
   publish:
     name: publish the release
     needs: [matrix, integration]
-    if: ${{ !github.event.repository.private }}
-    runs-on: ubuntu-26.04
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ github.event.repository.private && 'debian-image-factory' || 'ubuntu-26.04' }}
     timeout-minutes: 30
     permissions:
       contents: write # the GitHub release
@@ -74,6 +86,18 @@ jobs:
     env:
       REPOSITORY: ${{ github.repository }}
     steps:
+      - name: System packages a bare runner lacks (git and the GitHub CLI)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends git ca-certificates curl
+          command -v gh >/dev/null || sudo apt-get install -y -q --no-install-recommends gh
+
+      - name: Docker, installed when the runner has none
+        run: |
+          command -v docker >/dev/null || sudo apt-get install -y -q --no-install-recommends docker.io
+          docker info >/dev/null 2>&1 || sudo systemctl start docker >/dev/null 2>&1 || true
+          docker info >/dev/null 2>&1 || sudo chmod 666 /var/run/docker.sock
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # the whole history, to tell whether the tagged commit is on main

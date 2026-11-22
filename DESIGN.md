@@ -1100,9 +1100,12 @@ identities of the images that install it, and nothing else.
 - QEMU with KVM: `installer-boot`, `os-boot`, `two-clones` for the installer and OS, and
   `incus-boot` in a Debian 13 VM with Incus from the same snapshot (6.0.4 in Debian 13).
 
-**Where it runs.** This repository will be public, so its CI runs only on GitHub's hosted runners:
-free for public repositories, and a pull request from a fork never reaches anyone's own machines.
-Consumers run their own checks in their own CI.
+**Where it runs.** While the repository is private, its jobs run on the project's own self-hosted
+runners, picked by capability label (`debian-image-factory`, and `debian-image-factory-kvm` for jobs
+that boot a VM); they start bare, so each job installs what it needs. Once it is public, the same
+jobs run on GitHub's hosted runners, free for public repositories. Either way a pull request from a
+fork skips every job, so it never reaches anyone's own machines. Consumers run their own checks in
+their own CI.
 
 ## 13. Code: language and style
 
