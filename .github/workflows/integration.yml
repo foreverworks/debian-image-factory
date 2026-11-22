@@ -4,7 +4,7 @@
 # `scripts/test integration --shard I/N` runs the I-th of N shards: the tier's test classes are split by the
 # time each took (tests/durations.json) so the shards take about the same, and each shard runs its classes
 # in parallel on the runner's CPUs. The wall clock of the tier is its longest shard. Add a shard to the list
-# when the slowest one grows past about ten minutes, and refresh the timings with `scripts/test integration
+# when the slowest one grows past about eight minutes, and refresh the timings with `scripts/test integration
 # --measure` after a change that moves time between classes.
 #
 # Where it runs: on GitHub's hosted ubuntu-26.04 runners, which are free for a public repository and have
@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/4", "2/4", "3/4", "4/4"]
+        shard: ["1/6", "2/6", "3/6", "4/6", "5/6", "6/6"]
     env:
       SHARD: ${{ matrix.shard }}
     steps:
