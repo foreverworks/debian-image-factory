@@ -16,6 +16,7 @@ from . import ENGINE, __version__
 from .definition import KIND_DEFAULTS, MODULE_PACKAGES, Definition, Param, required_checks, top_down
 from .identity import ImageInputs
 from .published import Decision
+from .vendordeb import MODULE as VENDOR_DEB
 
 SCHEMA: Final = 1
 
@@ -105,6 +106,24 @@ def trust_of(entry: Entry) -> dict[str, JsonValue]:
     return found
 
 
+def debs_of(definition: Definition, inputs: ImageInputs) -> dict[str, JsonValue]:
+    """The vendor .deb entries the image installs (its `builtin:deb` module's apt entries), with what `fetch`
+    needs to verify each through its repository's signed InRelease again and the build to install it: the
+    package, its version and the repository (`registryUrl`, a Renovate hint kept out of `build_fields`). The
+    package is in the image's `packages` and not in its `request`: the build installs the verified file."""
+    found: dict[str, JsonValue] = {}
+    for name, entry in sorted(inputs.entries.items()):
+        module = entry.get("module")
+        if not (isinstance(module, str) and definition.modules[module].use == VENDOR_DEB and "apt" in entry):
+            continue
+        found[name] = {
+            "package": str(entry["apt"]),
+            "version": str(entry.get("version")),
+            "registry_url": str(entry.get("registryUrl")),
+        }
+    return found
+
+
 def image_entry(definition: Definition, inputs: ImageInputs) -> dict[str, JsonValue]:
     spec = definition.images[inputs.name]
     requested: list[JsonValue] = [
@@ -122,6 +141,7 @@ def image_entry(definition: Definition, inputs: ImageInputs) -> dict[str, JsonVa
         "inputs": {name: as_json(input_lock.build_fields(entry)) for name, entry in sorted(inputs.entries.items())},
         "modules": [*inputs.modules],
         "trust": {name: trust_of(entry) for name, entry in sorted(inputs.entries.items()) if "signed_by" in entry},
+        "debs": debs_of(definition, inputs),
         "params": dict(inputs.params),
         "checks": [*required_checks(definition, inputs.name, bool(inputs.entries))],
     }

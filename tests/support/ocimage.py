@@ -84,6 +84,7 @@ def entry(
         "packages": [list(package) for package in packages],
         "inputs": {},
         "trust": {},
+        "debs": {},
         "modules": [],
         "params": {},
         "checks": list(checks),

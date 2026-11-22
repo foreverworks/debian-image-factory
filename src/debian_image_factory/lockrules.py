@@ -12,6 +12,10 @@ only what needs the definition:
 - an image that uses a `builtin:node-tarball` module has exactly one release tarball entry (told by its
   rendered url) among the module's entries, and that entry has `signed_by` and `sums_url`
   (`nodejs.tarball_problems`);
+- every entry of a `builtin:deb` module but a keyring (an entry some `signed_by` names) has `apt`,
+  `registryUrl` and `signed_by` (`vendordeb.entry_problems`): every vendor .deb is signature-checked;
+- an image that uses a `builtin:file` module has exactly one of its entries to place, keyrings aside, and an
+  unpacked one is a tarball (`filemodule.placed_problems`);
 - `debian_snapshot` is present;
 - the baseline snapshot, when an image's `apt_sources` points at it, is the reserved entry
   `debian-baseline`: its `version` is the snapshot ID and it pins the debian archive's `InRelease`
@@ -27,7 +31,7 @@ import input_lock
 from input_lock import SNAPSHOT_ID, Entry, JsonValue, Lock
 from input_lock import entry_problems as entry_format_problems
 
-from . import nodejs
+from . import filemodule, nodejs, vendordeb
 from .definition import Definition, Param
 
 FACTORY_ENTRY: Final = "debian-image-factory"
@@ -98,33 +102,89 @@ def signer_problems(inputs: Mapping[str, Entry]) -> list[str]:
     return found
 
 
+def keyrings(inputs: Mapping[str, Entry]) -> set[str]:
+    """The entries some `signed_by` names: trust roots, which a module never installs."""
+    return {signer for entry in inputs.values() if isinstance(signer := entry.get("signed_by"), str)}
+
+
+def module_entries(inputs: Mapping[str, Entry], module: str, image: str) -> dict[str, str]:
+    """The entries of `module` that `image` uses, keyrings and reserved entries aside: entry name to rendered url
+    (an entry whose url does not render is left to input-lock, which names the placeholder it lacks)."""
+    roots = keyrings(inputs)
+    found: dict[str, str] = {}
+    for name, entry in sorted(inputs.items()):
+        if name in RESERVED or name in roots or module_of(entry) != module:
+            continue
+        if image not in (input_lock.used_by(entry) or []):
+            continue
+        try:
+            found[name] = input_lock.render_url(entry)
+        except ValueError:
+            continue
+    return found
+
+
+def node_problems(module_name: str, inputs: Mapping[str, Entry], definition: Definition) -> list[str]:
+    """For `builtin:node-tarball`: one signed release tarball per image."""
+    found: list[str] = []
+    for image in sorted(definition.images):
+        urls: dict[str, str] = {}
+        signed: dict[str, bool] = {}
+        for name, entry in sorted(inputs.items()):
+            if name in RESERVED or module_of(entry) != module_name or image not in (input_lock.used_by(entry) or []):
+                continue
+            try:
+                urls[name] = input_lock.render_url(entry)
+            except ValueError:
+                continue  # input-lock names the placeholder it lacks
+            signed[name] = "signed_by" in entry and "sums_url" in entry
+        if urls:
+            found.extend(
+                f"images.{image}: module {module_name} ({nodejs.MODULE}): {problem}"
+                for problem in nodejs.tarball_problems(urls, signed)
+            )
+    return found
+
+
+def deb_problems(module_name: str, inputs: Mapping[str, Entry]) -> list[str]:
+    """For `builtin:deb`: every entry but a keyring is a signed apt entry."""
+    roots = keyrings(inputs)
+    found: list[str] = []
+    for name, entry in sorted(inputs.items()):
+        if name not in RESERVED and name not in roots and module_of(entry) == module_name:
+            found.extend(vendordeb.entry_problems(name, entry))
+    return found
+
+
+def file_problems(module_name: str, inputs: Mapping[str, Entry], definition: Definition) -> list[str]:
+    """For `builtin:file`: each image that has entries of the module places exactly one of them."""
+    unpack = filemodule.unpacks(definition.modules[module_name].table)
+    found: list[str] = []
+    for image in sorted(definition.images):
+        uses = any(
+            module_of(entry) == module_name and image in (input_lock.used_by(entry) or [])
+            for name, entry in inputs.items()
+            if name not in RESERVED
+        )
+        if uses:
+            found.extend(
+                f"images.{image}: module {module_name} ({filemodule.MODULE}): {problem}"
+                for problem in filemodule.placed_problems(module_entries(inputs, module_name, image), unpack)
+            )
+    return found
+
+
 def module_problems(inputs: Mapping[str, Entry], definition: Definition) -> list[str]:
-    """What the modules need of the entries an image gives them: for `builtin:node-tarball`, one signed
-    release tarball per image. `inputs` are entries input-lock found well formed."""
+    """What the builtin modules need of the entries an image gives them. `inputs` are entries input-lock found
+    well formed."""
     found: list[str] = []
     for module_name, module in sorted(definition.modules.items()):
-        if module.use != nodejs.MODULE:
-            continue
-        for image in sorted(definition.images):
-            urls: dict[str, str] = {}
-            signed: dict[str, bool] = {}
-            for name, entry in sorted(inputs.items()):
-                if (
-                    name in RESERVED
-                    or module_of(entry) != module_name
-                    or image not in (input_lock.used_by(entry) or [])
-                ):
-                    continue
-                try:
-                    urls[name] = input_lock.render_url(entry)
-                except ValueError:
-                    continue  # input-lock names the placeholder it lacks
-                signed[name] = "signed_by" in entry and "sums_url" in entry
-            if urls:
-                found.extend(
-                    f"images.{image}: module {module_name} ({module.use}): {problem}"
-                    for problem in nodejs.tarball_problems(urls, signed)
-                )
+        if module.use == nodejs.MODULE:
+            found.extend(node_problems(module_name, inputs, definition))
+        elif module.use == vendordeb.MODULE:
+            found.extend(deb_problems(module_name, inputs))
+        elif module.use == filemodule.MODULE:
+            found.extend(file_problems(module_name, inputs, definition))
     return found
 
 
@@ -192,3 +252,16 @@ def image_entries(
 def module_of(entry: Entry) -> str | None:
     module = entry.get("module")
     return module if isinstance(module, str) else None
+
+
+def deb_entries(
+    lock: Lock, definition: Definition, image: str, params: Mapping[str, Param]
+) -> dict[str, dict[str, input_lock.Value]]:
+    """The vendor .deb entries `image` itself installs: its switched-on `apt` entries of a `builtin:deb` module."""
+    return {
+        name: entry
+        for name, entry in image_entries(lock, definition, image, params).items()
+        if (module := module_of(entry)) is not None
+        and definition.modules[module].use == vendordeb.MODULE
+        and isinstance(entry.get("apt"), str)
+    }

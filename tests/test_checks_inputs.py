@@ -69,9 +69,9 @@ class ModuleEntriesTest(unittest.TestCase):
 
     def test_a_module_with_no_probe_yet_fails_naming_it(self) -> None:
         file_module = {"module": "files", "version": "1", "url": "https://x.example/f"}
-        modules = {**example_definition().modules, "files": Module("files", "builtin:file", None, {})}
+        modules = {**example_definition().modules, "files": Module("files", "hooks/files.sh", None, {})}
         found = inputs.locked_inputs({"f": file_module}, modules, None, Fake())
-        self.assertEqual(found.failed, ("f: module files (builtin:file) has no version probe in this release",))
+        self.assertEqual(found.failed, ("f: module files (hooks/files.sh) has no version probe in this release",))
 
     def test_a_module_the_definition_lacks_fails(self) -> None:
         found = inputs.locked_inputs({"x": {**NODE, "module": "ghost"}}, {}, None, Fake())

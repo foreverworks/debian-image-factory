@@ -270,9 +270,18 @@ and bundles it into the `.pyz`.
       "module": "vendor-deb",
       "registryUrl": "https://packages.example.com/debian?suite=trixie&components=main&binaryArch=amd64",
       "sha256": "<sha256 of the .deb>",
+      "signed_by": "example-vendor-keys",
       "url": "https://packages.example.com/debian/pool/main/e/example-tool/example-tool_{version_noepoch}_amd64.deb",
-      "used_by": ["os"],
+      "used_by": ["installer", "os"],
       "version": "2.4.0-1"
+    },
+    "example-vendor-keys": {
+      "description": "A trust root: the keyring the vendor signs its InRelease with, moved by hand.",
+      "module": "vendor-deb",
+      "sha256": "<sha256 of the keyring>",
+      "url": "https://packages.example.com/debian/example-archive-keyring.pgp",
+      "used_by": ["installer", "os"],
+      "version": "2026.1"
     },
     "node-26": {
       "datasource": "node-version",
@@ -315,7 +324,7 @@ What each field means to the factory:
 | `version`, `digest` | The pin. Renovate or `lock` commands move them, never a build. |
 | `url` | `https://` only. A template over `{version}`, `{version_noepoch}` (Debian epoch dropped), `{version_underscore}` (`+` as `_`), `{version_urlquoted}`, `{major}` and any other string field of the entry (`{digest}`, `{build}`). |
 | `sha256`, `sha512`, `sha1` | At least one. `lock checksums` (input-lock's `refresh`) writes the checksums of the entries a bump moved, or of the entries named, and adds a sha256 to an entry that only has sha1 (some SDK repositories publish nothing stronger), so every file is also checked by sha256. |
-| `apt` | For a vendor `.deb`: its package name; its sha256 must match the vendor's own `Packages` index for that version. input-lock reads that index over HTTPS and does not check its signature (the vendor's `InRelease`); see section 16. |
+| `apt` | For a vendor `.deb`: its package name. With `registryUrl` (the vendor's repository) and `signed_by` (the keyring it signs with), which a `builtin:deb` entry must have, `plan` and `fetch` read the repository's `InRelease`, verify it with `gpgv` against that keyring alone, check its suite and Valid-Until, read the `Packages` index the signed Release vouches for, and require the index's sha256 for that version to equal the lock's (6.4, section 16). |
 | `signed_by`, `sums_url`, `sums_sig_url` | How the checksum is vouched for (input-lock 0.2.0). `signed_by` names the keyring entry (a trust root pinned by sha256 or sha512); `sums_url` is the vendor's checksum list, clear-signed or, with `sums_sig_url`, signed apart (Node.js's `SHASUMS256.txt.asc`). `fetch` verifies the list with `gpgv`, fails closed, and requires the list's checksum for the file to equal the lock's. They are trust fields: out of `build_fields`, `build.env` and every identity, since a signature is checked and does not change the bytes. The plan carries them (`trust`) for `fetch`. |
 | `module` | The module that installs it (declared in the definition), or `null` when the image's own hooks use it. |
 | `used_by` | A sorted, non-empty list of images from the definition, required on every entry but the reserved ones. The only place that says which image installs which input. |
@@ -424,9 +433,9 @@ buildable and testable from the same definition.
 
 | Module | Installs | Verification |
 |---|---|---|
-| `builtin:deb` | a vendor `.deb` from the lock, with `apt-get install ./file.deb`; its dependencies come from the snapshot. The vendor's repository is never added to the image's apt sources. | lock sha256, which `lock checksums` cross-checked against the vendor's index (read over HTTPS; its signature is not checked yet, section 16) |
+| `builtin:deb` | a vendor `.deb` from the lock, by apt in the same transaction as the image's packages; its dependencies come from the snapshot. The vendor's repository is never added to the image's apt sources. | lock sha256, equal to the sha256 of the version's stanza in a `Packages` index the repository's `InRelease` vouches for, verified by `plan` and again by `fetch` with gpgv against the pinned keyring (the entry's `signed_by`) |
 | `builtin:node-tarball` | a nodejs.org release tarball into a prefix, plus `node`, `npm`, `npx` links | lock sha256, and the tarball's checksum in `SHASUMS256.txt.asc`, verified by `fetch` with gpgv against the pinned release keyring (the entry's `signed_by`) |
-| `builtin:file` | any locked download, placed at a path the definition names, optionally unpacked | lock checksums |
+| `builtin:file` | any locked download, placed at a path the definition names, optionally unpacked | lock checksums (and a vendor's signed list, when the entry has `signed_by` and `sums_url`) |
 | a path (`hooks/sdk.sh`) | whatever the script does, in the chroot, with no network | the factory has already verified every file the script receives |
 
 A module is shared source invoked on whichever images use its entries; it is never an image with
@@ -463,9 +472,57 @@ is the entry `signed_by` names and is not installed: it is a trust root used at 
 - *Probe.* `locked-inputs` runs `<prefix>/bin/node --version` in the image and expects `v<version>`;
   the keyring has no probe (11).
 
-In M1, `plan` refuses an image that installs a switched-on `builtin:deb` entry, naming it: resolving
-a vendor `.deb`'s dependencies needs the vendor's index stanza, which arrives with the `deb` module
-in M5. With the switch off (as in `examples/`), the entries leave every identity and the plan runs.
+**`builtin:deb`** takes no key besides `use` and `enabled_by`; any other is refused by the definition,
+naming it. Every entry of the module is an `apt` entry with a `registryUrl` and a `signed_by`, except a
+keyring that an entry's `signed_by` names (`plan` and `lock check` name the entry and the field it
+lacks), so every vendor `.deb` is signature-checked and the lock is schema 2. A core image cannot use the
+module: mmdebstrap builds core, and `plan` names the image.
+
+- *Verification.* For each image that installs switched-on entries, `plan` reads, through its own reader:
+  the keyring entry's file, checked against the lock's checksums; the repository's
+  `dists/<suite>/InRelease` (or, only when there is none, `Release` with `Release.gpg`), verified with
+  input-lock's `gpgv` against that keyring alone; the Release's suite and Valid-Until, checked against the
+  current time (input-lock's `release_sums`); the `Packages` index (plain, `.gz` or `.xz`) the signed
+  Release lists, by its sha256; and the index's stanza for `apt` at `version`. The stanza's `SHA256` must
+  be the lock's sha256, and its `Filename` must end in the file name of the entry's url (input-lock's
+  `same_file`). Any link that does not hold fails the plan, naming its URL. `fetch` walks the same chain
+  again from the plan alone (the plan's `debs` names each entry's package, version and repository), with
+  the keyring from the cache, keeps the signed file and the index in the content cache with a note keyed
+  by the `.deb`'s sha256, as for Node's list, and a later fetch verifies the cached copies again. Provenance
+  names the `InRelease` and the index as resolved dependencies.
+- *Resolution.* The verified stanza is offered to the image that installs it and to no other: its
+  resolution runs in an apt root of its own, which also holds a local flat repository with the verified
+  stanzas (`[trusted=yes]`, since apt has nothing to check there: every stanza in it was verified as
+  above before it was written), and `apt-get --simulate install` asks for `name=version` in the same
+  transaction as the image's other packages, so the `.deb`'s dependencies come from the snapshot as apt
+  resolves them. The vendor package is in the image's resolved `packages` and its children's; it is not in
+  the image's `request`, and `fetch` does not look for it in the snapshot's indices.
+- *Install.* The build copies the verified `.deb` files into the root under `/run/factory/debs` and installs
+  them with the image's packages in one `apt-get --no-install-recommends install` from the mirror, then
+  removes them.
+- *Probe.* `locked-inputs` reads the image's dpkg status: the package at its locked version; the keyring is
+  a trust root and has no probe (11).
+
+**`builtin:file`** takes, besides `use` and `enabled_by`: `path` (required), an absolute normalised path of
+plain parts like node's `prefix`; `mode`, an octal string such as `"0755"` with no setuid, setgid or
+sticky bit, `"0644"` by default, only for a file placed as it is; `unpack`, `false` by default; and
+`strip_components`, a whole number, 0 by default, only with `unpack`. Any other key is refused, naming it.
+Among the module's lock entries an image uses there is exactly one to place (a keyring an entry's
+`signed_by` names is a trust root, not placed), and an unpacked one's url ends in `.tar`, `.tar.gz` or
+`.tar.xz` (`plan` and `lock check` name an image with none or several).
+
+- *Install.* The builder's `python3` runs a self-contained script the build copies into its work
+  directory, `file_install.py "$root" <file> <path> <source_date_epoch>` with `--mode <mode>` or
+  `--unpack <strip_components>`. A placed file is copied to `path` with its mode, owned by root, its time
+  `source_date_epoch`. An unpacked tarball goes into the directory `path` with the leading parts of every
+  member name stripped, under node_install's rules: absolute names, `..`, devices and fifos, and a link
+  whose target is not inside `path` are refused; a symlink already in the image is never followed;
+  everything is owned by root:root with the member's permission bits minus setuid, setgid and sticky, and
+  every time the older of the member's and `source_date_epoch`. Missing parent directories are created
+  0755, and an existing directory keeps its mode and gets its time back.
+- *Probe.* `locked-inputs` runs `sha256sum <path>` for a placed file and expects the lock's sha256 and
+  the path; an unpacked tarball, whose members the lock does not list, is probed with `test -d <path>`,
+  which must succeed and print nothing.
 
 ### 6.5 What a hook sees
 
@@ -559,8 +616,10 @@ The plan computes each package set without building anything and without privile
    definition's packages on top of that result (the plan's `request` for core lists `apt` and the
    packages). A child's request is its packages, its kind defaults and its modules' run-time
    packages (`node-tarball` adds `libatomic1`, which nodejs.org's `node` links; `file` adds none;
-   `deb` takes its dependencies from the .deb, M5), against a
-   status holding its parent's set; an `Inst`
+   `deb` takes its dependencies from the .deb), against a
+   status holding its parent's set. An image that installs a vendor `.deb` is resolved in an apt root of
+   its own that also holds the `.deb`'s verified stanza, asking for `name=version` in the same transaction
+   (6.4); the stanza stays available to its children's status files. An `Inst`
    line that upgrades a parent's package, or any `Remv`, is refused. apt's own solver answers, one
    `Inst` line per package, and this runs as an ordinary user.
 4. Compute identities top-down and look each one up where it would be published (7.4).
@@ -615,7 +674,8 @@ Each image's entry also carries what its identity was computed from, so `fetch` 
 the plan alone: `kind`, `parent`, `parent_identity`, `recipe` (the recipe digest), `request` (what
 apt was asked for), `packages` (the resolved set), `inputs` (the lock entries it installs, as
 `build_fields`), `modules`, `trust` (for each input with `signed_by`: the keyring entry and the
-rendered `sums_url` and `sums_sig_url`, which `fetch` verifies and which enter no identity), `params` (the ones it reads), `apt_sources` and `checks` (the required
+rendered `sums_url` and `sums_sig_url`, which `fetch` verifies and which enter no identity), `debs` (for each vendor
+`.deb` it installs: the package, its version and the repository, for `fetch` and the build, 6.4), `params` (the ones it reads), `apt_sources` and `checks` (the required
 ones). `because` says why an image builds: no artifact with this identity, a failed required check,
 the parent builds, or `--rebuild`; with `--previous <plan.json>` it also lists what moved since
 that plan (packages, inputs, parameters, recipe). Files that look like an artifact but do not count
@@ -1386,9 +1446,10 @@ each says what would change had it gone the other way.
    `sums_url` (and `sums_sig_url`) a clear-signed or detached-signed checksum list, verified with
    `gpgv` and failing closed; the lock is `"schema": 2` once it uses them. The factory takes that
    route for Node.js (`SHASUMS256.txt.asc`, checked at `fetch`, 6.4) and for any other entry that has
-   the fields. The vendor `.deb` index follows the same route in M5: an apt entry with `signed_by`
-   reads only a `Packages` index its repository's signed `InRelease` vouches for. Until M5 builds
-   vendor `.deb` files nothing reads one, so no unsigned vendor index is trusted.
+   the fields. The vendor `.deb` index follows the same route: every `builtin:deb` entry has
+   `signed_by`, and `plan` and `fetch` read only a `Packages` index its repository's signed `InRelease`
+   (or `Release` with `Release.gpg`) vouches for, checked for its suite and Valid-Until, and require the
+   version's sha256 there to equal the lock's (6.4). No unsigned vendor index is trusted.
 8. **Open: git-refs entries.** input-lock refuses an entry Renovate moves whose url is not built
    from `{version}`, so the git-refs pattern (`version` the ref, `digest` the commit, url from
    `{digest}`) does not pass. Recommendation: pin such files by commit in `version` without a

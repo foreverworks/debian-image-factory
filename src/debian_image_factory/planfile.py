@@ -20,12 +20,21 @@ SNAPSHOT_ID: Final = re.compile(r"[0-9]{8}T[0-9]{6}Z")
 NAME: Final = re.compile(r"[a-z0-9][a-z0-9.+-]*")
 """What a suite, component or architecture looks like: they enter URLs and paths, so nothing else passes."""
 STATES: Final = ("build", "reuse", "wait")
+DEB_FIELDS: Final = ("package", "registry_url", "version")
 
 
 class Debian(TypedDict):
     suite: str
     components: tuple[str, ...]
     architecture: str
+
+
+class Deb(TypedDict):
+    """A vendor .deb an image installs: its package, version and repository (the entry's `registryUrl`)."""
+
+    package: str
+    version: str
+    registry_url: str
 
 
 class ImageEntry(TypedDict):
@@ -43,6 +52,9 @@ class ImageEntry(TypedDict):
     trust: dict[str, dict[str, str]]
     """Entry name -> `signed_by` (the keyring entry) and the rendered `sums_url` and `sums_sig_url` when it has
     them: the signed checksum list `fetch` verifies the entry's checksum against."""
+    debs: dict[str, Deb]
+    """Entry name -> the vendor .deb it installs (`plan.debs_of`): verified again by `fetch` through the
+    repository's signed InRelease, installed by the build in the same apt transaction as `request`."""
     params: dict[str, Param]
     checks: tuple[str, ...]
     state: str
@@ -152,6 +164,26 @@ def _trust(value: object, where: str) -> dict[str, dict[str, str]]:
     return found
 
 
+def _debs(value: object, where: str, inputs: Mapping[str, object], trust: Mapping[str, object]) -> dict[str, Deb]:
+    found: dict[str, Deb] = {}
+    for name, raw in _object(value, where).items():
+        fields = _object(raw, f"{where}.{name}")
+        unknown = sorted(set(fields) - set(DEB_FIELDS))
+        if unknown:
+            raise ValueError(f"{where}.{name} has fields {unknown}, which are not among {list(DEB_FIELDS)}")
+        if name not in inputs or name not in trust:
+            raise ValueError(f"{where}.{name} must be one of the image's inputs, with its trust (signed_by)")
+        registry_url = _text(_member(fields, "registry_url", f"{where}.{name}"), f"{where}.{name}.registry_url")
+        if not registry_url.startswith("https://"):
+            raise ValueError(f"{where}.{name}.registry_url must be an https:// URL, not {registry_url!r}")
+        found[name] = {
+            "package": _text(_member(fields, "package", f"{where}.{name}"), f"{where}.{name}.package"),
+            "version": _text(_member(fields, "version", f"{where}.{name}"), f"{where}.{name}.version"),
+            "registry_url": registry_url,
+        }
+    return found
+
+
 def parse_image(name: str, value: object) -> ImageEntry:
     """One `images.<name>` entry of a plan, every field checked."""
     where = f"images.{name}"
@@ -167,6 +199,7 @@ def parse_image(name: str, value: object) -> ImageEntry:
         entry_name: _fields(fields, f"{where}.inputs.{entry_name}")
         for entry_name, fields in _object(member("inputs"), f"{where}.inputs").items()
     }
+    trust = _trust(member("trust"), f"{where}.trust")
     image: ImageEntry = {
         "kind": _text(member("kind"), f"{where}.kind"),
         "parent": _optional_text(member("parent"), f"{where}.parent"),
@@ -181,7 +214,8 @@ def parse_image(name: str, value: object) -> ImageEntry:
         ),
         "inputs": inputs,
         "modules": _texts(member("modules"), f"{where}.modules"),
-        "trust": _trust(member("trust"), f"{where}.trust"),
+        "trust": trust,
+        "debs": _debs(member("debs"), f"{where}.debs", inputs, trust),
         "params": _params(member("params"), f"{where}.params"),
         "checks": _texts(member("checks"), f"{where}.checks"),
         "state": state,

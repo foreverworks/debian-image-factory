@@ -284,11 +284,12 @@ class DefinitionRowsTest(IdentityCase):
         self.assertEqual(self.changed_by_definition(text), ["node-26", "node-child"])
 
     def test_a_modules_use_change_does_the_same(self) -> None:
-        text = (example_text() + EXTRA).replace('use = "builtin:node-tarball"', 'use = "builtin:file"')
+        text = (example_text() + EXTRA).replace('use = "builtin:node-tarball"', 'use = "builtin:file"\nunpack = true')
+        text = text.replace('prefix = "/usr/local"', 'path = "/opt/node"')
         self.assertEqual(self.changed_by_definition(text), ["node-26", "node-child"])
 
     def test_a_module_no_image_uses_changes_nothing(self) -> None:
-        text = (example_text() + EXTRA).replace('use = "builtin:deb"', 'use = "builtin:file"')
+        text = (example_text() + EXTRA).replace('use = "builtin:deb"', 'use = "builtin:file"\npath = "/opt/tool"')
         self.assertEqual(self.changed_by_definition(text), [])
 
     def test_a_hook_content_change_changes_that_image_and_its_children(self) -> None:
@@ -362,7 +363,19 @@ class DefinitionRowsTest(IdentityCase):
 
 class ParamRowsTest(IdentityCase):
     def test_a_flip_changes_only_the_images_whose_modules_it_switches(self) -> None:
-        self.assertEqual(self.changed_by_params({"vendor_tools": True}), ["os", "os-child"])
+        self.assertEqual(self.changed_by_params({"vendor_tools": True}), ["installer", "os", "os-child"])
+
+    def test_the_flag_off_removes_its_module_from_the_installer_and_the_os(self) -> None:
+        # M5's acceptance (DESIGN 14): one flag, one module, both boot kinds
+        on = compute(
+            as_lock(example_lock_data()), self.spec, packages_for(), files=self.facts, params={"vendor_tools": True}
+        )
+        for name in ("installer", "os"):
+            self.assertIn("vendor-deb", on[name].modules, name)
+            self.assertNotIn("vendor-deb", self.base[name].modules, name)
+            self.assertIn("example-tool", on[name].entries, name)
+            self.assertNotIn("example-tool", self.base[name].entries, name)
+            self.assertNotEqual(on[name].identity, self.base[name].identity, name)
 
     def test_an_image_reads_the_switch_of_its_module_on_or_off(self) -> None:
         self.assertEqual(self.base["os"].params, {"vendor_tools": False})
