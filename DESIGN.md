@@ -325,7 +325,8 @@ and bundles it into the `.pyz`.
 
 On a Renovate branch, `.github/workflows/renovate-checksums.yml` runs the input-lock Action, which rewrites the
 checksum of the entry Renovate moved and commits it to the same branch, so a pull request never carries a stale
-`sha256`. The entry is not signed (it has no `signed_by`), so its checksum is trust on first use: review the
+`sha256`. A commit pushed with the workflow's own token starts no workflow, so the job then dispatches `ci.yml`
+on the branch (`workflow_dispatch`, with `actions: write` scoped to that job) when the Action rewrote anything. The entry is not signed (it has no `signed_by`), so its checksum is trust on first use: review the
 checksum commit as you would a new dependency.
 
 ```json
