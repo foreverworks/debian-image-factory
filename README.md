@@ -383,7 +383,10 @@ with one added layer per child, publishes them to registries with their records 
 adds `verify`. The fourth builds Incus images and their children, boots them on an Incus host in
 `test`, and publishes files to GitHub releases. The fifth builds installer kits and OS root filesystems
 and boots both in QEMU in `test`, with the `deb` and `file` modules, feature flags and `lock checksums`.
-The nightly "rebuild only what changed" loop comes next. The milestones are in
+The sixth closes the nightly loop: `plan --snapshot latest --against` every kind of target, the
+GitHub Action, `prune` with its retention rule, inputs bundles and offline replay, `verify --pull`, and
+the optional `byte-equal` check; a night with no relevant upload builds nothing. Version 1.0, with
+optional signing and docs for strangers, comes next. The milestones are in
 [DESIGN.md, section 14](DESIGN.md#14-milestones).
 
 `scripts/test static`, `scripts/test unit` and `scripts/test integration` run the same checks CI
