@@ -14,6 +14,9 @@ Rules this module fixes:
 - Among artifacts of one state, the newest `finished_on` wins, an artifact without a time is older
   than any with one, and a tie goes to the smallest digest, so the choice never depends on the
   order a target listed them in.
+- The order of results is only as trustworthy as the records that claim it (unsigned by default: DESIGN 7.4).
+  A result stamped later than the time the reader runs, plus `FUTURE_ALLOWANCE` for clocks that differ, is
+  never the last: it does not count, and the reader lists it as rejected ("finished in the future").
 """
 
 import base64
@@ -22,7 +25,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
 from input_lock.identity import HEX64
@@ -36,6 +39,8 @@ from input_lock.records import (
 
 OUTCOMES: Final[tuple[TestOutcome, ...]] = ("PASSED", "WARNED", "FAILED")
 PASSING: Final[frozenset[str]] = frozenset({"PASSED", "WARNED"})
+FUTURE_ALLOWANCE: Final = timedelta(minutes=5)
+"""How far past the reader's clock a result's `finishedOn` may be before it is not believed."""
 RUN_ENTRY: Final = "run"
 """The name of the `configuration` entry of a test result that says which run made it (DESIGN 8.2)."""
 
@@ -57,6 +62,8 @@ class Artifact:
     results: Mapping[str, TestOutcome] = field(default_factory=dict[str, TestOutcome])
     has_locked_inputs: bool = False
     """Whether its provenance lists locked inputs, which adds `locked-inputs` to the checks it needs."""
+    future_results: tuple[tuple[str, str], ...] = ()
+    """(check, `finishedOn`) of the results its records hold that are stamped in the future and so do not count."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +93,7 @@ class Decision:
     failed: tuple[str, ...] = ()
 
 
-def _instant(value: str | None) -> datetime:
+def instant(value: str | None) -> datetime:
     """A finish time as a comparable instant; none, or one that does not parse, is older than any."""
     if value is None:
         return datetime.min.replace(tzinfo=UTC)
@@ -99,12 +106,12 @@ def _instant(value: str | None) -> datetime:
 
 def _newest(artifacts: Sequence[Artifact]) -> Artifact:
     """The artifact with the latest finish time; a tie goes to the smallest digest."""
-    return min(artifacts, key=lambda one: (-_instant(one.finished_on).timestamp(), one.digest))
+    return min(artifacts, key=lambda one: (-instant(one.finished_on).timestamp(), one.digest))
 
 
 def sort_newest_first(artifacts: Sequence[Artifact]) -> list[Artifact]:
     """The artifacts newest first, by the same order `_newest` picks by: a tie goes to the smallest digest."""
-    return sorted(artifacts, key=lambda one: (-_instant(one.finished_on).timestamp(), one.digest))
+    return sorted(artifacts, key=lambda one: (-instant(one.finished_on).timestamp(), one.digest))
 
 
 def failed_and_missing(one: Artifact, required: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -501,23 +508,49 @@ def statements_cover(statements: Sequence[Record], digests: Sequence[str]) -> bo
     return any(set(digests) <= {subject.sha256 for subject in one.subjects} for one in statements)
 
 
-def last_results(records: Sequence[Record]) -> dict[str, TestOutcome]:
+def counted_results(
+    records: Sequence[Record], now: datetime | None
+) -> tuple[dict[str, TestOutcome], tuple[tuple[str, str], ...]]:
     """The last result of each check in `records` (in file order): the one whose run finished latest, a
-    result without a time older than any with one, and the later line winning a tie."""
+    result without a time older than any with one, and the later line winning a tie; and the (check,
+    `finishedOn`) of every result that does not count because it finished later than `now` plus
+    `FUTURE_ALLOWANCE`. `now` None counts every result."""
     last: dict[str, tuple[tuple[datetime, int], TestOutcome]] = {}
+    future: list[tuple[str, str]] = []
     for position, one in enumerate(records):
         if one.check is None:
             continue
-        key = (_instant(one.check.finished_on), position)
+        moment = instant(one.check.finished_on)
+        if now is not None and one.check.finished_on is not None and moment > now + FUTURE_ALLOWANCE:
+            future.append((one.check.check, one.check.finished_on))
+            continue
+        key = (moment, position)
         held = last.get(one.check.check)
         if held is None or key > held[0]:
             last[one.check.check] = (key, one.check.outcome)
-    return {check: outcome for check, (_, outcome) in last.items()}
+    return {check: outcome for check, (_, outcome) in last.items()}, tuple(future)
 
 
-def artifact_from_records(name: str, digest: str, image: str, identity: str, records: str) -> Artifact | Rejected:
+def last_results(records: Sequence[Record], now: datetime | None = None) -> dict[str, TestOutcome]:
+    """`counted_results`' first part: the last result of each check, ignoring any stamped after `now`."""
+    return counted_results(records, now)[0]
+
+
+def future_notes(artifacts: Sequence[Artifact]) -> tuple[Rejected, ...]:
+    """A rejected line for each result of `artifacts` that does not count for finishing in the future."""
+    return tuple(
+        Rejected(one.name, f"its test result for {check} finished in the future ({stamp}), so it does not count")
+        for one in artifacts
+        for check, stamp in one.future_results
+    )
+
+
+def artifact_from_records(
+    name: str, digest: str, image: str, identity: str, records: str, now: datetime | None = None
+) -> Artifact | Rejected:
     """The artifact file `name` whose real sha256 is `digest`, as its records file `records` describes
-    it for `image` and `identity` (full hex), or the reason it does not count."""
+    it for `image` and `identity` (full hex), or the reason it does not count. Results stamped later than
+    `now` (default: the present) plus `FUTURE_ALLOWANCE` do not count and are named in `future_results`."""
     try:
         statements = parse_envelopes(records)
     except RecordsError as error:
@@ -531,16 +564,20 @@ def artifact_from_records(name: str, digest: str, image: str, identity: str, rec
             return Rejected(name, f"provenance names image {build.image!r}, not {image!r}")
         if build.identity != identity:
             return Rejected(name, f"provenance names identity {build.identity}, not {identity}")
-    finished = max((build.finished_on for build in builds if build.finished_on), key=_instant, default=None)
+    finished = max((build.finished_on for build in builds if build.finished_on), key=instant, default=None)
     locked = any(build.has_locked_inputs for build in builds)
-    return Artifact(image, identity, digest, name, finished, last_results(about), locked)
+    results, future = counted_results(about, now or datetime.now(UTC))
+    return Artifact(image, identity, digest, name, finished, results, locked, future)
 
 
-def described_artifact(name: str, digest: str, records: str, identity_prefix: str) -> Artifact | Rejected:
+def described_artifact(
+    name: str, digest: str, records: str, identity_prefix: str, now: datetime | None = None
+) -> Artifact | Rejected:
     """The artifact file `name` whose real sha256 is `digest`, as its records file `records` describes it,
     when nothing is known about it but the start of its identity (a file name carries 16 hex, a registry tag
     all 64). The image and the full identity are the provenance's; every provenance about the digest must
-    agree on both, and the identity must start with `identity_prefix`. Else the reason it does not count."""
+    agree on both, and the identity must start with `identity_prefix`. Else the reason it does not count.
+    `now` is as for `artifact_from_records`."""
     try:
         statements = parse_envelopes(records)
     except RecordsError as error:
@@ -558,4 +595,4 @@ def described_artifact(name: str, digest: str, records: str, identity_prefix: st
     image, identity = next(iter(claims))
     if not identity.startswith(identity_prefix):
         return Rejected(name, f"provenance names identity {identity}, which does not start with {identity_prefix}")
-    return artifact_from_records(name, digest, image, identity, records)
+    return artifact_from_records(name, digest, image, identity, records, now)

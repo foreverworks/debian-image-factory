@@ -1,6 +1,7 @@
 import base64
 import json
 import unittest
+from datetime import UTC, datetime
 
 from input_lock.records import (
     PROVENANCE_PREDICATE,
@@ -26,6 +27,8 @@ from debian_image_factory.published import (
     decide,
     described_artifact,
     format_target,
+    future_notes,
+    last_results,
     parse_artifact_name,
     parse_envelope,
     parse_envelopes,
@@ -191,6 +194,41 @@ class ParseRecordsTest(unittest.TestCase):
         got = parsed(prov() + two + one)
         assert isinstance(got, Artifact)
         self.assertEqual(got.results["a"], "FAILED")
+
+    def test_a_result_stamped_in_the_future_does_not_count_and_is_named(self) -> None:
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+        real = check("a", "FAILED", finished="2026-11-22T02:00:00Z", run="one")
+        forged = check("a", "PASSED", finished="2099-01-01T00:00:00Z", run="two")
+        got = artifact_from_records(NAME, DIGEST, "node-26", IDENTITY, prov() + real + forged, now)
+        assert isinstance(got, Artifact)
+        self.assertEqual(dict(got.results), {"a": "FAILED"})
+        self.assertEqual(got.future_results, (("a", "2099-01-01T00:00:00Z"),))
+        (note,) = future_notes([got])
+        self.assertEqual(note.name, got.name)
+        self.assertIn("finished in the future", note.reason)
+
+    def test_a_check_with_only_a_future_result_has_none(self) -> None:
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+        got = artifact_from_records(
+            NAME, DIGEST, "node-26", IDENTITY, prov() + check("a", "PASSED", finished="2099-01-01T00:00:00Z"), now
+        )
+        assert isinstance(got, Artifact)
+        self.assertEqual(dict(got.results), {})
+        self.assertEqual(decide([got], ["a"]).state, "wait")
+
+    def test_a_small_allowance_covers_clocks_that_differ(self) -> None:
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+        inside = check("a", "PASSED", finished="2026-11-22T12:04:59Z")
+        outside = check("b", "PASSED", finished="2026-11-22T12:05:01Z")
+        got = artifact_from_records(NAME, DIGEST, "node-26", IDENTITY, prov() + inside + outside, now)
+        assert isinstance(got, Artifact)
+        self.assertEqual(dict(got.results), {"a": "PASSED"})
+        self.assertEqual([check_ for check_, _ in got.future_results], ["b"])
+
+    def test_last_results_without_a_now_counts_everything(self) -> None:
+        records = parse_envelopes(check("a", "PASSED", finished="2099-01-01T00:00:00Z"))
+        self.assertEqual(last_results(records), {"a": "PASSED"})
+        self.assertEqual(last_results(records, datetime(2026, 11, 22, tzinfo=UTC)), {})
 
     def test_each_check_has_its_own_last_result(self) -> None:
         text = (

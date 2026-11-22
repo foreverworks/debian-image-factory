@@ -97,6 +97,22 @@ class DirLookupTest(unittest.TestCase):
         b, _ = write_artifact(self.dir, b"two")
         self.assertEqual(self.find(), (sorted([a, b]), []))
 
+    def test_a_result_stamped_in_the_future_is_listed_as_rejected_and_does_not_count(self) -> None:
+        name, digest = write_artifact(self.dir, b"one", results={"a": "FAILED"})
+        predicate = test_result(
+            "PASSED",
+            [{"name": "a"}, {"name": "run", "annotations": {"runId": "x", "finishedOn": "2099-01-01T00:00:00Z"}}],  # type: ignore[list-item]  # annotations are in-toto's
+        )
+        extra = envelope(statement([subject(name, digest)], TEST_RESULT_PREDICATE, predicate))
+        path = self.dir / records_name_for(digest)
+        path.write_text(path.read_text(encoding="utf-8") + jsonl([extra]), encoding="utf-8")
+        got = lookup(DirTarget(str(self.dir)), "node-26", "trixie", "amd64", IDENTITY)
+        (found,) = got.artifacts
+        self.assertEqual(dict(found.results), {"a": "FAILED"})
+        (note,) = got.rejected
+        self.assertEqual(note.name, name)
+        self.assertIn("finished in the future", note.reason)
+
     def test_missing_directory_holds_nothing(self) -> None:
         got = lookup(DirTarget(str(self.dir / "absent")), "node-26", "trixie", "amd64", IDENTITY)
         self.assertEqual((got.artifacts, got.rejected), ((), ()))

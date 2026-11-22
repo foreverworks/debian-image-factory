@@ -803,7 +803,17 @@ A child whose parent waits waits too, unless the child itself is reusable. Sever
 check count by time, the last one wins: the result whose run finished last (8.2), file order breaking a
 tie, and a result without a time (one from before runs were recorded) is older than any with one; when
 several artifacts qualify, the newest
-`finishedOn` wins, ties by the smallest digest. The provenance names the image in
+`finishedOn` wins, ties by the smallest digest.
+
+The order of results is only as trustworthy as the records that claim it. Records are unsigned by
+default (8.2), so anyone who can write to a target can stamp a result with a late time and make it the
+last. Two limits keep that small: a result stamped later than the time the reader runs, plus five
+minutes for clocks that differ, does not count at all, and the lookup lists it under `rejected` with the
+reason "finished in the future" (the artifact itself still counts, by its other results); and signed
+records (`--sign`, 8.3; only `none` works today) will be the way to make the order trustworthy against a
+writer, since a signature names who wrote a result. A result stamped in the past by someone who can
+write records is not detectable and counts. Until then the target's own authentication is the trust
+boundary. The provenance names the image in
 `externalParameters.image` and the identity in `internalParameters.identity` (8.2), and a records
 file counts only when a statement's subject is the file's real sha256. `dir://`, `oci://` and
 `github-release://` lookups are live.
@@ -1204,7 +1214,10 @@ And the OCI artifact that carries one record as a referrer:
 it.) `org.opencontainers.image.created` is when the record was attached, one microsecond apart
 within one publish. Records of an OCI image are read in that order, whatever order the referrers API
 lists them in, so file order, which breaks a tie between results of one time (8.2, test result),
-means the same on every registry; a referrer without the annotation reads first. Records never hold secrets, private keys, tokens or machine identities. They describe bits;
+means the same on every registry; a referrer without the annotation reads first. The order of results
+by `finishedOn` is a claim in an unsigned record (8.3): a result whose `finishedOn` is later than the time
+the reader runs plus five minutes does not count, and is reported as rejected with the reason "finished
+in the future" (7.4). Records never hold secrets, private keys, tokens or machine identities. They describe bits;
 what is actually running somewhere is for the consumer to read back from the running system.
 
 ### 8.3 Signing

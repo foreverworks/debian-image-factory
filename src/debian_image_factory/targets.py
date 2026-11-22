@@ -20,6 +20,7 @@ from .published import (
     Target,
     artifact_from_records,
     described_artifact,
+    future_notes,
     parse_artifact_name,
     parse_envelope,
     parse_envelopes,
@@ -43,11 +44,11 @@ def lookup(target: Target, image: str, suite: str, arch: str, identity: str) -> 
         raise ValueError(f"identity is not 64 lowercase hex characters: {identity!r}")
     match target:
         case DirTarget(path):
-            return lookup_dir(Path(path), image, suite, arch, identity)
+            return with_future_notes(lookup_dir(Path(path), image, suite, arch, identity))
         case OciTarget():
-            return lookup_oci(registry.connect(target), image, identity)
+            return with_future_notes(lookup_oci(registry.connect(target), image, identity))
         case ReleaseTarget():
-            return lookup_release(github.connect(target), image, suite, arch, identity)
+            return with_future_notes(lookup_release(github.connect(target), image, suite, arch, identity))
 
 
 def list_artifacts(target: Target, connect: Callable[[OciTarget], registry.Client] = registry.connect) -> Lookup:
@@ -55,11 +56,17 @@ def list_artifacts(target: Target, connect: Callable[[OciTarget], registry.Clien
     like one but do not (with the reason): what `prune` reads, each checked as `lookup` checks one."""
     match target:
         case DirTarget(path):
-            return list_dir(Path(path))
+            return with_future_notes(list_dir(Path(path)))
         case OciTarget():
-            return list_oci(connect(target))
+            return with_future_notes(list_oci(connect(target)))
         case ReleaseTarget():
-            return list_release(github.connect(target))
+            return with_future_notes(list_release(github.connect(target)))
+
+
+def with_future_notes(found: Lookup) -> Lookup:
+    """`found` with a rejected line for each test result that was stamped in the future and so does not count
+    (the artifact itself still does)."""
+    return Lookup(found.artifacts, (*found.rejected, *future_notes(found.artifacts)))
 
 
 type Judge = Callable[[str, str, str], Artifact | Rejected]

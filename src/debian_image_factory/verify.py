@@ -25,6 +25,7 @@ import tempfile
 import urllib.error
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, TextIO
 
@@ -179,7 +180,9 @@ def inspect(subject: Subject, lock: frozenset[str] | None) -> Findings:
         problems.append(f"{len(sboms)} SBOM records, expected exactly one")
     for raw in sboms[:1]:
         problems.extend(sbom_problems(raw, subject, image))
-    results = published.last_results([record for _, record, _ in parsed])  # the latest run, then file order
+    results = published.last_results(
+        [record for _, record, _ in parsed], datetime.now(UTC)
+    )  # the latest run, then file order; one from the future does not count
     counts = {
         "records": len(subject.lines),
         "provenance": len(provenances),
