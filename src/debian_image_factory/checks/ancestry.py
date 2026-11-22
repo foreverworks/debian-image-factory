@@ -10,7 +10,7 @@ parent artifact's digest. Digests are sha256 in hex throughout.
 
 import fnmatch
 import posixpath
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -88,20 +88,29 @@ def ancestry(layers: Sequence[str], annotations: Mapping[str, str], parent: Pare
     return result(ANCESTRY, [*ok_layers, *ok_base], failed=[*bad_layers, *bad_base])
 
 
+def parent_files(
+    child: Sequence[Member], parent: Sequence[Member], excused: Callable[[str], bool], describe: Callable[[str], str]
+) -> tuple[list[str], list[str]]:
+    """The one test both root ancestries share: (passed, failed) of `parent-files-present`, every path of
+    `parent` is in `child` but for the ones `excused` names. `describe` words a missing path."""
+    present = {member.path for member in child}
+    missing = sorted(member.path for member in parent if member.path not in present and not excused(member.path))
+    return split(PARENT_FILES, [describe(path) for path in missing])
+
+
+def removed_by_every_build(path: str) -> bool:
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in REMOVED_BY_EVERY_BUILD)
+
+
 def files_ancestry(
     members: Sequence[Member], parent_members: Sequence[Member], parent_digest: str, named: str | None
 ) -> CheckOutcome:
     """`members` are the image's, `parent_members` its parent artifact's (digest `parent_digest`), and
     `named` the parent digest the image's provenance names. Every path of the parent is in the image,
     but what every build removes; the provenance names this parent."""
-    held = {member.path for member in members}
-    missing = sorted(
-        member.path
-        for member in parent_members
-        if member.path not in held
-        and not any(fnmatch.fnmatchcase(member.path, pattern) for pattern in REMOVED_BY_EVERY_BUILD)
+    ok_files, bad_files = parent_files(
+        members, parent_members, removed_by_every_build, lambda path: f"{path} is the parent's and not the image's"
     )
-    ok_files, bad_files = split(PARENT_FILES, [f"{path} is the parent's and not the image's" for path in missing])
     if named == parent_digest:
         ok_named, bad_named = [PROVENANCE_PARENT], []
     else:
@@ -203,14 +212,11 @@ def root_ancestry(child: Sequence[Member], installed: Collection[str] | str, par
         return NotRun(ANCESTRY, parent)
     if isinstance(installed, str):
         return result(ANCESTRY, [], failed=[f"dpkg-status-readable: {installed}"])
-    present = {member.path for member in child}
     removed = removed_by_packages(parent, installed)
-    missing = sorted(
-        member.path
-        for member in parent.members
-        if member.path not in present and member.path not in removed and not cleaned(member.path)
-    )
-    ok, bad = split(
-        PARENT_FILES, [f"{path} is in the parent sha256:{parent.digest[:12]} and not here" for path in missing]
+    ok, bad = parent_files(
+        child,
+        parent.members,
+        lambda path: path in removed or cleaned(path),
+        lambda path: f"{path} is in the parent sha256:{parent.digest[:12]} and not here",
     )
     return result(ANCESTRY, ["dpkg-status-readable", *ok], failed=bad)
