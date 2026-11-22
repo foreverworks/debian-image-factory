@@ -164,7 +164,10 @@ def install_lines(request: Sequence[str], debs: Sequence[str] = ()) -> list[str]
         lines += [
             "# the image's vendor .deb files, verified by fetch, installed in the same transaction",
             f'mkdir -p "$root{DEBS}"',
-            *(f'install -m 0644 {shlex.quote(path)} "$root{DEBS}/{deb_name(path)}"' for path in sorted(set(debs))),
+            *(
+                f'install -m 0644 {shlex.quote(path)} "$root"{shlex.quote(f"{DEBS}/{deb_name(path)}")}'
+                for path in sorted(set(debs))
+            ),
         ]
         names += [shlex.quote(f"{DEBS}/{deb_name(path)}") for path in sorted(set(debs))]
     lines += [

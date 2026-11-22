@@ -36,6 +36,7 @@ import shutil
 import stat
 import sys
 import tarfile
+import zlib
 from collections.abc import Callable, Collection, Iterator, Sequence
 from dataclasses import dataclass
 from typing import BinaryIO, Final
@@ -588,7 +589,7 @@ def main(argv: Sequence[str]) -> int:
                 arguments.root, arguments.state, arguments.epoch, arguments.image, arguments.out, arguments.status_out
             )
             print(f"kit for kernel {kernel}")
-    except (InitrdError, OSError, tarfile.TarError, EOFError) as error:
+    except (InitrdError, OSError, tarfile.TarError, EOFError, zlib.error) as error:
         print(f"initrd.py: {error}", file=sys.stderr)
         return 1
     return 0

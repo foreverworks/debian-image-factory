@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import json
 import tarfile
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -121,6 +122,15 @@ def scan_kit(path: Path, wanted: frozenset[str], needle: str | None, keys: bool,
     """The initrd's root, as `tarball.scan_entries` sees it, plus where the needle is in kit.json or the
     kernel (named `kit.json` and `vmlinuz`, outside the root). Raises tarfile.TarError, newc.NewcError,
     EOFError or OSError (gzip.BadGzipFile among them) when the kit or its initrd cannot be read."""
+    try:
+        return scanned_kit(path, wanted, needle, keys, keep)
+    except KeyError as error:  # tarfile's answer for a member the kit lacks
+        raise tarfile.TarError(f"the kit has no {error.args[0] if error.args else 'such member'}") from None
+    except zlib.error as error:  # a corrupt deflate stream in the initrd
+        raise EOFError(f"the initrd is not a readable gzip stream: {error}") from None
+
+
+def scanned_kit(path: Path, wanted: frozenset[str], needle: str | None, keys: bool, keep: Keep) -> Scan:
     extra: list[Hit] = []
     with tarfile.open(path, mode="r:") as archive:
         for name in (KIT_JSON, VMLINUZ):

@@ -258,7 +258,8 @@ def os_script(machine: Machine, layout: Layout, count: int, timeout_s: int) -> s
     root = f"{SCRATCH}/root"
     prepare = f"""set -eu
 mkdir -p {root}
-tar -xpzf {ARTIFACT}/root.tar.gz -C {root} --numeric-owner --xattrs --xattrs-include='*' --exclude='./dev/*'
+tar -xpzf {ARTIFACT}/root.tar.gz -C {root} --numeric-owner --xattrs --xattrs-include='*' \\
+    --anchored --exclude='dev/*' --exclude='./dev/*'
 test -x {root}/usr/bin/grub-mkstandalone || {{ echo "the OS has no grub-mkstandalone" >&2; exit 3; }}
 test -d {root}/usr/lib/grub/x86_64-efi || {{ echo "the OS has no GRUB for x86_64-efi" >&2; exit 3; }}
 cp {WORK}/grub.cfg {root}/tmp/factory-grub.cfg
@@ -413,8 +414,13 @@ def two_clones(boots: Sequence[Boot], artifact_name: str) -> Result:
     if missing or len(reports) < 2:
         return result(TWO_CLONES, [], failed=missing or ["both-instances-reported: fewer than two boots"])
     first, second = reports[0], reports[1]
-    same_id = first.machine_id == second.machine_id and first.machine_id not in NO_IDENTITY
-    ok_id, bad_id = split("machine-ids-differ", ["/etc/machine-id is the same in both instances"] if same_id else [])
+    if first.machine_id in NO_IDENTITY and second.machine_id in NO_IDENTITY:
+        id_problems = ["neither instance has a machine ID after its first boot"]
+    elif first.machine_id == second.machine_id:
+        id_problems = ["/etc/machine-id is the same in both instances"]
+    else:
+        id_problems = []
+    ok_id, bad_id = split("machine-ids-differ", id_problems)
     same_ssh = first.ssh == second.ssh and first.ssh != "none"
     ok_ssh, bad_ssh = split(
         "ssh-host-keys-differ", ["the SSH host keys are the same in both instances"] if same_ssh else []
