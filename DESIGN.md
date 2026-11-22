@@ -323,6 +323,11 @@ The factory pins input-lock 0.2.0 by version and sha256 in its own repository's 
 same format, so Renovate moves it), unpacks it for development with `scripts/vendor-input-lock`,
 and bundles it into the `.pyz`.
 
+On a Renovate branch, `.github/workflows/renovate-checksums.yml` runs the input-lock Action, which rewrites the
+checksum of the entry Renovate moved and commits it to the same branch, so a pull request never carries a stale
+`sha256`. The entry is not signed (it has no `signed_by`), so its checksum is trust on first use: review the
+checksum commit as you would a new dependency.
+
 ```json
 {
   "schema": 2,

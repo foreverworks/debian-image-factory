@@ -2,6 +2,8 @@
 
 ## 0.6.3 (not yet tagged)
 
+- A workflow rewrites the checksum of the input-lock entry on Renovate's branches, so its pull requests no longer
+  carry a stale `sha256`.
 - `publish --image NAME` publishes only the images it names.
 - `{image}` in the repository of an `oci://` target is the name of an image, and means the same in every command
   that takes a target. `publish --to`, `plan --against`, `build --parents`, `test --parents` and `prune --against`
