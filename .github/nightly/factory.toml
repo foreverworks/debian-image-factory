@@ -1,0 +1,19 @@
+# What the nightly workflow builds (DESIGN 12): the example's file kinds, a core and an Incus base on it, the
+# kinds a `dir://` target can hold. The example's OCI images need a registry, and nothing here may be published
+# publicly before 1.0 (DESIGN 16.2), so they stay out. The Incus checks run only where an Incus host answers:
+# on a runner without one the base stays a candidate, which a later plan reads as `wait`, never `build`.
+schema = 1
+
+[debian]
+suite = "trixie"                  # Debian 13
+components = ["main"]
+architectures = ["amd64"]
+
+[images.core]
+kind = "core"
+packages = ["ca-certificates", "tzdata"]
+
+[images.incus-base]
+kind = "incus"
+parent = "core"
+packages = ["openssh-server", "sudo"]

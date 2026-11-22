@@ -47,6 +47,10 @@ class Package:
     section: str = "misc"
 
 
+INCUS_DEFAULTS: Final = ("cloud-init", "dbus", "iproute2", "netbase", "systemd-resolved", "systemd-sysv", "udev")
+"""What an Incus image asks apt for besides its own packages (definition.KIND_DEFAULTS), so a fixture plan can
+hold one."""
+
 PACKAGES: Final = (
     Package("base-files", "1.0", essential=True, priority="required", architecture="amd64", section="admin"),
     Package("fixture-essential", "1.0", essential=True, priority="required", architecture="all", section="admin"),
@@ -57,6 +61,7 @@ PACKAGES: Final = (
     Package("tool-b", "1.0", depends="lib-b (>= 2)"),
     Package("lib-b", "2.0", section="libs"),
     Package("linux-image-fixture", "1.0", section="kernel"),
+    *(Package(name, "1.0") for name in INCUS_DEFAULTS),
 )
 LIB_A_SECURITY: Final = Package("lib-a", "1.1", architecture="all", section="libs")
 
