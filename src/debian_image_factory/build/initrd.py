@@ -36,7 +36,7 @@ import shutil
 import stat
 import sys
 import tarfile
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from dataclasses import dataclass
 from typing import BinaryIO, Final
 
@@ -44,6 +44,8 @@ MAGIC: Final = b"070701"
 HEADER_SIZE: Final = 110
 """The magic and thirteen 8-digit hexadecimal fields."""
 TRAILER: Final = "TRAILER!!!"
+CHUNK: Final = 64 * 1024
+MAX_NAME: Final = 64 * 1024
 INIT: Final = "init"
 INIT_TARGET: Final = "/sbin/init"
 KIT_MEMBERS: Final = ("kit.json", "vmlinuz", "initrd.img")
@@ -115,8 +117,30 @@ def sort_key(path: str) -> tuple[str, ...]:
 # ---- reading ------------------------------------------------------------------------------------
 
 
-def read_exact(stream: BinaryIO, size: int, what: str) -> bytes:
-    data = stream.read(size)
+type Read = Callable[[int], bytes]
+"""Reads up to that many bytes of the archive (a file's `read`); fewer only at its end."""
+
+
+@dataclass(frozen=True, slots=True)
+class Header:
+    """One member's header as the archive stores it: the name unchanged, and the thirteen fields' numbers."""
+
+    name: str
+    ino: int
+    mode: int
+    uid: int
+    gid: int
+    nlink: int
+    mtime: int
+    size: int
+    devmajor: int
+    devminor: int
+    rdevmajor: int
+    rdevminor: int
+
+
+def read_exact(read: Read, size: int, what: str) -> bytes:
+    data = read(size)
     if len(data) != size:
         raise InitrdError(f"the archive ends inside {what}")
     return data
@@ -126,28 +150,56 @@ def pad(size: int) -> int:
     return -size % 4
 
 
-def entries(stream: BinaryIO) -> Iterator[tuple[Member, bytes]]:
-    """Every member of the newc archive in `stream` and its content, up to the trailer."""
+def data_of(read: Read, left: list[int], name: str) -> Iterator[bytes]:
+    """The member's data in chunks; `left` counts what is still unread, for the skip after it."""
+    while left[0] > 0:
+        chunk = read_exact(read, min(CHUNK, left[0]), f"the content of {name}")
+        left[0] -= len(chunk)
+        yield chunk
+
+
+def stream_entries(read: Read) -> Iterator[tuple[Header, Iterator[bytes]]]:
+    """The one newc reader (checks/newc.py reads an initrd through it too): every member of the archive
+    `read` gives, up to its trailer, with an iterator over its data. The data must be read (or left)
+    before the next member is asked for; what the consumer did not read is skipped. Memory stays bounded:
+    data comes in CHUNK pieces."""
     while True:
-        header = read_exact(stream, HEADER_SIZE, "a header")
+        header = read_exact(read, HEADER_SIZE, "a header")
         if header[:6] != MAGIC:
             raise InitrdError(f"not a newc header: {header[:6]!r}")
         try:
             fields = [int(header[6 + 8 * index : 14 + 8 * index], 16) for index in range(13)]
         except ValueError:
             raise InitrdError("a header field is not hexadecimal") from None
-        ino, mode, uid, gid, nlink, mtime, size, _, _, rdevmajor, rdevminor, namesize, _ = fields
-        raw_name = read_exact(stream, namesize, "a name")
-        read_exact(stream, pad(HEADER_SIZE + namesize), "a name's padding")
+        ino, mode, uid, gid, nlink, mtime, size, devmajor, devminor, rdevmajor, rdevminor, namesize, _ = fields
+        if namesize < 1 or namesize > MAX_NAME:
+            raise InitrdError(f"a member name of {namesize} bytes")
+        raw_name = read_exact(read, namesize, "a name")
+        read_exact(read, pad(HEADER_SIZE + namesize), "a name's padding")
         if not raw_name.endswith(b"\0"):
             raise InitrdError("a name that does not end in NUL")
-        name = os.fsdecode(raw_name[:-1])
+        name = raw_name[:-1].decode("utf-8", "surrogateescape")
         if name == TRAILER:
             return
-        data = read_exact(stream, size, f"the content of {name}")
-        read_exact(stream, pad(size), f"the padding of {name}")
-        link = os.fsdecode(data) if stat.S_ISLNK(mode) else ""
-        yield Member(clean_name(name), mode, uid, gid, nlink, mtime, size, ino, rdevmajor, rdevminor, link), data
+        left = [size]
+        yield (
+            Header(name, ino, mode, uid, gid, nlink, mtime, size, devmajor, devminor, rdevmajor, rdevminor),
+            data_of(read, left, name),
+        )
+        while left[0] > 0:
+            left[0] -= len(read_exact(read, min(CHUNK, left[0]), f"the content of {name}"))
+        read_exact(read, pad(size), f"the padding of {name}")
+
+
+def entries(stream: BinaryIO) -> Iterator[tuple[Member, bytes]]:
+    """Every member of the newc archive in `stream` and its whole content, up to the trailer."""
+    for header, data in stream_entries(stream.read):
+        content = b"".join(data)
+        link = content.decode("utf-8", "surrogateescape") if stat.S_ISLNK(header.mode) else ""
+        yield Member(
+            clean_name(header.name), header.mode, header.uid, header.gid, header.nlink, header.mtime, header.size,
+            header.ino, header.rdevmajor, header.rdevminor, link,
+        ), content  # fmt: skip
 
 
 def opened(source: BinaryIO) -> BinaryIO:
