@@ -9,7 +9,10 @@ imports nothing from the package. It has two jobs, one per command:
 - `pack`: compare the directory, after the build changed it, with that state and write the one layer
   that turns the parent into the new image: a deterministic tar (PAX, numeric owners, no names, integer
   mtimes) in gzip with no name or time stamp. It also writes the uncompressed tar's sha256 (the layer's
-  diff_id) and copies the image's dpkg status out for the SBOM.
+  diff_id) and copies the image's dpkg status out for the SBOM. With `--full` it compares with an empty
+  state instead, so the tar holds every path of the root: an `os` image's root filesystem tarball. The
+  state's absent device nodes are written too, since the root holds them although this build could not
+  create them.
 
 What a path's state holds: its type, permission bits (with setuid, setgid and sticky), owner, mtime
 (clamped to SOURCE_DATE_EPOCH, whole seconds), size and sha256 of a file's content, a symbolic link's
@@ -452,10 +455,29 @@ def gzip_file(source: str, target: str) -> None:
         shutil.copyfileobj(reader, writer, 1 << 20)
 
 
-def pack(root: str, state: str, epoch: int, out: str, diff_id: str, status_out: str | None) -> int:
-    """Write the layer; returns the number of entries in it (nothing is written when there are none)."""
+def with_absent(new: Scan, state: dict[str, Entry]) -> Scan:
+    """`new` plus the state's absent device nodes that are still not on the disk and whose directory still
+    is one: what the root holds, as a full tarball writes it."""
+    entries = dict(new.entries)
+    for path, one in state.items():
+        if not one.absent or path in entries:
+            continue
+        parent = path.rpartition("/")[0]
+        holder = entries.get(parent)
+        if not parent or (holder is not None and holder.kind == "dir"):
+            entries[path] = one
+    return Scan(entries, new.links)
+
+
+def pack(
+    root: str, state: str, epoch: int, out: str, diff_id: str | None, status_out: str | None, *, full: bool = False
+) -> int:
+    """Write the layer; returns the number of entries in it (nothing is written when there are none).
+    `full` writes every path of the root (an empty parent state), the state's absent devices included."""
     old = read_state(state)
     new = scan(root, epoch)
+    if full:
+        new, old = with_absent(new, old), {}
     found = changes(old, new.entries)
     if status_out is not None:
         shutil.copyfile(os.path.join(root, "var/lib/dpkg/status"), status_out)
@@ -463,8 +485,9 @@ def pack(root: str, state: str, epoch: int, out: str, diff_id: str, status_out: 
         return 0
     plain = out + ".tar"
     write_tar(root, found, new, epoch, plain)
-    with open(diff_id, "w", encoding="ascii") as handle:
-        handle.write(sha256_of(plain) + "\n")
+    if diff_id is not None:
+        with open(diff_id, "w", encoding="ascii") as handle:
+            handle.write(sha256_of(plain) + "\n")
     gzip_file(plain, out)
     os.unlink(plain)
     return len(found)
@@ -486,8 +509,9 @@ def main(argv: Sequence[str]) -> int:
     packing.add_argument("--state", required=True)
     packing.add_argument("--epoch", type=int, required=True)
     packing.add_argument("--out", required=True)
-    packing.add_argument("--diff-id", required=True)
+    packing.add_argument("--diff-id")
     packing.add_argument("--status-out")
+    packing.add_argument("--full", action="store_true", help="every path of the root, not the change")
     arguments = parser.parse_args(list(argv))
     try:
         if arguments.command == "unpack":
@@ -499,9 +523,18 @@ def main(argv: Sequence[str]) -> int:
             print(f"unpacked {len(arguments.layers)} layers, {len(entries)} paths")
         else:
             count = pack(
-                arguments.root, arguments.state, arguments.epoch, arguments.out, arguments.diff_id, arguments.status_out
+                arguments.root,
+                arguments.state,
+                arguments.epoch,
+                arguments.out,
+                arguments.diff_id,
+                arguments.status_out,
+                full=arguments.full,
             )
-            print(f"layer of {count} entries" if count else "no layer: nothing changed")
+            if arguments.full:
+                print(f"root of {count} entries")
+            else:
+                print(f"layer of {count} entries" if count else "no layer: nothing changed")
     except (LayerError, OSError, tarfile.TarError) as error:
         print(f"layer.py: {error}", file=sys.stderr)
         return 1
