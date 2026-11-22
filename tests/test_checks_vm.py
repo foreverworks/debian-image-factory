@@ -39,23 +39,27 @@ class CredentialsTest(unittest.TestCase):
         self.assertNotRegex(line, r"(?<!\$)\$(?!\$)")  # every $ is doubled
         unescaped = line.removeprefix('ExecStart=/bin/sh -c "').removesuffix('"').replace("$$", "$")
         self.assertEqual(unescaped, vm.REPORT_SCRIPT)
-        self.assertIn("> /dev/ttyS0", vm.REPORT_SCRIPT)
+        self.assertIn("> /dev/ttyS1", vm.REPORT_SCRIPT)
+        self.assertNotIn("ttyS0", vm.REPORT_SCRIPT)  # the console carries kernel messages that split a line
         with self.assertRaises(ValueError):
             vm.unit_quoted('echo "x"')
 
 
 class QemuTest(unittest.TestCase):
     def test_installer_boots_its_kernel_and_initrd_with_the_serial_console(self) -> None:
-        args = vm.installer_args(vm.Machine("tcg", 2048), "/w/vmlinuz", "/w/initrd.img", "/w/serial-1.log", ["/w/c1"])
+        machine = vm.Machine("tcg", 2048)
+        paths = ("/w/vmlinuz", "/w/initrd.img", "/w/serial-1.log", "/w/report-1.log")
+        args = vm.installer_args(machine, *paths, ["/w/c1"])
         joined = " ".join(args)
         self.assertIn("-kernel /w/vmlinuz -initrd /w/initrd.img -append console=ttyS0", joined)
         self.assertIn("-accel tcg,thread=multi", joined)
         self.assertIn("-smbios type=11,path=/w/c1", joined)
         self.assertIn("-nic none", joined)
-        self.assertIn("-serial file:/w/serial-1.log", joined)
+        self.assertIn("-serial file:/w/serial-1.log -serial file:/w/report-1.log", joined)  # ttyS0, then ttyS1
 
     def test_os_boots_by_ovmf_from_its_disk_and_kvm_uses_the_host_cpu(self) -> None:
-        joined = " ".join(vm.os_args(vm.Machine("kvm", 1536), "/s/disk.img", "/s/vars.fd", "/w/serial.log", []))
+        machine = vm.Machine("kvm", 1536)
+        joined = " ".join(vm.os_args(machine, "/s/disk.img", "/s/vars.fd", "/w/serial.log", "/w/report.log", []))
         self.assertIn("-accel kvm -cpu host", joined)
         self.assertIn(f"readonly=on,file={vm.OVMF_CODE}", joined)
         self.assertIn("file=/s/vars.fd", joined)
@@ -107,6 +111,25 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(late.problem, "no FACTORY-REPORT line within 600 s")
         self.assertEqual(vm.tail(late.serial), "line one | line two")
         self.assertEqual(boot("", 1).problem, "QEMU exited 1 without a FACTORY-REPORT line")
+
+    def test_a_guest_that_powers_off_without_a_report_is_told_apart_from_a_mangled_one(self) -> None:
+        off = vm.boot_of(0, "Power down\n", 600)
+        self.assertEqual(
+            off.problem,
+            "QEMU exited 0 (the guest powered off) without a FACTORY-REPORT line; the report port was empty",
+        )
+        cut = vm.boot_of(0, "Power down\n", 600, "\nFACTORY-REPORT kernel=6.12.0 machine-id=ab")
+        self.assertIn("is not whole: FACTORY-REPORT kernel=6.12.0 machine-id=ab", cut.problem or "")
+        split = vm.boot_of(0, "FACTORY-REPORT kernel=6.12.0 mach\n[ 6.3] systemd-shutdown: Powering off\n", 600)
+        self.assertIn("is not whole", split.problem or "")
+
+    def test_the_report_is_read_from_its_own_port_whatever_the_console_holds(self) -> None:
+        # a kernel message printed mid-line on the console cannot split the report on its own port
+        console = "FACTORY-REPORT kernel=6.12.0 mach\n[ 6.3] reboot: Power down\n"
+        found = vm.boot_of(0, console, 600, report())
+        self.assertIsNone(found.problem)
+        self.assertEqual(found.report, vm.parse_report(report()))
+        self.assertEqual(found.serial, console)
 
     def test_installer_boot_passes_when_the_kit_kernel_runs(self) -> None:
         passed = vm.installer_boot(KERNEL, (), boot(report()), "kit.tar")

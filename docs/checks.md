@@ -284,10 +284,11 @@ PASSED when the marker appears with that kernel. FAILED otherwise.
 QEMU boots `vmlinuz` with `initrd.img` as the whole system and `console=ttyS0`. The guest reports
 through two systemd credentials passed as SMBIOS OEM strings: a unit that waits for the boot to finish
 and writes one `FACTORY-REPORT` line (running kernel, machine ID, SSH host key digest, system state) to
-the serial port, then powers off, and a drop-in that makes `multi-user.target` want it. The artifact is
+a second serial port (`ttyS1`, apart from the console, so the kernel's messages cannot split the line), then
+powers off, and a drop-in that makes `multi-user.target` want it. The artifact is
 never changed. The tests are `kit-json-matches-files` (the members are what kit.json lists),
-`report-arrived` and `running-kernel-is-the-kit-kernel`. A boot that does not report in time names the
-end of its serial log, and the whole log is kept beside the kit as `<kit>.boot-<n>.serial.log`. The
+`report-arrived` and `running-kernel-is-the-kit-kernel`. A boot that does not report names why (QEMU's exit status, and whether a half-written report line
+reached the port) and the end of its console log, and the whole log is kept beside the kit as `<kit>.boot-<n>.serial.log`. The
 check is not run when docker or the boot image (`scripts/builder vm`, `test --vm-image`) is missing.
 
 ## os-boot

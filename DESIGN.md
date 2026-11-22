@@ -1798,8 +1798,8 @@ commit with its version.
   and snapshot), with `--device /dev/kvm` when it opens and TCG otherwise, under a longer time limit;
   the harness never changes the artifact. The guest reports through two systemd credentials passed as
   SMBIOS type 11 OEM strings: an extra unit (`Type=simple`, so the boot can finish while it waits for
-  `systemctl is-system-running --wait`) that writes one `FACTORY-REPORT` line to `/dev/ttyS0` and powers
-  off, and a drop-in that makes `multi-user.target` want it. Both boots of `two-clones` run at once and
+  `systemctl is-system-running --wait`) that writes one `FACTORY-REPORT` line to `/dev/ttyS1` and powers
+  off (a second serial port QEMU keeps in its own file, so the kernel's console messages cannot split the line), and a drop-in that makes `multi-user.target` want it. Both boots of `two-clones` run at once and
   also serve the boot check. A failed boot check keeps each boot's serial log beside the artifact and
   names its last lines in the result. `tests/integration/test_boot_checks.py` builds a small OS root and
   kit with mmdebstrap and boots both; under TCG each pair of boots takes under a minute.

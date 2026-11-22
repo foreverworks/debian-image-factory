@@ -4,7 +4,7 @@ installer and OS kinds.
 QEMU boots the exact artifact inside the boot checks' container image (`builder/vm.Dockerfile`); the
 harness never changes the artifact. The guest reports through two systemd credentials passed as SMBIOS
 type 11 OEM strings: an extra unit, `factory-report.service`, that waits for the boot to finish and writes
-one `FACTORY-REPORT` line to the serial port before powering off, and a drop-in that makes
+one `FACTORY-REPORT` line to a second serial port, apart from the console, before powering off, and a drop-in that makes
 `multi-user.target` want it. Everything here is text and argument lists: the QEMU command lines, the
 credentials, the OS disk's GPT layout and embedded grub.cfg, the script the container runs, and the
 reading of the serial log into results. `vmrun` runs it.
@@ -22,7 +22,10 @@ from .model import INSTALLER_BOOT, OS_BOOT, TWO_CLONES, Result, result, split
 REPORT_UNIT_NAME: Final = "factory-report.service"
 REPORT_MARKER: Final = "FACTORY-REPORT"
 ROOT_LABEL: Final = "factory-root"
-SERIAL: Final = "/dev/ttyS0"
+SERIAL: Final = "/dev/ttyS1"
+"""The report's own port, apart from the console (ttyS0). On the console the kernel prints through the same
+UART, straight past the tty's transmit buffer, so a message printed while the report drains lands in the
+middle of the report line; and the guest can power off before the buffer is empty."""
 
 MIB: Final = 1024 * 1024
 SECTOR: Final = 512
@@ -102,7 +105,7 @@ OVMF_CODE: Final = "/usr/share/OVMF/OVMF_CODE_4M.fd"
 OVMF_VARS: Final = "/usr/share/OVMF/OVMF_VARS_4M.fd"
 
 
-def common_args(machine: Machine, serial: str, credentials: Sequence[str]) -> list[str]:
+def common_args(machine: Machine, serial: str, report: str, credentials: Sequence[str]) -> list[str]:
     accel = (
         ["-accel", "kvm", "-cpu", "host"] if machine.accel == "kvm" else ["-accel", "tcg,thread=multi", "-cpu", "max"]
     )
@@ -118,26 +121,31 @@ def common_args(machine: Machine, serial: str, credentials: Sequence[str]) -> li
         "-no-reboot",
         "-nic", "none",
         "-serial", f"file:{serial}",
+        "-serial", f"file:{report}",
     ]  # fmt: skip
     for path in credentials:
         args += ["-smbios", f"type=11,path={path}"]
     return args
 
 
-def installer_args(machine: Machine, vmlinuz: str, initrd: str, serial: str, credentials: Sequence[str]) -> list[str]:
+def installer_args(
+    machine: Machine, vmlinuz: str, initrd: str, serial: str, report: str, credentials: Sequence[str]
+) -> list[str]:
     """The kit booted from RAM: its kernel, its initrd as the whole system, the console on the serial port."""
     return [
-        *common_args(machine, serial, credentials),
+        *common_args(machine, serial, report, credentials),
         "-kernel", vmlinuz,
         "-initrd", initrd,
         "-append", "console=ttyS0",
     ]  # fmt: skip
 
 
-def os_args(machine: Machine, disk: str, varstore: str, serial: str, credentials: Sequence[str]) -> list[str]:
+def os_args(
+    machine: Machine, disk: str, varstore: str, serial: str, report: str, credentials: Sequence[str]
+) -> list[str]:
     """The scratch disk booted by OVMF (UEFI), from its EFI system partition's `EFI/BOOT/BOOTX64.EFI`."""
     return [
-        *common_args(machine, serial, credentials),
+        *common_args(machine, serial, report, credentials),
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={OVMF_CODE}",
         "-drive", f"if=pflash,format=raw,unit=1,file={varstore}",
         "-drive", f"file={disk},format=raw,if=virtio",
@@ -223,6 +231,10 @@ def serial_log(n: int) -> str:
     return f"{WORK}/serial-{n}.log"
 
 
+def report_log(n: int) -> str:
+    return f"{WORK}/report-{n}.log"
+
+
 def boots_script(commands: Sequence[Sequence[str]], timeout_s: int) -> str:
     """Start every boot at once, each under `timeout`, and wait for all; each one's exit status goes to
     `exit-<n>` (124 when it ran out of time)."""
@@ -242,7 +254,7 @@ def installer_script(machine: Machine, count: int, timeout_s: int) -> str:
     """Boot the kit (its two files in WORK) `count` times at once."""
     credentials = [f"{WORK}/{name}" for name, _ in credential_files()]
     commands = [
-        installer_args(machine, f"{WORK}/vmlinuz", f"{WORK}/initrd.img", serial_log(n), credentials)
+        installer_args(machine, f"{WORK}/vmlinuz", f"{WORK}/initrd.img", serial_log(n), report_log(n), credentials)
         for n in range(1, count + 1)
     ]
     return "set -eu\n" + boots_script(commands, timeout_s)
@@ -283,7 +295,9 @@ rm -f {SCRATCH}/esp.img {SCRATCH}/root.img
         for n in range(1, count + 1)
     )
     commands = [
-        os_args(machine, f"{SCRATCH}/disk-{n}.img", f"{SCRATCH}/vars-{n}.fd", serial_log(n), credentials)
+        os_args(
+            machine, f"{SCRATCH}/disk-{n}.img", f"{SCRATCH}/vars-{n}.fd", serial_log(n), report_log(n), credentials
+        )
         for n in range(1, count + 1)
     ]
     return prepare + copies + f"rm -f {SCRATCH}/disk.img\n" + boots_script(commands, timeout_s)
@@ -334,17 +348,26 @@ def tail(serial: str, lines: int = TAIL_LINES) -> str:
     return " | ".join(kept[-lines:]) if kept else "(the serial log is empty)"
 
 
-def boot_of(exit_status: int | None, serial: str, timeout_s: int) -> Boot:
-    """A boot from QEMU's exit status (None when it never ran) and its serial log."""
-    report = parse_report(serial)
+def boot_of(exit_status: int | None, serial: str, timeout_s: int, report_port: str = "") -> Boot:
+    """A boot from QEMU's exit status (None when it never ran), its console log and what the guest wrote to
+    the report port. The report is on the port; one on the console counts too."""
+    report = parse_report(report_port) or parse_report(serial)
     if report is not None:
         return Boot(report, None, serial)
     if exit_status == 124 or exit_status == 137:
         problem = f"no {REPORT_MARKER} line within {timeout_s} s"
     elif exit_status is None:
         problem = "QEMU did not run"
+    elif exit_status == 0:
+        problem = f"QEMU exited 0 (the guest powered off) without a {REPORT_MARKER} line"
     else:
         problem = f"QEMU exited {exit_status} without a {REPORT_MARKER} line"
+    written = next((text for text in (report_port, serial) if REPORT_MARKER in text), "")
+    if written:
+        partial = tail(written[written.index(REPORT_MARKER) :], 1)
+        problem += f"; a {REPORT_MARKER} was written but is not whole: {partial}"
+    elif exit_status == 0:
+        problem += "; the report port was empty" if not report_port.strip() else "; the report port held none"
     return Boot(None, problem, serial)
 
 

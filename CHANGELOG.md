@@ -2,6 +2,9 @@
 
 ## 0.6.3 (not yet tagged)
 
+- The boot checks' guest writes its `FACTORY-REPORT` line to its own serial port (`ttyS1`) instead of the console, where a
+  kernel message printed at the same moment could split the line and fail a boot that had worked. A boot with no
+  report now names QEMU's exit status and any half-written report line.
 - A workflow rewrites the checksum of the input-lock entry on Renovate's branches, so its pull requests no longer
   carry a stale `sha256`.
 - `publish --image NAME` publishes only the images it names.

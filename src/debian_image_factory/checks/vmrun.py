@@ -135,10 +135,11 @@ def run_boots(
         return Unready(f"the boot did not start (exit {ran.returncode}): {output}", ran.returncode == UNPREPARED)
     boots: list[vm.Boot] = []
     for n in range(1, count + 1):
-        status_file, log = work / f"exit-{n}", work / f"serial-{n}.log"
+        status_file, log, port = work / f"exit-{n}", work / f"serial-{n}.log", work / f"report-{n}.log"
         status = int(status_file.read_text().strip() or "-1") if status_file.exists() else None
         serial = log.read_bytes().decode("utf-8", "replace") if log.exists() else ""
-        boots.append(vm.boot_of(status, serial, timeout_s))
+        report = port.read_bytes().decode("utf-8", "replace") if port.exists() else ""
+        boots.append(vm.boot_of(status, serial, timeout_s, report))
     return boots
 
 
