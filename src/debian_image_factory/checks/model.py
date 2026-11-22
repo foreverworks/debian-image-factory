@@ -4,7 +4,7 @@ A check either ran and has a result (an outcome and the names of its tests), or 
 says why; a check that did not run writes no record and is never counted as passed.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -16,6 +16,9 @@ SBOM_COMPLETE: Final = "sbom-complete"
 NO_BUILD_SNAPSHOT: Final = "no-build-snapshot"
 SAME_RESOLUTION: Final = "same-resolution"
 TWO_CLONES: Final = "two-clones"
+ANCESTRY: Final = "ancestry"
+OCI_RUN: Final = "oci-run"
+LOCKED_INPUTS: Final = "locked-inputs"
 
 CORE_CHECKS: Final = (
     NO_BUILD_SNAPSHOT,
@@ -26,6 +29,22 @@ CORE_CHECKS: Final = (
     TWO_CLONES,
 )
 """The checks this release runs on a core artifact (the same set as `definition.BUILTIN_CHECKS["core"]`)."""
+
+OCI_CHECKS: Final = (
+    ANCESTRY,
+    LOCKED_INPUTS,
+    NO_BUILD_SNAPSHOT,
+    NO_MACHINE_IDENTITY,
+    OCI_RUN,
+    PACKAGE_SET,
+    SBOM_COMPLETE,
+    TWO_CLONES,
+)
+"""The checks this release runs on an OCI image: `definition.BUILTIN_CHECKS["oci"]` and `locked-inputs`,
+which an image has when it uses lock entries."""
+
+CHECKS_OF_KIND: Final[Mapping[str, tuple[str, ...]]] = {"core": CORE_CHECKS, "oci": OCI_CHECKS}
+"""The kinds `test` runs checks on, and each one's checks."""
 
 LIMIT: Final = 25
 """The most failing items one test lists by name; the rest are counted, so a record stays small."""
