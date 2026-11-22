@@ -26,7 +26,8 @@ jobs:
       - name: System packages a bare runner lacks (git, gpgv, shellcheck and more)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils shellcheck
+          sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils shellcheck debian-archive-keyring
+          test -s /usr/share/keyrings/debian-archive-keyring.pgp || { echo "no Debian archive keyring at /usr/share/keyrings/debian-archive-keyring.pgp" >&2; exit 1; }
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,7 +57,8 @@ jobs:
       - name: System packages a bare runner lacks (git, gpgv and more)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils
+          sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils debian-archive-keyring
+          test -s /usr/share/keyrings/debian-archive-keyring.pgp || { echo "no Debian archive keyring at /usr/share/keyrings/debian-archive-keyring.pgp" >&2; exit 1; }
 
       # A world-writable socket is safe here: the runner is a fresh VM that runs this one job and is thrown away
       # after it, so no other user or job can reach the socket.

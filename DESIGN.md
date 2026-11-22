@@ -1422,7 +1422,7 @@ debian-image-factory` fills once the release exists. The Action reads three of i
   "extractVersion": "^v(?<version>.+)$",
   "sha256": "<sha256 of the .pyz>",
   "url": "https://github.com/foreverworks/debian-image-factory/releases/download/v{version}/debian-image-factory-{version}.pyz",
-  "version": "0.6.1"
+  "version": "0.6.2"
 }
 ```
 
@@ -1449,7 +1449,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - id: factory
-        uses: foreverworks/debian-image-factory@<commit> # v0.6.1
+        uses: foreverworks/debian-image-factory@<commit> # v0.6.2
         with:
           definition: images/factory.toml
           lock: images/lock.json

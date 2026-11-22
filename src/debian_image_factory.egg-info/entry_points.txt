@@ -1,0 +1,2 @@
+[console_scripts]
+debian-image-factory = debian_image_factory.cli:main
