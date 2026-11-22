@@ -214,8 +214,10 @@ oci://ghcr.io/example/debian --pin sha256:<digest> --dry-run` lists, for every i
 the newest candidate it would keep (`--keep-good`, `--keep-candidates`) and the rest it would delete,
 with the reason for each line. A build is good when every check your definition requires for its image
 has passed; one with a failed check is deleted once its checks have ended, and a run of failed nights
-never pushes out a good build. Anything you still run or may roll back to goes in as `--pin`, an
-artifact digest that is never deleted. Drop `--dry-run` to delete: the artifact and its records from a directory or a
+never pushes out a good build, and a check you add to `[checks]` later does not demote the builds made
+before it. Anything you still run or may roll back to goes in as `--pin`, an artifact digest that is never
+deleted. Always run with `--dry-run` first, and again after you change `[checks]`: it shows what a run
+would delete. Drop `--dry-run` to delete: the artifact and its records from a directory or a
 release, the image, its records and its identity tag from a registry (which must allow deleting manifests; zot and
 the official distribution image do, a distribution registry with `storage.delete.enabled` off does not). A delete that fails is reported for its
 artifact and the exit status is 1.

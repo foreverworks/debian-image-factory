@@ -97,9 +97,10 @@ class GoodBuildsTest(unittest.TestCase):
 
 class CandidatesTest(unittest.TestCase):
     def test_the_newest_candidate_stays_by_default(self) -> None:
-        found = run([build(1, PENDING), build(2, PENDING), build(3, PENDING)])
-        self.assertEqual((kept(found), deleted(found)), (["app-3"], ["app-2", "app-1"]))
-        self.assertEqual({one.standing for one in found}, {"candidate"})
+        # one older build passed oci-run, so the check is in force for the later ones
+        found = run([build(9, day=1), build(1, PENDING, day=2), build(2, PENDING, day=3), build(3, PENDING, day=4)])
+        self.assertEqual((kept(found), deleted(found)), (["app-3", "app-9"], ["app-2", "app-1"]))
+        self.assertEqual({one.standing for one in found if one.artifact.name != "app-9"}, {"candidate"})
 
     def test_candidates_and_good_builds_have_their_own_limits(self) -> None:
         found = run([build(1), build(2), build(3, PENDING), build(4, PENDING)], good=1, candidates=1)
@@ -118,6 +119,53 @@ class CandidatesTest(unittest.TestCase):
 
     def test_the_last_result_of_a_check_decides_so_a_later_pass_is_good(self) -> None:
         self.assertEqual(run([build(1, {"package-set": "PASSED", "oci-run": "PASSED"})])[0].standing, "good")
+
+
+class NewCheckTest(unittest.TestCase):
+    """A check added to the definition after builds were made does not demote them (DESIGN 11)."""
+
+    def required_with(self, extra: str) -> retention.RequiredChecks:
+        return lambda image, locked: (*CHECKS, extra)
+
+    def test_adding_a_required_check_keeps_every_good_build(self) -> None:
+        builds = [build(n) for n in range(1, 6)]
+        found = retention.retain(builds, self.required_with("scan"), [], 5, 1)
+        self.assertEqual(deleted(found), [])
+        self.assertEqual([one.standing for one in found], ["candidate", "good", "good", "good", "good"])
+
+    def test_the_same_with_the_strict_rule_would_have_deleted_most_of_them(self) -> None:
+        builds = [build(n) for n in range(1, 6)]
+        strict = [retention.standing_of(one, self.required_with("scan")) for one in builds]
+        self.assertEqual(strict, ["candidate"] * 5)
+
+    def test_older_builds_stay_good_once_the_new_check_has_run_on_a_newer_one(self) -> None:
+        required = self.required_with("scan")
+        tested = build(6, {**PASSED, "scan": "PASSED"})
+        found = retention.retain([*(build(n) for n in range(1, 6)), tested], required, [], 5, 1)
+        self.assertEqual(deleted(found), ["app-1"])  # the sixth good build, as without the new check
+        self.assertEqual({one.standing for one in found}, {"good"})
+
+    def test_a_failed_new_check_still_fails_a_build_it_ran_on(self) -> None:
+        required = self.required_with("scan")
+        found = retention.retain([build(1), build(2, {**PASSED, "scan": "FAILED"})], required, [], 5, 1)
+        self.assertEqual([(one.artifact.name, one.standing) for one in found], [("app-2", "failed"), ("app-1", "good")])
+
+    def test_a_build_newer_than_the_first_result_of_a_check_is_held_to_it(self) -> None:
+        required = self.required_with("scan")
+        first = build(1, {**PASSED, "scan": "PASSED"}, day=2)
+        later = build(2, day=3)
+        self.assertEqual(retention.retain([first, later], required, [], 5, 1)[0].standing, "candidate")
+
+    def test_a_build_with_no_result_for_any_required_check_is_never_helped(self) -> None:
+        found = retention.retain([build(1, {}), build(2)], self.required_with("scan"), [], 5, 1)
+        self.assertEqual(
+            {one.artifact.name: one.standing for one in found}, {"app-1": "candidate", "app-2": "candidate"}
+        )
+
+    def test_a_check_nobody_has_run_is_not_held_against_older_builds_but_is_against_the_newest(self) -> None:
+        found = run([build(1), build(2), build(3, PENDING)], good=5, candidates=1)
+        self.assertEqual([(one.artifact.name, one.standing) for one in found][0], ("app-3", "candidate"))
+        self.assertEqual({one.standing for one in found[1:]}, {"good"})
 
 
 class FailedBuildsTest(unittest.TestCase):

@@ -124,6 +124,13 @@ class DirTest(PruneCase):
         self.prune([self.target])
         self.assertEqual(self.names(), {file for name, _, records in good for file in (name, records.name)})
 
+    def test_a_required_check_added_to_the_definition_deletes_none_of_the_good_builds(self) -> None:
+        good = [self.core(n) for n in range(1, 6)]
+        self.definition.write_text(DEFINITION.replace('"oci-run"]', '"oci-run", "package-scan"]'))
+        said = self.prune([self.target])
+        self.assertEqual(self.names(), {file for name, _, records in good for file in (name, records.name)})
+        self.assertEqual(self.lines(said, "deleted"), [])
+
     def test_keep_numbers_come_from_the_options(self) -> None:
         for n in range(1, 6):
             self.core(n)

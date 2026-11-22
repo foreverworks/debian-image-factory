@@ -1524,8 +1524,9 @@ reported as not run, never as passed, and the image stays a candidate.
    build. Move the baseline at point releases, through the gate your persistent systems use.
 7. **Prune** with your pins: by default the newest 5 good builds and 1 candidate per image stay in
    each target, failed builds are deleted once their checks end, and a pinned artifact is never
-   pruned. Pass every digest you still run or may roll back to as `--pin`; `--dry-run` shows the list
-   first.
+   pruned. Pass every digest you still run or may roll back to as `--pin`. Run with `--dry-run` first,
+   always after you change `[checks]` or the factory's version: a check you add does not demote the
+   builds made before it (11), but only the list shows what a run would delete.
 
 ## 10. What stays with the consumer, what lives in the factory
 
@@ -1569,7 +1570,25 @@ check has a passing last result, **failed** when one failed and every required c
 checks have ended), and a **candidate** otherwise: it includes a build whose failed check left others
 without a result, because a checker that stops at its first failure or is cancelled never ends them, and
 it leaves through the candidate limit instead of staying forever or being deleted while a check may
-still report. The rules, per image and per target: a pinned digest is never deleted and takes no place in
+still report.
+
+**A check added later does not demote old builds.** Records do not say which checks were required when a
+build was made, and judging every build by today's definition would make a new required check turn every
+good build into a candidate, and `prune` would then delete all but the newest. So the results tell
+which checks came after a build. A required check a build has no result for is not held against it when
+(a) the oldest build of the image with a result for that check is newer than the build, or (b) no build
+of the image has a result for the check at all and the build is not the image's newest (the newest may
+still be being tested); and only for a build with a result for at least one required check, since
+a build nothing was run on is not made good by it. A failed result always counts. The rule can only keep
+more builds than judging by today's definition, never fewer: a build that was good before the change
+stays good for the limits, and the one tested under the new check is held to it. The price is that a
+required check that never ran anywhere (an Incus check on a runner without an Incus host) is not held
+against builds older than the newest, which then count as good for the limits and stay up to
+`keep_good`; the `plan` still waits for such a build, since it uses today's definition to decide reuse
+(7.4). Run `prune --dry-run` before the first real `prune` after a change to `[checks]`, and after any
+upgrade, to see the list.
+
+The rules, per image and per target: a pinned digest is never deleted and takes no place in
 the limits; the newest `keep_good` good builds stay; the newest `keep_candidates` candidates stay;
 failed builds are deleted. The two counts are separate, so a run of failed nights never pushes out a good
 build, and an image keeps at most `keep_good + keep_candidates` builds plus its pins. "Newest" is 7.4's
@@ -1634,7 +1653,8 @@ pre-release (3.16.0a2 today), so a coming break is seen weeks before it matters.
   is a candidate; a run of failed nights never pushes out a good build; pins are never pruned, whatever
   their standing, and take no place in the limits; at most `keep_good + keep_candidates` per image plus
   pins; an image the definition does not name is kept; `locked-inputs` is required only of a build whose
-  provenance lists locked inputs.
+  provenance lists locked inputs; five good builds and a required check added to the definition are
+  all kept, and a build newer than the first result of a check is held to it.
 - Prune, against `dir://` on a temporary directory, a fake GitHub API and an in-process registry (with
   and without the referrers API, paged tag lists): the lines printed, `--dry-run` sending no delete,
   records and rootfs files removed with their artifact, shared records kept, ignored files untouched,
