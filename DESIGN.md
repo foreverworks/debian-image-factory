@@ -556,8 +556,9 @@ The plan computes each package set without building anything and without privile
    `Essential: yes` package of the suite itself (not of -updates or -security; mmdebstrap selects
    them with `?narrow` on the suite and sets `pkgCacheGen::ForceEssential ","`), then `apt` and the
    definition's packages on top of that result (the plan's `request` for core lists `apt` and the
-   packages). A child's request is its packages, its kind defaults and its modules' dependencies
-   (none in M1: `node-tarball` and `file` need no packages, and `deb` arrives with M5), against a
+   packages). A child's request is its packages, its kind defaults and its modules' run-time
+   packages (`node-tarball` adds `libatomic1`, which nodejs.org's `node` links; `file` adds none;
+   `deb` takes its dependencies from the .deb, M5), against a
    status holding its parent's set; an `Inst`
    line that upgrades a parent's package, or any `Remv`, is refused. apt's own solver answers, one
    `Inst` line per package, and this runs as an ordinary user.

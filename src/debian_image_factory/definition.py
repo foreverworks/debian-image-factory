@@ -40,6 +40,16 @@ KIND_DEFAULTS: Final[Mapping[str, tuple[str, ...]]] = {
 They are resolved like any other package, so their versions enter every identity through the
 package set; changing this table changes identities through the packages it adds."""
 
+MODULE_PACKAGES: Final[Mapping[str, tuple[str, ...]]] = {
+    "builtin:deb": (),
+    "builtin:node-tarball": ("libatomic1",),
+    "builtin:file": (),
+}
+"""The Debian packages what a builtin module installs needs at run time, added to the request of every
+image that uses the module (DESIGN 7.2). nodejs.org's linux-x64 `node` links `libatomic.so.1`, which no
+kind installs by itself; `builtin:deb` takes its dependencies from the .deb. A path module brings none:
+its script runs with what the image's packages put there."""
+
 APT_SOURCES: Final = ("live", "baseline", "baseline-except-security")
 COMPRESSION: Final = ("gzip", "zstd")
 BUILTIN_MODULES: Final = ("builtin:deb", "builtin:node-tarball", "builtin:file")

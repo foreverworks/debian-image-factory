@@ -13,17 +13,19 @@ from input_lock import TRUST, Entry, JsonValue
 from input_lock.lock import render  # not in input-lock's __all__: renders any url template field of an entry
 
 from . import ENGINE, __version__
-from .definition import KIND_DEFAULTS, Definition, Param, required_checks, top_down
+from .definition import KIND_DEFAULTS, MODULE_PACKAGES, Definition, Param, required_checks, top_down
 from .identity import ImageInputs
 from .published import Decision
 
 SCHEMA: Final = 1
 
 
-def request(definition: Definition, image: str) -> list[str]:
-    """What a child asks apt for: its kind's defaults and its own packages (DESIGN 7.2)."""
+def request(definition: Definition, image: str, modules: Sequence[str]) -> list[str]:
+    """What a child asks apt for: its kind's defaults, its own packages and what the modules it uses
+    (`modules`, by name) need at run time (DESIGN 7.2)."""
     spec = definition.images[image]
-    return sorted({*KIND_DEFAULTS[spec.kind], *spec.packages})
+    needed = (package for name in modules for package in MODULE_PACKAGES.get(definition.modules[name].use, ()))
+    return sorted({*KIND_DEFAULTS[spec.kind], *spec.packages, *needed})
 
 
 def core_request(packages: Sequence[str]) -> list[str]:
@@ -106,7 +108,7 @@ def trust_of(entry: Entry) -> dict[str, JsonValue]:
 def image_entry(definition: Definition, inputs: ImageInputs) -> dict[str, JsonValue]:
     spec = definition.images[inputs.name]
     requested: list[JsonValue] = [
-        *(request(definition, inputs.name) if spec.kind != "core" else core_request(spec.packages))
+        *(request(definition, inputs.name, inputs.modules) if spec.kind != "core" else core_request(spec.packages))
     ]
     return {
         "kind": spec.kind,

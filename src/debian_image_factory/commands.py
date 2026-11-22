@@ -249,7 +249,7 @@ def unsupported_modules(lock: Lock, loaded: Loaded, params: Mapping[str, Param])
 
 
 def resolve_all(
-    lock: Lock, loaded: Loaded, snapshot_id: str, sources: Sources, workdir: Path
+    lock: Lock, loaded: Loaded, params: Mapping[str, Param], snapshot_id: str, sources: Sources, workdir: Path
 ) -> dict[str, tuple[Package, ...]]:
     spec = loaded.definition
     try:
@@ -275,7 +275,8 @@ def resolve_all(
                         f"images.{name}: core resolves to a kernel ({', '.join(kernels)}); core never installs one"
                     )
             else:
-                resolved[name] = resolve.resolve_child(opened, resolved[image.parent], plan.request(spec, name), name)
+                asked = plan.request(spec, name, identity.modules_used(lock, spec, name, params))
+                resolved[name] = resolve.resolve_child(opened, resolved[image.parent], asked, name)
     except (archive.ArchiveError, resolve.ResolveError, OSError, ValueError, KeyError) as error:
         raise Failed(str(error)) from None
     return resolved
@@ -376,7 +377,7 @@ def plan_command(
         except ValueError as error:
             raise Usage(f"--previous {previous_path}: {error}") from None
     with tempfile.TemporaryDirectory(prefix="debian-image-factory-plan-") as scratch:
-        resolved = resolve_all(lock, loaded, snapshot_id, sources, Path(scratch))
+        resolved = resolve_all(lock, loaded, params, snapshot_id, sources, Path(scratch))
     inputs = compute_inputs(lock, loaded, resolved, params)
     decisions, rejected = lookups(parsed_targets, loaded, inputs)
     document = plan.build_plan(

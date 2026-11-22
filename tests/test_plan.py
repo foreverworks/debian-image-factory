@@ -292,7 +292,17 @@ class DocumentTest(unittest.TestCase):
         spec = parse_definition(
             "[images.core]\nkind = 'core'\n" + child("k", "installer", "core", 'packages = ["udev", "zz", "aa"]\n')
         )
-        self.assertEqual(plan.request(spec, "k"), ["aa", "iproute2", "netbase", "systemd-sysv", "udev", "zz"])
+        self.assertEqual(plan.request(spec, "k", ()), ["aa", "iproute2", "netbase", "systemd-sysv", "udev", "zz"])
+
+    def test_a_module_adds_the_packages_its_install_needs_at_run_time(self) -> None:
+        spec = parse_definition(
+            "[modules.node]\nuse = 'builtin:node-tarball'\n[modules.f]\nuse = 'builtin:file'\n"
+            "[images.core]\nkind = 'core'\n" + child("k", "oci", "core", 'packages = ["zz"]\n')
+        )
+        self.assertEqual(plan.request(spec, "k", ("f", "node")), ["libatomic1", "zz"])
+        self.assertEqual(plan.request(spec, "k", ("f",)), ["zz"])
+        found = images_of(make(self.inputs, {}))
+        self.assertEqual(found["node-26"]["request"], ["libatomic1"])
 
     def test_checks_come_from_the_definition_with_locked_inputs_for_images_with_entries(self) -> None:
         found = images_of(make(self.inputs, {}))
