@@ -235,9 +235,9 @@ class OciBuildTest(unittest.TestCase):
         with tarfile.open(layout.layers[-1], mode="r:gz") as archive:
             handle = archive.extractfile(CORE_PARENT_INPUTS)
             assert handle is not None
-            self.assertEqual(
-                handle.read().decode().split(), ["node-v26.13.1-linux-x64.tar.xz", "pubring.kbx"]
-            )  # the inputs were staged although node-26 has no hooks
+            # the tarball was staged although node-26 has no hooks; the release keyring is a trust root
+            # (signed_by), checked at fetch and never handed to the module's install
+            self.assertEqual(handle.read().decode().split(), ["node-v26.13.1-linux-x64.tar.xz"])
         self.assertEqual(
             (layout.config.user, layout.config.cmd, layout.config.env), ("0:0", ("node",), (("LANG", "C.UTF-8"),))
         )
