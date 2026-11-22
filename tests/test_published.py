@@ -25,6 +25,7 @@ from debian_image_factory.published import (
     artifact_name,
     decide,
     parse_artifact_name,
+    parse_envelope,
     parse_envelopes,
     parse_target,
 )
@@ -48,8 +49,11 @@ def prov(identity: str = IDENTITY, image: str = "node-26", digest: str = DIGEST,
     return jsonl([envelope(statement([subject(NAME, digest)], PROVENANCE_PREDICATE, predicate))])
 
 
-def check(name: str, result: str, digest: str = DIGEST) -> str:
-    predicate = test_result(result, [{"name": name}])  # type: ignore[arg-type]  # a test names any outcome
+def check(name: str, result: str, digest: str = DIGEST, finished: str | None = None, run: str = "r") -> str:
+    entries: list[dict[str, object]] = [{"name": name}]
+    if finished is not None:
+        entries.append({"name": "run", "annotations": {"runId": run, "startedOn": finished, "finishedOn": finished}})
+    predicate = test_result(result, entries)  # type: ignore[arg-type]  # a test names any outcome; annotations are in-toto's
     return jsonl([envelope(statement([subject(NAME, digest)], TEST_RESULT_PREDICATE, predicate))])
 
 
@@ -149,6 +153,62 @@ class ParseRecordsTest(unittest.TestCase):
         got = parsed(prov() + "".join(check("a", outcome) for outcome in outcomes))
         assert isinstance(got, Artifact)
         return got.results["a"]
+
+    def test_the_run_that_finished_last_wins_whatever_the_file_order(self) -> None:
+        later = check("a", "PASSED", finished="2026-11-21T03:00:00.5Z", run="two")
+        earlier = check("a", "FAILED", finished="2026-11-21T02:00:00Z", run="one")
+        for text in (earlier + later, later + earlier):
+            got = parsed(prov() + text)
+            assert isinstance(got, Artifact)
+            self.assertEqual(got.results["a"], "PASSED")
+
+    def test_times_are_compared_as_instants_not_as_text(self) -> None:
+        east = check("a", "FAILED", finished="2026-11-21T10:00:00+03:00", run="one")  # 07:00Z
+        west = check("a", "PASSED", finished="2026-11-21T08:00:00Z", run="two")
+        got = parsed(prov() + west + east)
+        assert isinstance(got, Artifact)
+        self.assertEqual(got.results["a"], "PASSED")
+
+    def test_a_result_without_a_time_is_older_than_one_with_a_time(self) -> None:
+        got = parsed(prov() + check("a", "PASSED", finished="2026-11-21T02:00:00Z") + check("a", "FAILED"))
+        assert isinstance(got, Artifact)
+        self.assertEqual(got.results["a"], "PASSED")
+
+    def test_file_order_breaks_a_tie_of_times(self) -> None:
+        one = check("a", "FAILED", finished="2026-11-21T02:00:00Z", run="one")
+        two = check("a", "PASSED", finished="2026-11-21T02:00:00Z", run="two")
+        got = parsed(prov() + one + two)
+        assert isinstance(got, Artifact)
+        self.assertEqual(got.results["a"], "PASSED")
+        got = parsed(prov() + two + one)
+        assert isinstance(got, Artifact)
+        self.assertEqual(got.results["a"], "FAILED")
+
+    def test_each_check_has_its_own_last_result(self) -> None:
+        text = (
+            check("a", "PASSED", finished="2026-11-21T05:00:00Z")
+            + check("b", "FAILED", finished="2026-11-21T01:00:00Z")
+            + check("b", "PASSED", finished="2026-11-21T02:00:00Z")
+            + check("a", "FAILED", finished="2026-11-21T04:00:00Z")
+        )
+        got = parsed(prov() + text)
+        assert isinstance(got, Artifact)
+        self.assertEqual(dict(got.results), {"a": "PASSED", "b": "PASSED"})
+
+    def test_the_run_entry_is_read(self) -> None:
+        claim = parse_envelope(check("a", "PASSED", finished="2026-11-21T02:00:00Z", run="r1")).check
+        assert claim is not None
+        self.assertEqual((claim.run, claim.finished_on), ("r1", "2026-11-21T02:00:00Z"))
+        legacy = parse_envelope(check("a", "PASSED")).check
+        assert legacy is not None
+        self.assertEqual((legacy.run, legacy.finished_on), (None, None))
+
+    def test_a_run_entry_that_is_malformed_is_refused(self) -> None:
+        for bad in ({"name": "run"}, {"name": "run", "annotations": {"runId": "x", "finishedOn": "yesterday"}}):
+            predicate = test_result("PASSED", [{"name": "a"}, bad])  # type: ignore[list-item]  # a malformed entry
+            line = jsonl([envelope(statement([subject(NAME, DIGEST)], TEST_RESULT_PREDICATE, predicate))])
+            with self.assertRaises(RecordsError):
+                parse_envelope(line)
 
     def test_failed_then_passed_makes_the_check_pass(self) -> None:
         got = parsed(prov() + check("a", "FAILED") + check("a", "PASSED"))

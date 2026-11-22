@@ -3,6 +3,7 @@ plan's lookup finds what was published."""
 
 import hashlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +44,11 @@ class MergeTest(unittest.TestCase):
     def test_merge_keeps_what_is_there_and_appends_only_new_lines(self) -> None:
         self.assertEqual(publish.merged_lines("a\nb\n", "b\nc\n\nc\n"), "a\nb\nc\n")
         self.assertEqual(publish.merged_lines("", "x\n"), "x\n")
+
+    def test_results_of_two_runs_both_stay_and_only_a_byte_identical_line_goes(self) -> None:
+        one, two = json.dumps({"run": "one"}), json.dumps({"run": "two"})
+        self.assertEqual(publish.merged_lines(one + "\n", two + "\n" + one + "\n"), f"{one}\n{two}\n")
+        self.assertEqual(publish.merged_lines(f"{one}\n{two}\n", f"{two}\n"), f"{one}\n{two}\n")
 
 
 class PublishDirTest(unittest.TestCase):

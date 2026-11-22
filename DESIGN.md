@@ -709,7 +709,8 @@ The plan never keeps a list of what was built. It asks the targets, by identity:
   `rejected` with the reason. The tag names the latest image pushed for the identity: a build that
   replaces a failed one moves it, and the older manifest stays reachable by digest. The records are
   read in the order they were attached (each referrer's `org.opencontainers.image.created`, 8.2),
-  which decides a check's last result, whatever order the registry lists them in.
+  which is the file order that breaks a tie between results of one time, whatever order the registry
+  lists them in.
 - **File targets** (`github-release://`, `dir://`): artifact files are named
   `<image>-<suite>-<arch>-<first 16 hex of the identity>-<first 12 hex of the digest>.<ext>`. A
   listing filtered by the image and identity prefix answers; the provenance in the
@@ -724,7 +725,9 @@ Each image then gets one of three states:
 | `build` | no artifact with this identity exists, or the only ones that exist have a failed required check | it is built, and so is every image below it |
 
 A child whose parent waits waits too, unless the child itself is reusable. Several results for one
-check count in file order, the last one wins; when several artifacts qualify, the newest
+check count by time, the last one wins: the result whose run finished last (8.2), file order breaking a
+tie, and a result without a time (one from before runs were recorded) is older than any with one; when
+several artifacts qualify, the newest
 `finishedOn` wins, ties by the smallest digest. The provenance names the image in
 `externalParameters.image` and the identity in `internalParameters.identity` (8.2), and a records
 file counts only when a statement's subject is the file's real sha256. `dir://`, `oci://` and
@@ -1003,7 +1006,11 @@ Test result, one per check:
   "predicate": {
     "result": "PASSED",
     "configuration": [{"name": "no-machine-identity",
-                       "uri": "https://github.com/foreverworks/debian-image-factory/blob/v0.1.0/docs/checks.md#no-machine-identity"}],
+                       "uri": "https://github.com/foreverworks/debian-image-factory/blob/v0.1.0/docs/checks.md#no-machine-identity"},
+                      {"name": "run",
+                       "annotations": {"runId": "3f0c9d2a41b84e6f9a7d5c1e8b2a6d40",
+                                       "startedOn": "2026-11-21T02:19:41.120004Z",
+                                       "finishedOn": "2026-11-21T02:19:42.350871Z"}}],
     "url": "https://github.com/example/images/actions/runs/<run id>",
     "passedTests": ["machine-id-empty-or-uninitialized", "no-ssh-host-keys", "no-private-keys", "no-random-seed"],
     "warnedTests": [],
@@ -1012,7 +1019,21 @@ Test result, one per check:
 }
 ```
 
-The first `configuration` entry's `name` is the check's ID; "good build" is computed from it. A
+The first `configuration` entry's `name` is the check's ID; "good build" is computed from it.
+
+**Each result is one run's.** The in-toto test-result predicate (v0.1) has no field for a time or an
+identity of a run, and input-lock's builder takes `result`, `configuration`, `url` and the three test
+lists only. The spec's `configuration` is an array of ResourceDescriptors, and a ResourceDescriptor may
+carry `annotations`, so the run goes there, as a second entry named `run`: `runId` (32 random hex
+characters, one per invocation of `test` or `attest`), `startedOn` and `finishedOn` (RFC 3339 UTC with
+microseconds; `startedOn` is when the checks of that artifact began, `finishedOn` when they ended).
+Two runs of one check therefore never write the same line, which `publish` relies on: it adds a record
+unless a byte-identical one is already there (a records file line, or an OCI referrer with the same
+envelope digest) and keeps every distinct run. Readers go by the `finishedOn` of the `run` entry: for
+each check, the result whose run finished last is its last result (7.4); a result without a `run` entry
+(from before runs were recorded) is older than any with one, and a tie goes to the line that comes
+later in the file (on OCI, the later attach time). A `run` entry whose annotations lack a text `runId`
+or an RFC 3339 `finishedOn` makes the record malformed. `verify --require-checks` reads the same way. A
 consumer's own check attests the same way: `debian-image-factory attest test-result --artifact
 <digest> --check install-on-test-vm --result PASSED --passed install,reboot --url <run url>`.
 
@@ -1041,8 +1062,8 @@ And the OCI artifact that carries one record as a referrer:
 (The config digest is the real one of the two-byte empty JSON object `{}`, as the OCI spec defines
 it.) `org.opencontainers.image.created` is when the record was attached, one microsecond apart
 within one publish. Records of an OCI image are read in that order, whatever order the referrers API
-lists them in, so "the last result wins" (7.4) means the same on every registry; a referrer without
-the annotation reads first. Records never hold secrets, private keys, tokens or machine identities. They describe bits;
+lists them in, so file order, which breaks a tie between results of one time (8.2, test result),
+means the same on every registry; a referrer without the annotation reads first. Records never hold secrets, private keys, tokens or machine identities. They describe bits;
 what is actually running somewhere is for the consumer to read back from the running system.
 
 ### 8.3 Signing

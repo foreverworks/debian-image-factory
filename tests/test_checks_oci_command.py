@@ -7,9 +7,10 @@ import shutil
 import tempfile
 import unittest
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
-from debian_image_factory import oci, records
+from debian_image_factory import oci, published, records
 from debian_image_factory.checks import command
 from debian_image_factory.checks.container import ProbeRunner
 from debian_image_factory.checks.model import LOCKED_INPUTS, CheckOutcome, NotRun, Result, result
@@ -292,6 +293,49 @@ class MachineIdentityTest(Base):
         )
         status, printed = self.out.run(FakeDocker())
         self.assertEqual(status, 0, printed)
+
+
+class RunIdentityTest(Base):
+    """Every run of `test` stamps its results with a run id and times (DESIGN 8.2), so two runs never write
+    the same line."""
+
+    def run_at(self, moment: datetime, run_id: str) -> None:
+        effects = command.Effects(
+            clones_check=lambda path: NotRun("two-clones", "core is not tested here"),
+            docker=FakeDocker(identities=[reading({MACHINE: b"a\n"}), reading({MACHINE: b"b\n"})]).docker(),
+            clock=lambda: moment,
+            new_run_id=lambda: run_id,
+        )
+        command.test_command(self.out.root, ["no-machine-identity"], Sources(), io.StringIO(), effects)
+
+    def test_each_result_names_its_run_and_its_times(self) -> None:
+        built = self.out.image()
+        self.run_at(datetime(2026, 11, 21, 2, 0, 0, 5, tzinfo=UTC), "run-one")
+        (statement,) = self.out.statements(built)
+        predicate = statement["predicate"]
+        assert isinstance(predicate, dict)
+        configuration = predicate["configuration"]
+        self.assertEqual(configuration[0]["name"], "no-machine-identity")
+        self.assertEqual(
+            configuration[1],
+            {
+                "name": "run",
+                "annotations": {
+                    "runId": "run-one",
+                    "startedOn": "2026-11-21T02:00:00.000005Z",
+                    "finishedOn": "2026-11-21T02:00:00.000005Z",
+                },
+            },
+        )
+
+    def test_two_runs_of_one_check_leave_two_different_lines_and_the_later_one_counts(self) -> None:
+        built = self.out.image()
+        self.run_at(datetime(2026, 11, 21, 2, 0, tzinfo=UTC), "run-one")
+        self.run_at(datetime(2026, 11, 21, 3, 0, tzinfo=UTC), "run-two")
+        lines = [line for line in (self.out.root / records_name(built.digest)).read_text().splitlines() if line]
+        claims = [one.check for one in map(published.parse_envelope, lines) if one.check is not None]
+        self.assertEqual(len(set(lines)), len(lines))
+        self.assertEqual([one.run for one in claims], ["run-one", "run-two"])
 
 
 class SnapshotTest(Base):

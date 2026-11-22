@@ -6,9 +6,11 @@ Rules this module fixes:
 
 - A record counts for an artifact only when one of its statement's subjects carries the artifact's
   sha256. Records about other digests in the same file are ignored.
-- Several test results for one check: file order decides, and the last one wins. A FAILED followed by
-  a later PASSED (or WARNED) is passing; a PASSED followed by a later FAILED is failing. PASSED and
-  WARNED both count as passing.
+- Several test results for one check: the last one wins. A result is later than another when its run
+  finished later (`finishedOn` in the `run` entry of its `configuration`, DESIGN 8.2), a result without
+  a time is older than any with one, and file order breaks a tie. A FAILED followed by a later PASSED
+  (or WARNED) is passing; a PASSED followed by a later FAILED is failing. PASSED and WARNED both count
+  as passing.
 - Among artifacts of one state, the newest `finished_on` wins, an artifact without a time is older
   than any with one, and a tie goes to the smallest digest, so the choice never depends on the
   order a target listed them in.
@@ -34,6 +36,8 @@ from input_lock.records import (
 
 OUTCOMES: Final[tuple[TestOutcome, ...]] = ("PASSED", "WARNED", "FAILED")
 PASSING: Final[frozenset[str]] = frozenset({"PASSED", "WARNED"})
+RUN_ENTRY: Final = "run"
+"""The name of the `configuration` entry of a test result that says which run made it (DESIGN 8.2)."""
 
 type State = Literal["reuse", "wait", "build"]
 
@@ -262,10 +266,13 @@ class BuildClaim:
 
 @dataclass(frozen=True, slots=True)
 class CheckClaim:
-    """What a test-result record says: one check and its outcome."""
+    """What a test-result record says: one check and its outcome, and the run that made the claim
+    (`run`, `finished_on` are None for a record from before runs were recorded)."""
 
     check: str
     outcome: TestOutcome
+    run: str | None = None
+    finished_on: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +367,19 @@ def _ancestors(value: object) -> tuple[tuple[str, str], ...]:
     return tuple(found)
 
 
+def _run_of(entries: Sequence[object]) -> tuple[str | None, str | None]:
+    """(run id, finish time) from the `configuration` entry named `run`, or (None, None) when there is none.
+    A `run` entry whose annotations do not hold a text `runId` and an RFC 3339 `finishedOn` is malformed."""
+    for index, raw in enumerate(entries, start=1):
+        entry = _object(raw, f"configuration[{index}]")
+        if entry.get("name") != RUN_ENTRY:
+            continue
+        where = f"configuration[{index}].annotations"
+        notes = _object(entry.get("annotations"), where)
+        return _text(notes.get("runId"), f"{where}.runId"), _finish_time(notes.get("finishedOn"), f"{where}.finishedOn")
+    return None, None
+
+
 def _test_result(predicate: object) -> CheckClaim:
     body = _object(predicate, "test-result predicate")
     outcome = body.get("result")
@@ -367,9 +387,9 @@ def _test_result(predicate: object) -> CheckClaim:
         configuration = _array(body.get("configuration"), "configuration")
         if not configuration:
             raise RecordsError("configuration is empty: the first entry names the check")
-        return CheckClaim(
-            _text(_object(configuration[0], "configuration[0]").get("name"), "configuration[0].name"), outcome
-        )
+        check = _text(_object(configuration[0], "configuration[0]").get("name"), "configuration[0].name")
+        run, finished = _run_of(configuration[1:])
+        return CheckClaim(check, outcome, run, finished)
     raise RecordsError(f"result is not PASSED, WARNED or FAILED: {outcome!r}")
 
 
@@ -420,6 +440,20 @@ def statements_cover(statements: Sequence[Record], digests: Sequence[str]) -> bo
     return any(set(digests) <= {subject.sha256 for subject in one.subjects} for one in statements)
 
 
+def last_results(records: Sequence[Record]) -> dict[str, TestOutcome]:
+    """The last result of each check in `records` (in file order): the one whose run finished latest, a
+    result without a time older than any with one, and the later line winning a tie."""
+    last: dict[str, tuple[tuple[datetime, int], TestOutcome]] = {}
+    for position, one in enumerate(records):
+        if one.check is None:
+            continue
+        key = (_instant(one.check.finished_on), position)
+        held = last.get(one.check.check)
+        if held is None or key > held[0]:
+            last[one.check.check] = (key, one.check.outcome)
+    return {check: outcome for check, (_, outcome) in last.items()}
+
+
 def artifact_from_records(name: str, digest: str, image: str, identity: str, records: str) -> Artifact | Rejected:
     """The artifact file `name` whose real sha256 is `digest`, as its records file `records` describes
     it for `image` and `identity` (full hex), or the reason it does not count."""
@@ -437,8 +471,4 @@ def artifact_from_records(name: str, digest: str, image: str, identity: str, rec
         if build.identity != identity:
             return Rejected(name, f"provenance names identity {build.identity}, not {identity}")
     finished = max((build.finished_on for build in builds if build.finished_on), key=_instant, default=None)
-    results: dict[str, TestOutcome] = {}
-    for one in about:
-        if one.check is not None:
-            results[one.check.check] = one.check.outcome  # file order: the last result for a check wins
-    return Artifact(image, identity, digest, name, finished, results)
+    return Artifact(image, identity, digest, name, finished, last_results(about))

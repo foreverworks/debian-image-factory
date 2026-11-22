@@ -11,11 +11,13 @@ import contextlib
 import hashlib
 import subprocess
 import tarfile
+import uuid
 import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final, TextIO
+from typing import Final, TextIO, cast
 
 import input_lock.records as rec
 
@@ -77,6 +79,7 @@ ARTIFACT_KINDS: dict[str, tuple[str, ...]] = {
 both a `.tar.gz`, so the plan entry's kind tells them apart."""
 BOOT_KINDS: Final = ("installer", "os")
 
+type Clock = Callable[[], datetime]
 type TwoClones = Callable[[Path], CheckOutcome]
 type BootInstaller = Callable[[Path, int, vmrun.Vm], list[vm.Boot] | vmrun.Unready]
 type BootOs = Callable[[Path, vmrun.RootFacts, int, vmrun.Vm], list[vm.Boot] | vmrun.Unready]
@@ -114,6 +117,9 @@ class Effects:
     vm: vmrun.Vm = vmrun.VM
     boot_installer: BootInstaller = vmrun.boot_installer
     boot_os: BootOs = vmrun.boot_os
+    clock: Clock = lambda: datetime.now(UTC)
+    new_run_id: Callable[[], str] = lambda: uuid.uuid4().hex
+    """The time and the run ids `test` stamps on its results (DESIGN 8.2)."""
 
 
 # ---- finding artifacts -----------------------------------------------------------------------------
@@ -235,11 +241,34 @@ def sbom_of(records_text: str | None, digest: str) -> Mapping[str, object] | str
     return found if isinstance(found, str) else found[0]
 
 
-def test_result_line(found: Found, outcome: Result, url: str = "") -> str:
-    """One DSSE envelope line (with its newline) attesting `outcome` for the artifact."""
+@dataclass(frozen=True, slots=True)
+class Run:
+    """The identity of one run of checks: what `test` or `attest` stamps on each result it records, so that
+    two runs never write the same line and "the last result wins" (DESIGN 7.4) has a time to go by."""
+
+    run_id: str
+    started_on: str
+    finished_on: str
+
+
+def rfc3339(moment: datetime) -> str:
+    """`moment` as an RFC 3339 UTC time with microseconds, which sorts as text and as an instant."""
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def run_entry(run: Run) -> rec.ResourceDescriptor:
+    """The `configuration` entry that says which run made a result: in-toto's ResourceDescriptor, named
+    `run`, with the run's id and times in its `annotations` (DESIGN 8.2)."""
+    notes = {"runId": run.run_id, "startedOn": run.started_on, "finishedOn": run.finished_on}
+    # `annotations` is in-toto's ResourceDescriptor v1, not in input-lock's TypedDict
+    return cast(rec.ResourceDescriptor, {"name": published.RUN_ENTRY, "annotations": notes})
+
+
+def test_result_line(found: Found, outcome: Result, url: str, run: Run) -> str:
+    """One DSSE envelope line (with its newline) attesting `outcome` for the artifact, as made by `run`."""
     predicate = rec.test_result(
         outcome.outcome,
-        [{"name": outcome.check, "uri": f"{records.CHECKS_DOC}#{outcome.check}"}],
+        [{"name": outcome.check, "uri": f"{records.CHECKS_DOC}#{outcome.check}"}, run_entry(run)],
         url=url,
         passed=outcome.passed,
         warned=outcome.warned,
@@ -857,13 +886,17 @@ def test_command(
     for line in skipped:
         out.write(line + "\n")
     status = 0
+    run_id = effects.new_run_id()
     for one in found:
         names, others = choose(requested, plan["images"][one.image])
         records_path = out_dir / records_name_for(one.digest)
         try:
             records_text = records_path.read_text(encoding="utf-8") if records_path.exists() else None
+            started = rfc3339(effects.clock())
             outcomes = run_checks(one, names, plan, records_text, sources, effects, found)
-            append_records(records_path, [test_result_line(one, o, url) for o in outcomes if isinstance(o, Result)])
+            run = Run(run_id, started, rfc3339(effects.clock()))
+            lines = [test_result_line(one, o, url, run) for o in outcomes if isinstance(o, Result)]
+            append_records(records_path, lines)
         except (OSError, EOFError, UnicodeDecodeError, zlib.error) as error:
             raise Failed(f"{one.path.name}: cannot be tested: {error}") from None
         except tarfile.TarError as error:

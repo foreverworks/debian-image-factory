@@ -178,10 +178,7 @@ def inspect(subject: Subject, lock: frozenset[str] | None) -> Findings:
         problems.append(f"{len(sboms)} SBOM records, expected exactly one")
     for raw in sboms[:1]:
         problems.extend(sbom_problems(raw, subject, image))
-    results: dict[str, TestOutcome] = {}
-    for _, record, _ in parsed:
-        if record.check is not None:
-            results[record.check.check] = record.check.outcome  # file order: the last result for a check wins
+    results = published.last_results([record for _, record, _ in parsed])  # the latest run, then file order
     counts = {
         "records": len(subject.lines),
         "provenance": len(provenances),
