@@ -117,16 +117,18 @@ def build_script(
     module_lines: Sequence[str],
     hooks: Sequence[str],
     boot_lines: Sequence[str],
+    debs: Sequence[str] = (),
 ) -> str:
     """The builder's entry point for one Incus image. `parent` is the parent's kind (`core` or `incus`);
-    `request` what apt installs (the kind's packages and the image's own); `module_lines` what the
+    `request` what apt installs (the kind's packages and the image's own), `debs` the vendor .deb files
+    installed in the same transaction (builder paths); `module_lines` what the
     switched-on builtin modules run with the root as `$root`; `hooks` the scripts run in the chroot after
     them; `boot_lines` what every kind that boots writes into its root (DESIGN 5.3); `owner` (`uid:gid`)
     hands the outputs back where the container's root is the host's."""
     cleanup_trap = [
         "cleanup() {",
         "    status=$?",
-        *(f"    {line}" for line in child.unmount_lines(mirror=bool(request), quiet=True)),
+        *(f"    {line}" for line in child.unmount_lines(mirror=bool(request or debs), quiet=True)),
         f'    rm -rf --one-file-system "$root" {child.ASIDE}',
         '    exit "$status"',
         "}",
@@ -142,8 +144,9 @@ def build_script(
         *unpack_lines(parent, source_date_epoch),
         *child.mount_lines(),
     ]
-    if request:
-        lines += [*child.apt_setup_lines(), *child.install_lines(request)]
+    apt = bool(request or debs)
+    if apt:
+        lines += [*child.apt_setup_lines(), *child.install_lines(request, debs)]
     if files:
         lines += core.files_lines()
     lines += list(module_lines)
@@ -152,14 +155,14 @@ def build_script(
             *core.hook_lines(hooks),
             *(f'rm -rf "$root{core.HOOK_DIR}/{name}"' for name in ("hooks", "inputs", "build.env")),
         ]
-    if request:
+    if apt:
         lines += child.apt_cleanup_lines()
     lines += [
         *setup_lines(networkd=True),
         *child.trace_lines(),
         *core.identity_lines(),
         *boot_lines,
-        *child.unmount_lines(mirror=bool(request)),
+        *child.unmount_lines(mirror=apt),
         *child.run_cleanup_lines(),
         *pack_lines(source_date_epoch, owner),
         "",

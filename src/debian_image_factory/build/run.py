@@ -819,6 +819,7 @@ def prepare_incus_work(work: Path, run: Run, image: str, parent: parents.ParentA
             module_lines=module_lines(run.loaded.definition, entry, epoch),
             hooks=scripts,
             boot_lines=boot.boot_lines(),
+            debs=deb_paths(entry),
         )
     )
 
