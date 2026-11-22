@@ -1,21 +1,32 @@
-"""Publishing built artifacts and their records to targets (DESIGN 7.4, 8.2). This release writes `dir://`.
+"""Publishing built artifacts and their records to targets (DESIGN 7.4, 8.2). This release writes `dir://`
+and `oci://`.
 
 A `dir://` target is a plain directory: each artifact keeps its name, and its records live beside it
 in `<digest>.intoto.jsonl`. Publishing the same artifact again adds only the record lines the target
 does not hold yet, so test results attached later (or by someone else) are never lost, and nothing
 already published is rewritten. Artifacts are copied under a temporary name and renamed into place,
-so a reader never sees half a file.
+so a reader never sees half a file. A `dir://` target takes files only.
+
+An `oci://` target takes OCI image layouts (`<name>.oci/` directories) only. Each is pushed with
+`push_layout`, which knows nothing about the factory: blobs the registry lacks, the manifest by digest,
+the tags it is given, then each record (a line of `<manifest digest>.intoto.jsonl`, byte for byte) as
+a referrer of the manifest. A record the registry already holds, found by the digest of its envelope,
+is skipped, so publishing again adds only what is new.
 """
 
 import hashlib
 import os
 import shutil
 import tempfile
-from collections.abc import Sequence
+import urllib.error
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Literal, TextIO
 
-from . import commands, published
+from input_lock.identity import HEX64
+
+from . import commands, oci, ocilayout, published, registry
 
 
 def sha256_of(path: Path) -> str:
@@ -96,7 +107,175 @@ def publish_dir(out_dir: Path, target: Path, out: TextIO) -> None:
         print(f"{target}: {path.name} {state}, {added} record lines added", file=out)
 
 
-def publish_command(out_dir: Path, targets: Sequence[str], sign: str, out: TextIO) -> int:
+# ---- oci:// ------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PushReport:
+    """What `push_layout` did: the image's manifest digest (hex), whether anything was pushed for the
+    image itself (blobs, manifest or a tag) or it was all there, how many blobs went up, the records
+    attached now and the ones already attached, and how the registry lists referrers."""
+
+    digest: str
+    state: Literal["pushed", "already there"]
+    blobs_pushed: int
+    records_added: int
+    records_present: int
+    via: Literal["api", "tag"]
+
+
+def envelope_predicate(envelope: bytes) -> str:
+    """The predicate type of the in-toto statement in a DSSE envelope (the referrer's annotation)."""
+    try:
+        return published.parse_envelope(envelope.decode("utf-8")).predicate_type
+    except (UnicodeDecodeError, published.RecordsError) as error:
+        raise oci.OciError(f"a record is not a DSSE envelope of an in-toto statement: {error}") from None
+
+
+def ensure_blob(client: registry.Client, digest: str, size: int, source: bytes | Path, known: set[str]) -> int:
+    """Upload a blob unless the registry has it (or this run just put it); 1 when it was uploaded."""
+    if digest in known or registry.blob_exists(client, digest):
+        known.add(digest)
+        return 0
+    registry.put_blob(client, digest, size, source)
+    known.add(digest)
+    return 1
+
+
+def attach_to_tag(client: registry.Client, subject: str, referrer: oci.Descriptor) -> None:
+    """The tag schema (DESIGN 8.2): add `referrer` to the index tagged `sha256-<subject>`. One
+    read-modify-write, the tag read right before it is written; the caller attaches one record at a time."""
+    present = registry.tag_index(client, subject)
+    merged = oci.merged_referrers(present, referrer)
+    if merged != present:
+        registry.put_manifest(client, oci.referrers_tag(subject), merged, oci.INDEX)
+
+
+def push_layout(
+    client: registry.Client, layout: ocilayout.Layout, tags: Sequence[str], envelopes: Sequence[bytes]
+) -> PushReport:
+    """Push the image `layout` holds to the client's repository, tag it, and attach `envelopes` (DSSE
+    envelopes, the exact bytes of each record) as referrers of its manifest.
+
+    Blobs the registry has are skipped, and so is everything for an image whose manifest is already
+    there. The manifest goes by digest first; each tag in `tags` is then pointed at it (moved when it
+    named another manifest). A record whose envelope digest is already attached, listed by the referrers
+    API or by the tag index, is skipped. A manifest PUT that answers `OCI-Subject` is indexed by the
+    registry; otherwise the referrers tag is updated. Nothing here reads the image's annotations or
+    records: the layout is any single-image OCI layout, a `docker save` of the builder image included."""
+    digest = layout.descriptor.digest
+    known: set[str] = set()
+    pushed = 0
+    present = registry.manifest_digest(client, f"sha256:{digest}") == digest
+    changed = not present
+    if not present:
+        pushed += ensure_blob(
+            client, layout.manifest.config.digest, layout.manifest.config.size, layout.config_bytes, known
+        )
+        for descriptor, path in zip(layout.manifest.layers, layout.layers, strict=True):
+            pushed += ensure_blob(client, descriptor.digest, descriptor.size, path, known)
+        registry.put_manifest(client, f"sha256:{digest}", layout.manifest_bytes, layout.descriptor.media_type)
+    for tag in tags:
+        if registry.manifest_digest(client, tag) != digest:
+            registry.put_manifest(client, tag, layout.manifest_bytes, layout.descriptor.media_type)
+            changed = True
+    held = registry.referrers_of(client, digest)
+    attached = {one.envelope.digest for one in held.attached}
+    subject = layout.descriptor
+    added = skipped = 0
+    for envelope in envelopes:
+        envelope_digest = oci.sha256_hex(envelope)
+        if envelope_digest in attached:
+            skipped += 1
+            continue
+        manifest_bytes, blob = oci.referrer_manifest(envelope, envelope_predicate(envelope), subject)
+        pushed += ensure_blob(client, blob.digest, blob.size, envelope, known)
+        pushed += ensure_blob(client, oci.EMPTY_DIGEST, len(oci.EMPTY_BLOB), oci.EMPTY_BLOB, known)
+        sent = registry.put_manifest(client, f"sha256:{oci.sha256_hex(manifest_bytes)}", manifest_bytes, oci.MANIFEST)
+        if sent.subject is None:
+            attach_to_tag(client, digest, oci.referrer_descriptor(manifest_bytes))
+        attached.add(envelope_digest)
+        added += 1
+    return PushReport(digest, "pushed" if changed else "already there", pushed, added, skipped, held.via)
+
+
+def layouts_in(out_dir: Path) -> list[Path]:
+    """Every OCI image layout in a build's output directory: the directories named as artifacts with
+    the `.oci` extension."""
+    found: list[Path] = []
+    for path in sorted(out_dir.iterdir()):
+        name = published.parse_artifact_name(path.name)
+        if name is not None and name.ext == oci.LAYOUT_EXT and path.is_dir():
+            found.append(path)
+    return found
+
+
+def checked_layout(out_dir: Path, path: Path) -> tuple[ocilayout.Layout, str, list[bytes]]:
+    """A layout of `out_dir` ready to push: read and checked, with its identity (the manifest's
+    annotation, which its provenance must name too) and its records, one per line, as exact bytes."""
+    name = published.parse_artifact_name(path.name)
+    assert name is not None  # layouts_in only returns named layouts
+    try:
+        layout = ocilayout.read_layout(path)
+    except (oci.OciError, OSError) as error:
+        raise commands.Failed(f"{path}: {error}") from None
+    digest = layout.descriptor.digest
+    if not digest.startswith(name.digest12):
+        raise commands.Failed(f"{path}: its manifest digest {digest} does not match the digest in its name")
+    identity = layout.manifest.annotations.get(oci.IDENTITY, "")
+    if not HEX64.fullmatch(identity) or not identity.startswith(name.identity16):
+        raise commands.Failed(f"{path}: its manifest has no identity annotation that matches the identity in its name")
+    records = out_dir / published.records_name_for(digest)
+    if not records.is_file():
+        raise commands.Failed(f"{path}: no records file {records.name} beside it")
+    data = records.read_bytes()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise commands.Failed(f"{records}: not UTF-8") from None
+    checked = published.artifact_from_records(path.name, digest, name.image, identity, text)
+    if isinstance(checked, published.Rejected):
+        raise commands.Failed(f"{path}: {checked.reason}")
+    lines = [line for line in data.split(b"\n") if line.strip()]
+    for number, line in enumerate(lines, start=1):
+        if all(subject.sha256 != digest for subject in published.parse_envelope(line.decode("utf-8")).subjects):
+            raise commands.Failed(f"{records}: record {number} is not about this image (sha256:{digest})")
+    return layout, identity, lines
+
+
+def describe(error: OSError) -> str:
+    if isinstance(error, urllib.error.URLError):
+        return str(error.reason)
+    return error.strerror or str(error)
+
+
+def publish_oci(
+    out_dir: Path,
+    target: published.OciTarget,
+    layouts: Sequence[Path],
+    out: TextIO,
+    connect: Callable[[published.OciTarget], registry.Client],
+) -> None:
+    """Push every layout of `out_dir` to the repository `target`, tagging each `identity-<identity>`."""
+    client = connect(target)
+    for path in layouts:
+        layout, identity, lines = checked_layout(out_dir, path)
+        try:
+            report = push_layout(client, layout, [oci.identity_tag(identity)], lines)
+        except oci.OciError as error:
+            raise commands.Failed(f"{path}: {error}") from None
+        except OSError as error:
+            raise commands.Failed(f"{client.name}: {describe(error)}") from None
+        print(f"{client.name}: {path.name} {report.state}, {report.records_added} records added", file=out)
+
+
+def publish_command(
+    out_dir: Path,
+    targets: Sequence[str],
+    sign: str,
+    out: TextIO,
+    connect: Callable[[published.OciTarget], registry.Client] = registry.connect,
+) -> int:
     if sign != "none":
         raise commands.Usage("signing arrives in a later release; this release publishes unsigned records")
     if not targets:
@@ -106,13 +285,34 @@ def publish_command(out_dir: Path, targets: Sequence[str], sign: str, out: TextI
     except ValueError as error:
         raise commands.Usage(str(error)) from None
     for one in parsed:
-        if not isinstance(one, published.DirTarget):
-            raise commands.Usage("oci:// and github-release:// targets arrive in a later release; use dir://")
+        if isinstance(one, published.ReleaseTarget):
+            raise commands.Usage("github-release:// targets arrive in a later release; use dir:// or oci://")
     if not out_dir.is_dir():
         raise commands.Failed(f"{out_dir}: no such directory (build writes it)")
-    if not artifacts_in(out_dir):
+    files, layouts = artifacts_in(out_dir), layouts_in(out_dir)
+    if not files and not layouts:
         raise commands.Failed(f"{out_dir}: no artifacts to publish")
+    for one in parsed:  # every target is checked before anything is written
+        if isinstance(one, published.DirTarget) and not files:
+            raise commands.Failed(
+                f"{out_dir}: holds OCI images only ({', '.join(p.name for p in layouts)}); "
+                "they publish to oci:// targets, a dir:// target takes files"
+            )
+        if isinstance(one, published.OciTarget) and not layouts:
+            raise commands.Failed(
+                f"{out_dir}: holds files only ({', '.join(p.name for p, _ in files)}); "
+                "oci:// targets take OCI images, publish these to dir://"
+            )
     for one in parsed:
-        assert isinstance(one, published.DirTarget)  # checked above: only dir:// gets here
-        publish_dir(out_dir, Path(one.path), out)
+        if isinstance(one, published.DirTarget):
+            for path in layouts:
+                print(f"{one.path}: {path.name} not published here, OCI images publish to oci:// targets", file=out)
+            publish_dir(out_dir, Path(one.path), out)
+        elif isinstance(one, published.OciTarget):
+            for path, _ in files:
+                print(
+                    f"{one.registry}/{one.repository}: {path.name} not published here, files publish to dir://",
+                    file=out,
+                )
+            publish_oci(out_dir, one, layouts, out, connect)
     return 0

@@ -16,7 +16,6 @@ from input_lock.records import (
 
 from debian_image_factory.published import (
     DirTarget,
-    OciTarget,
     ReleaseTarget,
     artifact_name,
     decide,
@@ -199,16 +198,13 @@ class DirLookupTest(unittest.TestCase):
 
 
 class LaterTargetsTest(unittest.TestCase):
-    def test_oci_and_release_targets_say_they_come_later(self) -> None:
-        for target, scheme in (
-            (OciTarget("ghcr.io", "example/images"), "oci"),
-            (ReleaseTarget("example", "images", "v1"), "github-release"),
-        ):
-            with self.assertRaises(NotImplementedError) as caught:
-                lookup(target, "core", "trixie", "amd64", IDENTITY)
-            self.assertEqual(
-                str(caught.exception), f"{scheme} targets arrive in a later release; this release reads dir:// targets"
-            )
+    def test_release_targets_say_they_come_later(self) -> None:
+        with self.assertRaises(NotImplementedError) as caught:
+            lookup(ReleaseTarget("example", "images", "v1"), "core", "trixie", "amd64", IDENTITY)
+        self.assertEqual(
+            str(caught.exception),
+            "github-release targets arrive in a later release; this release reads dir:// and oci:// targets",
+        )
 
 
 if __name__ == "__main__":

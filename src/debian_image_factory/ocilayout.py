@@ -77,7 +77,6 @@ def write_layout(
     if layout.exists():
         raise FileExistsError(f"{layout} already exists")
     layout.mkdir(parents=True)
-    (layout / "oci-layout").write_bytes(LAYOUT_FILE)
     config_descriptor = oci.Descriptor(oci.CONFIG, write_blob(layout, config), len(config))
     layer_descriptors: list[oci.Descriptor] = []
     for path, digest, size in layers:
@@ -85,8 +84,15 @@ def write_layout(
         layer_descriptors.append(oci.Descriptor(oci.LAYER_GZIP, digest, size))
     manifest = oci.image_manifest(config_descriptor, layer_descriptors, annotations)
     descriptor = oci.Descriptor(oci.MANIFEST, write_blob(layout, manifest), len(manifest))
-    (layout / "index.json").write_bytes(oci.index([descriptor]))
+    write_index(layout, descriptor)
     return descriptor
+
+
+def write_index(layout: Path, descriptor: oci.Descriptor) -> None:
+    """Make the directory `layout`, whose blobs are all in place, a layout holding the one image whose
+    manifest is `descriptor`: write `oci-layout` and `index.json`."""
+    (layout / "oci-layout").write_bytes(LAYOUT_FILE)
+    (layout / "index.json").write_bytes(oci.index([descriptor]))
 
 
 def read_blob(layout: Path, descriptor: oci.Descriptor) -> bytes:

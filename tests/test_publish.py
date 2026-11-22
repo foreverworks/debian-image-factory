@@ -86,12 +86,12 @@ class PublishDirTest(unittest.TestCase):
             make_out(out)
             for targets_, sign in (
                 ([], "none"),
-                (["oci://ghcr.io/example/x"], "none"),
+                (["github-release://example/images@v1"], "none"),
                 ([f"dir://{scratch}"], "keyless"),
             ):
                 with self.subTest(targets=targets_, sign=sign), self.assertRaises(commands.Usage):
                     publish.publish_command(out, targets_, sign, io.StringIO())
-            self.assertEqual(cli.main(["publish", str(out), "--to", "oci://ghcr.io/example/x"]), 2)
+            self.assertEqual(cli.main(["publish", str(out), "--to", "github-release://example/images@v1"]), 2)
             with self.assertRaisesRegex(commands.Failed, "no such directory"):
                 publish.publish_command(Path(scratch) / "missing", [f"dir://{scratch}"], "none", io.StringIO())
 

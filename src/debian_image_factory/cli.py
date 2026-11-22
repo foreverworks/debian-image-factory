@@ -1,7 +1,7 @@
 """The command line (DESIGN 9.1). Exit codes: 0 done, 1 a check or validation failed, 2 usage.
 
 This release has `lock check`, `lock snapshot`, `lock baseline`, `plan`, `fetch`, `build` (core),
-`test` and `publish` (to `dir://`); the other kinds and targets arrive in later releases.
+`test`, `publish` (to `dir://` and `oci://`) and `verify`; the other kinds and targets arrive in later releases.
 """
 
 import argparse
@@ -10,7 +10,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, checks, commands, fetch, publish, resolve
+from . import __version__, checks, commands, fetch, publish, resolve, verify
 from . import tools as builder
 from .build import run as build_run
 
@@ -114,9 +114,30 @@ def parser() -> argparse.ArgumentParser:
 
     publish_ = commands_.add_parser("publish", help="copy artifacts and their records to targets")
     publish_.add_argument("out_dir", type=Path, metavar="OUT", help="the directory build wrote")
-    publish_.add_argument("--to", action="append", default=[], metavar="TARGET", help="dir://PATH (repeat)")
+    publish_.add_argument(
+        "--to", action="append", default=[], metavar="TARGET", help="dir://PATH or oci://REGISTRY/REPOSITORY (repeat)"
+    )
     publish_.add_argument(
         "--sign", default="none", metavar="none", help="signing arrives in a later release; only none for now"
+    )
+
+    verify_ = commands_.add_parser(
+        "verify", help="the records of an artifact match its bits, and its required checks are complete"
+    )
+    verify_.add_argument(
+        "ref",
+        metavar="REF",
+        help="oci://REGISTRY/REPOSITORY@sha256:HEX or :TAG, an .oci layout directory, or an artifact file",
+    )
+    verify_.add_argument(
+        "--require-checks", action="store_true", help="every check the definition requires must have a passing result"
+    )
+    verify_.add_argument("--lock", type=Path, metavar="FILE", help="the provenance must name this lock by its sha256")
+    verify_.add_argument(
+        "--definition",
+        type=Path,
+        default=Path("factory.toml"),
+        help="the definition --require-checks reads (default factory.toml)",
     )
     return top
 
@@ -182,7 +203,11 @@ def dispatch(arguments: argparse.Namespace) -> int:
         return checks.test_command(arguments.out, arguments.check, sources_of(arguments), sys.stdout, url=arguments.url)
     if arguments.command == "publish":
         return publish.publish_command(arguments.out_dir, arguments.to, arguments.sign, sys.stdout)
-    raise commands.Usage("a command is needed: lock, plan, fetch, build, test or publish")
+    if arguments.command == "verify":
+        return verify.verify_command(
+            arguments.ref, arguments.require_checks, arguments.lock, arguments.definition, sys.stdout
+        )
+    raise commands.Usage("a command is needed: lock, plan, fetch, build, test, publish or verify")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

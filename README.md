@@ -182,8 +182,14 @@ debian-image-factory publish out/ --to dir:///srv/images
 `build` needs Docker and nothing from the network: it reads the partial mirror
 `fetch` laid out. Each artifact lands in `out/` with its records in `<digest>.intoto.jsonl`: SLSA
 provenance, an SPDX SBOM and one test result per check. Plan again with `--against
-dir:///srv/images` and the core you just published reads `reuse`. The later milestones add OCI,
-Incus, installer and OS images and the `oci://` and `github-release://` targets.
+dir:///srv/images` and the core you just published reads `reuse`.
+
+OCI images publish to a registry instead: `publish out/ --to oci://ghcr.io/example/debian` pushes
+each image under the tag `identity-<identity>` and attaches its records as referrers, and `plan
+--against` the same address finds it again. `debian-image-factory verify REF` checks an artifact
+(an `oci://` reference, a layout directory or a file) against its records. Credentials come from your
+Docker config. The later milestones add Incus, installer and OS images and the `github-release://`
+target.
 
 In GitHub Actions, one step runs the same thing nightly, and reports `changed=false` on the nights
 when there is nothing to do. The planned interface is in [DESIGN.md, section 9](DESIGN.md#9-running-it).
