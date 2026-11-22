@@ -238,6 +238,65 @@ def pack_lines(source_date_epoch: int, owner: str | None) -> list[str]:
     return lines
 
 
+def prologue_lines(source_date_epoch: int, *, mirror: bool) -> list[str]:
+    """How every child build starts: strict shell, what mmdebstrap exports, `$root`, and a trap that
+    unmounts (the mirror too, when `mirror`) and deletes the root whatever happens."""
+    return [
+        "set -eu",
+        f"export SOURCE_DATE_EPOCH={int(source_date_epoch)}",
+        *ENVIRONMENT,
+        "umask 022",
+        f'root="{ROOT}"',
+        "cleanup() {",
+        "    status=$?",
+        *(f"    {line}" for line in unmount_lines(mirror=mirror, quiet=True)),
+        f'    rm -rf --one-file-system "$root" {ASIDE}',
+        '    exit "$status"',
+        "}",
+        "trap cleanup EXIT",
+    ]
+
+
+def child_lines(
+    *,
+    request: Sequence[str],
+    files: bool,
+    module_lines: Sequence[str],
+    hooks: Sequence[str],
+    debs: Sequence[str] = (),
+    sources: Sequence[str] = (),
+    finish: Sequence[str] = (),
+) -> list[str]:
+    """What every child build does to its unpacked root `$root`, whatever it packs: the mounts; apt from the
+    mirror when `request` names packages or `debs` vendor .deb files; the file tree, the modules' lines and
+    the hooks; apt's cleanup; `sources` (lines that replace the image's apt sources, for kinds that carry
+    their own); the build's traces and every machine identity removed; `finish` (a booting kind's
+    `boot.boot_lines`); the unmounts; /run and /tmp emptied."""
+    apt = bool(request or debs)
+    lines = [*mount_lines()]
+    if apt:
+        lines += [*apt_setup_lines(), *install_lines(request, debs)]
+    if files:
+        lines += core.files_lines()
+    lines += list(module_lines)
+    if hooks:
+        lines += [
+            *core.hook_lines(hooks),
+            *(f'rm -rf "$root{core.HOOK_DIR}/{name}"' for name in ("hooks", "inputs", "build.env")),
+        ]
+    if apt:
+        lines += apt_cleanup_lines()
+    lines += [
+        *sources,
+        *trace_lines(),
+        *core.identity_lines(),
+        *finish,
+        *unmount_lines(mirror=apt),
+        *run_cleanup_lines(),
+    ]
+    return lines
+
+
 def build_script(
     *,
     layers: int,
@@ -255,43 +314,10 @@ def build_script(
     installed in the same transaction (neither: no apt setup), `module_lines` what the switched-on builtin
     modules run in the builder with the root as `$root`, `hooks` the scripts that run in the chroot after
     them. `owner` (`uid:gid`) hands the outputs back where the container's root is the host's."""
-    apt = bool(request or debs)
-    cleanup_trap = [
-        "cleanup() {",
-        "    status=$?",
-        *(f"    {line}" for line in unmount_lines(mirror=apt, quiet=True)),
-        f'    rm -rf --one-file-system "$root" {ASIDE}',
-        '    exit "$status"',
-        "}",
-        "trap cleanup EXIT",
-    ]
     lines = [
-        "set -eu",
-        f"export SOURCE_DATE_EPOCH={int(source_date_epoch)}",
-        *ENVIRONMENT,
-        "umask 022",
-        f'root="{ROOT}"',
-        *cleanup_trap,
+        *prologue_lines(source_date_epoch, mirror=bool(request or debs)),
         *unpack_lines(layers, source_date_epoch),
-        *mount_lines(),
-    ]
-    if apt:
-        lines += [*apt_setup_lines(), *install_lines(request, debs)]
-    if files:
-        lines += core.files_lines()
-    lines += list(module_lines)
-    if hooks:
-        lines += [
-            *core.hook_lines(hooks),
-            *(f'rm -rf "$root{core.HOOK_DIR}/{name}"' for name in ("hooks", "inputs", "build.env")),
-        ]
-    if apt:
-        lines += apt_cleanup_lines()
-    lines += [
-        *trace_lines(),
-        *core.identity_lines(),
-        *unmount_lines(mirror=apt),
-        *run_cleanup_lines(),
+        *child_lines(request=request, files=files, module_lines=module_lines, hooks=hooks, debs=debs),
         *pack_lines(source_date_epoch, owner),
         "",
     ]

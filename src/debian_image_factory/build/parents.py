@@ -1,7 +1,9 @@
 """The artifact an OCI image is built on, found and read (DESIGN 5.3, 8.2). An edge: it reads files.
 
 A child's parent is built earlier in the same run, or it is already somewhere: in the build's output
-directory, in a `dir://` target given as `--parents`, or in a registry (`pull`). Every candidate is
+directory, in a `dir://` target given as `--parents`, or, for an OCI parent, in a registry (`pull`).
+Each artifact kind is found by its extension: core and os are root filesystem tarballs (`tar.gz`), an
+installer is its kit (`tar`), an OCI image a layout directory. Every candidate is
 checked against its own name and, when the plan names the parent's digest, against that digest, so a
 child is never built on bytes other than the ones its identity was computed from.
 """
@@ -15,12 +17,20 @@ from pathlib import Path
 from typing import Final
 
 from input_lock.identity import HEX64
+from input_lock.records import PROVENANCE_PREDICATE
 
-from .. import commands, oci, ocilayout, planfile, published
+from .. import commands, oci, ocilayout, planfile, published, records
 
 CORE_EXTENSION: Final = "tar.gz"
-EXTENSIONS: Final[Mapping[str, str]] = {"core": CORE_EXTENSION, "oci": oci.LAYOUT_EXT}
+EXTENSIONS: Final[Mapping[str, str]] = {
+    "core": CORE_EXTENSION,
+    "oci": oci.LAYOUT_EXT,
+    "os": CORE_EXTENSION,
+    "installer": "tar",
+}
 """The extension of each artifact kind a child can be built on."""
+FILE_KINDS: Final = ("core", "os", "installer")
+"""The kinds whose artifact is one file named by its sha256."""
 DPKG_STATUS: Final = "var/lib/dpkg/status"
 
 type Finder = Callable[[str], Path | None]
@@ -36,11 +46,11 @@ class ParentArtifact:
 
     image: str
     kind: str
-    """`core` or `oci`."""
+    """`core`, `oci`, `os` or `installer`."""
     name: str
     """The artifact's file or directory name."""
     digest: str
-    """sha256 in hex: of a core tarball, or of an OCI image's manifest."""
+    """sha256 in hex: of the file (core, os, installer), or of an OCI image's manifest."""
     path: Path | None
     """Where it is; None for an ancestor only known by the name and digest its child's annotations give."""
 
@@ -84,13 +94,19 @@ def name_parts(name: str, kind: str) -> published.ArtifactName:
     return parts
 
 
-def describe_core(path: Path) -> ParentArtifact:
-    """A core tarball, its digest read from its bytes and checked against the digest its name carries."""
-    parts = name_parts(path.name, "core")
+def describe_file(path: Path, kind: str) -> ParentArtifact:
+    """A one-file artifact (a core or os tarball, an installer kit), its digest read from its bytes and
+    checked against the digest its name carries."""
+    parts = name_parts(path.name, kind)
     digest = sha256_of(path)
     if not digest.startswith(parts.digest12):
         raise commands.Failed(f"{path.name}: its sha256 is {digest}, which its name does not say")
-    return ParentArtifact(parts.image, "core", path.name, digest, path)
+    return ParentArtifact(parts.image, kind, path.name, digest, path)
+
+
+def describe_core(path: Path) -> ParentArtifact:
+    """A core tarball (`describe_file`)."""
+    return describe_file(path, "core")
 
 
 def describe_layout(path: Path, *, check_layers: bool) -> ParentArtifact:
@@ -107,14 +123,16 @@ def describe_layout(path: Path, *, check_layers: bool) -> ParentArtifact:
 
 
 def describe(path: Path, kind: str, *, check_layers: bool = True) -> ParentArtifact:
-    return describe_core(path) if kind == "core" else describe_layout(path, check_layers=check_layers)
+    return describe_file(path, kind) if kind in FILE_KINDS else describe_layout(path, check_layers=check_layers)
 
 
 def base_of(parent: ParentArtifact) -> Base:
-    """The layers and config a child starts from. A core tarball is its own single layer."""
+    """The layers and config a child starts from. A core or os tarball is its own single layer."""
     if parent.path is None:
         raise commands.Failed(f"{parent.name} is only known by name: its layers are needed to build on it")
-    if parent.kind == "core":
+    if parent.kind == "installer":
+        raise commands.Failed(f"{parent.name} is an installer kit: a child unpacks its initrd, it has no layers")
+    if parent.kind in ("core", "os"):
         size = parent.path.stat().st_size
         return Base(((parent.path, parent.digest, size),), (gunzip_sha256(parent.path),), None)
     try:
@@ -126,6 +144,21 @@ def base_of(parent: ParentArtifact) -> Base:
         for path, described in zip(layout.layers, layout.manifest.layers, strict=True)
     )
     return Base(layers, layout.diff_ids, layout.config)
+
+
+def layer_files(parent: ParentArtifact) -> tuple[Path, ...]:
+    """The files of the layers a child unpacks, base first, without reading them: a core or os tarball is
+    its own single layer, an OCI image's are its layout's blobs."""
+    if parent.path is None:
+        raise commands.Failed(f"{parent.name} is only known by name: its layers are needed to build on it")
+    if parent.kind in ("core", "os"):
+        return (parent.path,)
+    if parent.kind != "oci":
+        raise commands.Failed(f"{parent.name} is a {parent.kind} artifact, which has no layers")
+    try:
+        return ocilayout.read_layout(parent.path, check_layers=False).layers
+    except (oci.OciError, OSError) as error:
+        raise commands.Failed(f"{parent.name}: {error}") from None
 
 
 def dpkg_status(layers: Sequence[Path]) -> str:
@@ -200,7 +233,7 @@ def locate_parent(
         return built[parent]
     kind = entry["kind"]
     if kind not in EXTENSIONS:
-        raise commands.Failed(f"images.{child}: its parent {parent} is a {kind} image, which no OCI image is built on")
+        raise commands.Failed(f"images.{child}: its parent {parent} is a {kind} image, which nothing is built on yet")
     digest = named_digest(entry)
     searched: list[str] = []
     for directory in (out_dir, *directories):
@@ -266,3 +299,58 @@ def lineage(parent: ParentArtifact, find: Finder) -> tuple[ParentArtifact, ...]:
             raise commands.Failed(f"{current.name}: its base {base_name} is neither a core tarball nor an OCI image")
         chain.append(current)
     return tuple(chain)
+
+
+def file_ancestors(parent: ParentArtifact, find: Finder) -> tuple[records.Parent, ...]:
+    """`parent` and every image above it up to core, nearest first, for a parent whose artifact is one file
+    (core, os, installer). Such an artifact names nothing of its own ancestry, so it is read from the
+    provenance beside it (`<digest>.intoto.jsonl`, found by `find`): its own `parent:` and `ancestor:`
+    dependencies. Core has no ancestors, so its records are not needed."""
+    chain = [records.Parent(parent.image, parent.digest)]
+    if parent.kind == "core":
+        return tuple(chain)
+    name = published.records_name_for(parent.digest)
+    path = find(name)
+    if path is None:
+        raise commands.Failed(
+            f"{parent.name}: its records ({name}) are not in the build's output or in --parents: "
+            "they name the images below it"
+        )
+    try:
+        statements = records.decode_statements(path.read_text(encoding="utf-8"))
+    except (records.RecordsError, OSError, UnicodeDecodeError) as error:
+        raise commands.Failed(f"{path}: {error}") from None
+    provenance = next((one for one in statements if one.get("predicateType") == PROVENANCE_PREDICATE), None)
+    found = provenance_ancestors(provenance, parent.digest)
+    if found is None:
+        raise commands.Failed(f"{path}: no provenance of {parent.name} naming what it is built on")
+    return (*chain, *found)
+
+
+def provenance_ancestors(provenance: dict[str, object] | None, digest: str) -> list[records.Parent] | None:
+    """The `parent:` and `ancestor:` dependencies of a provenance statement whose first subject is `digest`,
+    in order; None when the statement is not one or describes another artifact."""
+    if provenance is None:
+        return None
+    subjects = provenance.get("subject")
+    predicate = provenance.get("predicate")
+    if not isinstance(subjects, list) or not subjects or not isinstance(subjects[0], dict):
+        return None
+    if subjects[0].get("digest") != {"sha256": digest} or not isinstance(predicate, dict):
+        return None
+    definition = predicate.get("buildDefinition")
+    dependencies = definition.get("resolvedDependencies") if isinstance(definition, dict) else None
+    if not isinstance(dependencies, list):
+        return None
+    found: list[records.Parent] = []
+    for one in dependencies:
+        if not isinstance(one, dict):
+            continue
+        label, digests = one.get("name"), one.get("digest")
+        if not isinstance(label, str) or not isinstance(digests, dict):
+            continue
+        for prefix in ("parent: ", "ancestor: "):
+            sha256 = digests.get("sha256")
+            if label.startswith(prefix) and isinstance(sha256, str) and HEX64.fullmatch(sha256):
+                found.append(records.Parent(label.removeprefix(prefix), sha256))
+    return found
