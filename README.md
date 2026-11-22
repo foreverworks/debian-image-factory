@@ -192,8 +192,9 @@ dir:///srv/images` and the core you just published reads `reuse`.
 OCI images publish to a registry instead: `publish out/ --to oci://ghcr.io/example/debian` pushes
 each image under the tag `identity-<identity>` and attaches its records as referrers, and `plan
 --against` the same address finds it again. `debian-image-factory verify REF` checks an artifact
-(an `oci://` reference, a layout directory or a file) against its records. Credentials come from your
-Docker config. Files publish to a GitHub release too: `publish out/ --to github-release://example/images@v1`
+(an `oci://` reference, a layout directory or a file) against its records; `--pull` downloads first, so it
+also reads every layer of a registry image, and with `--artifact NAME|SHA256` it verifies an artifact of a
+`github-release://` or `dir://` target. Credentials come from your Docker config. Files publish to a GitHub release too: `publish out/ --to github-release://example/images@v1`
 uploads them as assets (creating the release when the tag has none), and `plan --against` the same address
 reads them back. It uses `GITHUB_TOKEN`, else `GH_TOKEN`, and `GITHUB_API_URL` when it is set.
 

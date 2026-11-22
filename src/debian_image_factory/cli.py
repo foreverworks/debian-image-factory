@@ -166,7 +166,19 @@ def parser() -> argparse.ArgumentParser:
     verify_.add_argument(
         "ref",
         metavar="REF",
-        help="oci://REGISTRY/REPOSITORY@sha256:HEX or :TAG, an .oci layout directory, or an artifact file",
+        help="oci://REGISTRY/REPOSITORY@sha256:HEX or :TAG, an .oci layout directory, an artifact file, "
+        "or with --pull and --artifact github-release://OWNER/REPO@TAG or dir://PATH",
+    )
+    verify_.add_argument(
+        "--pull",
+        action="store_true",
+        help="download what REF names before checking it: an image's layers, or the artifact and its records "
+        "of a github-release:// or dir:// REF",
+    )
+    verify_.add_argument(
+        "--artifact",
+        metavar="NAME|SHA256",
+        help="the artifact of a github-release:// or dir:// REF, by file name or by digest in full hex",
     )
     verify_.add_argument(
         "--require-checks", action="store_true", help="every check the definition requires must have a passing result"
@@ -264,7 +276,13 @@ def dispatch(arguments: argparse.Namespace) -> int:
         return publish.publish_command(arguments.out_dir, arguments.to, arguments.sign, sys.stdout)
     if arguments.command == "verify":
         return verify.verify_command(
-            arguments.ref, arguments.require_checks, arguments.lock, arguments.definition, sys.stdout
+            arguments.ref,
+            arguments.require_checks,
+            arguments.lock,
+            arguments.definition,
+            sys.stdout,
+            pull_wanted=arguments.pull,
+            artifact=arguments.artifact,
         )
     raise commands.Usage("a command is needed: lock, plan, fetch, build, test, publish or verify")
 

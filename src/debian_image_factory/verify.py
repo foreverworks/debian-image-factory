@@ -21,6 +21,7 @@ What passes:
 import contextlib
 import hashlib
 import re
+import tempfile
 import urllib.error
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -31,7 +32,7 @@ import input_lock
 from input_lock.identity import HEX64
 from input_lock.records import PROVENANCE_PREDICATE, SPDX_PREDICATE, TestOutcome
 
-from . import commands, definition, fileartifacts, incus, oci, ocilayout, published, records, registry
+from . import commands, definition, fileartifacts, github, incus, oci, ocilayout, published, pull, records, registry
 
 BUILD_TYPE: Final = re.compile(re.escape(records.REPOSITORY) + r"/blob/v[0-9][0-9A-Za-z.+-]*/docs/build-type-v1\.md")
 """The `buildType` of any release of this factory: the document names its release, so a verifier of one
@@ -215,7 +216,11 @@ def split_lines(data: bytes, where: str) -> tuple[list[str], list[str]]:
     return [line for line in text.splitlines() if line.strip()], []
 
 
-def remote_subject(reference: registry.Reference, connect: Callable[[published.OciTarget], registry.Client]) -> Subject:
+def remote_subject(
+    reference: registry.Reference, connect: Callable[[published.OciTarget], registry.Client], pull_layers: bool = False
+) -> Subject:
+    """An image of a registry. Without `pull_layers` its layers are only looked for (they are checked when
+    something pulls them); with it they are downloaded, each checked against its digest and size."""
     client = connect(reference.target)
     problems: list[str] = []
     label = f"{client.name}@sha256:{reference.digest}" if reference.digest else f"{client.name}:{reference.tag}"
@@ -226,10 +231,13 @@ def remote_subject(reference: registry.Reference, connect: Callable[[published.O
         if fetched is None:
             raise commands.Failed(f"{label}: no such manifest")
         manifest = oci.parse_manifest(fetched.data)
-        for blob in (manifest.config, *manifest.layers):
-            if not registry.blob_exists(client, blob.digest):
-                problems.append(f"{label}: blob sha256:{blob.digest} is not in the registry")
-        registry.fetch_blob(client, manifest.config, registry.MANIFEST_LIMIT)
+        if pull_layers:
+            problems.extend(pulled_problems(client, fetched.digest, label))
+        else:
+            for blob in (manifest.config, *manifest.layers):
+                if not registry.blob_exists(client, blob.digest):
+                    problems.append(f"{label}: blob sha256:{blob.digest} is not in the registry")
+            registry.fetch_blob(client, manifest.config, registry.MANIFEST_LIMIT)
         identity = manifest.annotations.get(oci.IDENTITY)
         if identity is None:
             problems.append(f"{label}: its manifest has no identity annotation")
@@ -257,6 +265,17 @@ def remote_subject(reference: registry.Reference, connect: Callable[[published.O
     return Subject(
         f"{client.name}@sha256:{fetched.digest}", fetched.digest, identity, None, tuple(lines), tuple(problems)
     )
+
+
+def pulled_problems(client: registry.Client, digest: str, label: str) -> list[str]:
+    """Pull the image into a scratch layout and read it back: what is wrong with its config or any layer
+    (absent, the wrong size, not its digest, or not what its config says), or nothing."""
+    with tempfile.TemporaryDirectory(prefix="debian-image-factory-pull-") as scratch:
+        try:
+            registry.pull_layout(client, digest, Path(scratch) / "image")
+        except (oci.OciError, registry.RegistryError) as error:
+            return [f"{label}: pulling the image: {error}"]
+    return []
 
 
 def describe(error: OSError) -> str:
@@ -292,43 +311,99 @@ def layout_subject(path: Path) -> Subject:
     return Subject(str(path), digest, identity, name, tuple(lines), tuple((*problems, *bad)))
 
 
-def file_subject(path: Path) -> Subject:
-    """A file artifact: its sha256, or for an Incus image (its metadata tarball, or its rootfs) the
-    fingerprint of the two files."""
+def artifact_path(path: Path) -> Path:
+    """The file an artifact is named by: for an Incus image its metadata tarball, whichever of its two
+    files `path` is."""
     name = published.parse_artifact_name(path.name)
     if name is not None and name.ext == incus.ROOTFS_EXT:
-        path = path.with_name(path.name.removesuffix(incus.ROOTFS_EXT) + incus.METADATA_EXT)
-        name = published.parse_artifact_name(path.name)
+        return path.with_name(path.name.removesuffix(incus.ROOTFS_EXT) + incus.METADATA_EXT)
+    return path
+
+
+def file_subject(path: Path, label: str | None = None, digest: str | None = None) -> Subject:
+    """A file artifact: its sha256, or for an Incus image (its metadata tarball, or its rootfs) the
+    fingerprint of the two files. `label` is what to call it when its path is not (a pulled file); `digest`
+    is its digest when the caller has computed it."""
+    path = artifact_path(path)
+    name = published.parse_artifact_name(path.name)
     rootfs = incus.rootfs_of(path.name)
     what = "sha256" if rootfs is None else "Incus fingerprint"
+    where = label or str(path)
     try:
-        if rootfs is None:
+        if digest is not None:
+            pass
+        elif rootfs is None:
             digest = fileartifacts.sha256_of(path)
         else:
             digest = fileartifacts.fingerprint_of(path, path.parent / rootfs)
     except OSError as error:
-        raise commands.Failed(f"{path}: {describe(error)}") from None
+        raise commands.Failed(f"{where}: {describe(error)}") from None
     problems: list[str] = []
     if name is not None and not digest.startswith(name.digest12):
-        problems.append(f"{path}: its {what} is {digest}, which its name does not carry")
-    lines, bad = local_records(path.parent, digest, str(path))
-    return Subject(str(path), digest, None, name, tuple(lines), tuple((*problems, *bad)))
+        problems.append(f"{where}: its {what} is {digest}, which its name does not carry")
+    lines, bad = local_records(path.parent, digest, where)
+    return Subject(where, digest, None, name, tuple(lines), tuple((*problems, *bad)))
 
 
-def subject_of(ref: str, connect: Callable[[published.OciTarget], registry.Client]) -> Subject:
+def pulled_subject(source: pull.Source, wanted: str, scratch: Path) -> Subject:
+    """The artifact `wanted` of a file target, downloaded with its records to `scratch` and read from there."""
+    pulled = pull.pull_artifact(source, wanted, scratch)
+    name = artifact_path(pulled.path).name
+    one = file_subject(pulled.path, f"{name} in {source.label}", pulled.digest)
+    return Subject(one.label, one.digest, one.identity, one.name, one.lines, (*pulled.problems, *one.problems))
+
+
+def subject_of(
+    ref: str,
+    connect: Callable[[published.OciTarget], registry.Client],
+    scratch: Path,
+    pull_wanted: bool = False,
+    artifact: str | None = None,
+    connect_release: Callable[[published.ReleaseTarget], github.Client] = github.connect,
+) -> Subject:
+    """What `ref` names, read: a registry image (its layers pulled when `pull_wanted`), an OCI layout, a
+    file, or with `pull_wanted` the `artifact` of a `github-release://` or `dir://` target, downloaded into
+    `scratch`."""
+    if ref.startswith(("github-release://", "dir://")):
+        return pulled_subject(file_source(ref, pull_wanted, artifact, connect_release), artifact or "", scratch)
+    if artifact is not None:
+        raise commands.Usage("--artifact goes with a github-release:// or dir:// REF")
     if ref.startswith("oci://"):
         reference = registry.parse_reference(ref)
         if reference is None:
             raise commands.Usage(
                 f"{ref!r} is not an image reference: oci://<registry>/<repository>@sha256:<hex> or oci://<registry>/<repository>:<tag>"
             )
-        return remote_subject(reference, connect)
+        return remote_subject(reference, connect, pull_wanted)
+    if pull_wanted:
+        raise commands.Usage("--pull is for an oci://, github-release:// or dir:// REF: this one is already local")
     path = Path(ref)
     if path.is_dir():
         return layout_subject(path)
     if path.is_file():
         return file_subject(path)
     raise commands.Failed(f"{ref}: not an oci:// reference, an OCI layout directory or a file")
+
+
+def file_source(
+    ref: str,
+    pull_wanted: bool,
+    artifact: str | None,
+    connect_release: Callable[[published.ReleaseTarget], github.Client],
+) -> pull.Source:
+    """The file target `ref` names, listed. A file target is verified by downloading: it needs `--pull`
+    and the artifact's name or digest in `--artifact`."""
+    if not pull_wanted or not artifact:
+        raise commands.Usage(f"{ref}: name the artifact and download it: --pull --artifact NAME|SHA256")
+    try:
+        target = published.parse_target(ref)
+    except ValueError as error:
+        raise commands.Usage(str(error)) from None
+    if isinstance(target, published.DirTarget):
+        return pull.dir_source(Path(target.path))
+    if isinstance(target, published.ReleaseTarget):
+        return pull.release_source(connect_release(target))
+    raise commands.Usage(f"{ref}: not a github-release:// or dir:// target")
 
 
 def summary(subject: Subject, found: Findings, required: Sequence[str] | None) -> list[str]:
@@ -353,11 +428,18 @@ def verify_command(
     definition_path: Path,
     out: TextIO,
     connect: Callable[[published.OciTarget], registry.Client] = registry.connect,
+    *,
+    pull_wanted: bool = False,
+    artifact: str | None = None,
+    connect_release: Callable[[published.ReleaseTarget], github.Client] = github.connect,
 ) -> int:
-    """Check `ref` and print a short summary (0), or raise Failed naming every problem (exit 1)."""
+    """Check `ref` and print a short summary (0), or raise Failed naming every problem (exit 1).
+    `pull_wanted` downloads what the ref names (an image's layers; the `artifact` of a release or a
+    directory) and checks the copy."""
     expected = lock_digests(commands.read_text(lock_path)) if lock_path is not None else None
     parsed = commands.read_text(definition_path) if require_checks else None
-    subject = subject_of(ref, connect)
+    with tempfile.TemporaryDirectory(prefix="debian-image-factory-verify-") as scratch:
+        subject = subject_of(ref, connect, Path(scratch), pull_wanted, artifact, connect_release)
     found = inspect(subject, expected)
     problems = [f"{subject.label}: {problem}" for problem in found.problems]
     required: tuple[str, ...] | None = None

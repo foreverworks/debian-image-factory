@@ -302,6 +302,40 @@ class RegistryTest(VerifyBase):
                 found, [f"oci://{name}/team/app@sha256:{built.digest}: blob sha256:{layer} is not in the registry"]
             )
 
+    def test_pull_downloads_the_layers_and_checks_them_in_full(self) -> None:
+        fake = Fake()
+        with fake_registry.running(fake) as name:
+            built = self.published(name)
+            ref = f"oci://{name}/team/app@sha256:{built.digest}"
+            said = io.StringIO()
+            self.assertEqual(
+                verify.verify_command(ref, True, None, self.definition, said, pull_wanted=True), 0, said.getvalue()
+            )
+            self.assertIn(f"{ref}: verified", said.getvalue())
+            layer = ocilayout.read_layout(built.layout).manifest.layers[0].digest
+            fake.broken_blobs.add(f"sha256:{layer}")
+            self.run_verify(ref)  # without --pull a layer is only looked for
+            with self.assertRaises(commands.Failed) as caught:
+                verify.verify_command(ref, False, None, self.definition, io.StringIO(), pull_wanted=True)
+            self.assertIn(f"blob sha256:{layer} does not match its digest", str(caught.exception))
+
+    def test_pull_names_a_layer_the_registry_lost(self) -> None:
+        fake = Fake()
+        with fake_registry.running(fake) as name:
+            built = self.published(name)
+            layer = ocilayout.read_layout(built.layout).manifest.layers[0].digest
+            del fake.blobs[f"sha256:{layer}"]
+            with self.assertRaises(commands.Failed) as caught:
+                verify.verify_command(
+                    f"oci://{name}/team/app@sha256:{built.digest}",
+                    False,
+                    None,
+                    self.definition,
+                    io.StringIO(),
+                    pull_wanted=True,
+                )
+            self.assertIn("pulling the image: ", str(caught.exception))
+
     def test_a_manifest_that_does_not_hash_to_its_digest_is_a_failure(self) -> None:
         fake = Fake()
         with fake_registry.running(fake) as name:
@@ -333,6 +367,16 @@ class CommandLineTest(VerifyBase):
         self.assertEqual(main("verify", str(built.layout)), 1)
         self.assertEqual(main("verify", "oci://not a reference"), 2)
         self.assertEqual(main("verify", "oci://registry.example.com/app"), 2)
+
+    def test_pull_and_artifact_on_the_command_line(self) -> None:
+        core = make_core_file(self.root / "out", checks=[("package-set", "PASSED")])
+        ref = f"dir://{self.root / 'out'}"
+        self.assertEqual(main("verify", ref, "--pull", "--artifact", core.name), 0)
+        self.assertEqual(main("verify", ref, "--pull", "--artifact", core.digest), 0)
+        self.assertEqual(main("verify", ref, "--artifact", core.name), 2)
+        self.assertEqual(main("verify", ref, "--pull"), 2)
+        self.assertEqual(main("verify", ref, "--pull", "--artifact", "nothing"), 1)
+        self.assertEqual(main("verify", str(core.layout), "--pull"), 2)
 
     def test_the_definition_is_read_only_with_require_checks(self) -> None:
         built = make_image(self.root / "out")

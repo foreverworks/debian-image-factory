@@ -1107,7 +1107,7 @@ debian-image-factory build plan.json --out out/ [--image NAME]... [--parents TAR
 debian-image-factory test out/ [--check NAME]... [--url URL] [--definition FILE]
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
 debian-image-factory publish out/ --to TARGET... [--sign none|keyless|key:REF]
-debian-image-factory verify REF [--require-checks] [--lock FILE] [--definition FILE]
+debian-image-factory verify REF [--pull [--artifact NAME|SHA256]] [--require-checks] [--lock FILE] [--definition FILE]
                                                          records match the bits, provenance names the lock, checks complete
 debian-image-factory prune --against TARGET... --pin DIGEST... [--keep-good 5] [--keep-candidates 1] [--dry-run]
 ```
@@ -1155,11 +1155,29 @@ or `~/.docker`: `auths`, `credHelpers`, `credsStore`); registries on `localhost`
 
 `verify REF` takes `oci://<registry>/<repository>@sha256:<hex>`, `oci://<registry>/<repository>:<tag>`,
 a local `.oci` layout directory, or an artifact file with its `<digest>.intoto.jsonl` beside it,
-and names every problem it finds (exit 1) or prints a short summary (exit 0). It checks that:
+and names every problem it finds (exit 1) or prints a short summary (exit 0). `--pull` makes it
+download what the reference names, and `--artifact` says which artifact of a file target:
+
+- `verify oci://... --pull` downloads the image (its config and every layer, each streamed through
+  sha256 and held to its descriptor's size) into a scratch layout and reads that back in full, so a
+  layer a registry lost or corrupted is named. Without `--pull` the layers are only looked for
+  (every manifest, config and record blob is read and checked either way);
+- `verify github-release://<owner>/<repo>@<tag> --pull --artifact NAME|SHA256` and
+  `verify dir://<path> --pull --artifact NAME|SHA256` download the artifact (an Incus image: both
+  its files) and its `<digest>.intoto.jsonl` to a scratch directory, then run the ordinary file
+  verify there, so the checks below apply unchanged and the bytes checked are the bytes
+  downloaded. `--artifact` is the file name the target holds (an Incus rootfs names its image), or
+  the digest in full hex (`sha256:` optional), found through the 12 hex every artifact name carries;
+  the digest the bytes have must then be the one asked for. A file target needs `--pull` and
+  `--artifact`, and `--artifact` goes only with a file target (a usage error, exit 2, otherwise);
+  `--pull` on a local layout or file has nothing to pull and is a usage error too. A release needs
+  `GITHUB_TOKEN` (or `GH_TOKEN`) only when it is private; the scratch directory is removed on exit.
+
+What it checks:
 
 - the bits match their digest: an image's manifest digest (a registry's blobs are checked as they
   are read, a layout on disk in full, layers included; from a registry the layers are checked when
-  pulled), a file's sha256;
+  pulled, which `--pull` does), a file's sha256;
 - every record is a DSSE envelope of an in-toto Statement v1 that names the artifact's digest as a
   subject;
 - there is exactly one provenance, whose build type is a release of this factory's, naming the
