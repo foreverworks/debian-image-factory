@@ -83,6 +83,7 @@ def entry(
         "request": [],
         "packages": [list(package) for package in packages],
         "inputs": {},
+        "trust": {},
         "modules": [],
         "params": {},
         "checks": list(checks),

@@ -107,8 +107,9 @@ class HiddenTest(unittest.TestCase):
         found = scan([{"./b": KEY, "./a": KEY}, {"./b": KEY}], keys=True)
         self.assertEqual(found.key_files, ("/a", "/b"))
 
-    def test_documentation_trees_are_still_skipped(self) -> None:
-        self.assertEqual(scan([{"./usr/share/doc/x/example": KEY}], keys=True).key_files, ())
+    def test_only_compressed_documentation_is_skipped(self) -> None:
+        self.assertEqual(scan([{"./usr/share/doc/x/example.gz": KEY}], keys=True).key_files, ())
+        self.assertEqual(scan([{"./usr/share/doc/x/example": KEY}], keys=True).key_files, ("/usr/share/doc/x/example",))
 
     def test_the_needle_in_a_deleted_file_is_still_a_hit_and_hits_are_in_layer_order(self) -> None:
         found = scan([{"./a": NEEDLE.encode()}, {"./.wh.a": b"", "./b": NEEDLE.encode()}], needle=NEEDLE)
