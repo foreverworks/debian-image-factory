@@ -74,6 +74,7 @@ def make_image(
     checks: Sequence[tuple[str, TestOutcome]] = (("package-set", "PASSED"), ("oci-run", "PASSED")),
     entries: Sequence[str] = (),
     provenance_identity: str | None = None,
+    finished: str = FINISHED,
 ) -> Built:
     """Write `out/<name>.oci/` and `out/<manifest digest>.intoto.jsonl`, the way `build` and `test` do."""
     out.mkdir(parents=True, exist_ok=True)
@@ -99,6 +100,7 @@ def make_image(
         identity=provenance_identity or identity,
         checks=checks,
         entries=entries,
+        finished=finished,
     )
     file = out / published.records_name_for(descriptor.digest)
     file.write_text(lines)
@@ -114,6 +116,7 @@ def records_text(
     identity: str,
     checks: Sequence[tuple[str, TestOutcome]],
     entries: Sequence[str] = (),
+    finished: str = FINISHED,
 ) -> str:
     """The records file of one artifact: its provenance, its SBOM, then one test result per check, in order."""
     lock = example_lock()
@@ -138,7 +141,7 @@ def records_text(
         invocation_id=None,
         version=__version__,
         started_on=STARTED,
-        finished_on=FINISHED,
+        finished_on=finished,
     )
     document = records.sbom(
         image=image,
@@ -162,13 +165,21 @@ def records_text(
     )
 
 
-def make_core_file(out: Path, *, identity: str = IDENTITY, checks: Sequence[tuple[str, TestOutcome]] = ()) -> Built:
+def make_core_file(
+    out: Path,
+    *,
+    identity: str = IDENTITY,
+    checks: Sequence[tuple[str, TestOutcome]] = (),
+    content: bytes = b"core rootfs",
+    finished: str = FINISHED,
+) -> Built:
     """A core tarball in `out/` with its records beside it, as `build` leaves one."""
     out.mkdir(parents=True, exist_ok=True)
-    content = b"core rootfs"
     digest = hashlib.sha256(content).hexdigest()
     name = published.artifact_name("core", "trixie", "amd64", identity, digest, "tar.gz")
     (out / name).write_bytes(content)
     file = out / published.records_name_for(digest)
-    file.write_text(records_text(name, digest, image="core", kind="core", identity=identity, checks=checks))
+    file.write_text(
+        records_text(name, digest, image="core", kind="core", identity=identity, checks=checks, finished=finished)
+    )
     return Built(out / name, digest, identity, name, file)

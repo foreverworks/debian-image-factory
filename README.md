@@ -197,6 +197,20 @@ also reads every layer of a registry image, and with `--artifact NAME|SHA256` it
 `github-release://` or `dir://` target. Credentials come from your Docker config. Files publish to a GitHub release too: `publish out/ --to github-release://example/images@v1`
 uploads them as assets (creating the release when the tag has none), and `plan --against` the same address
 reads them back. It uses `GITHUB_TOKEN`, else `GH_TOKEN`, and `GITHUB_API_URL` when it is set.
+Each asset is uploaded under a temporary `.partial-` name and renamed once it is whole, so a cut-off
+upload never leaves half a file where `plan` could find it; the next `publish` deletes what a crashed run
+left.
+
+Published builds pile up, so `prune` clears them: `debian-image-factory prune --against
+oci://ghcr.io/example/debian --pin sha256:<digest> --dry-run` lists, for every image, the newest 5 good builds and
+the newest candidate it would keep (`--keep-good`, `--keep-candidates`) and the rest it would delete,
+with the reason for each line. A build is good when every check your definition requires for its image
+has passed; one with a failed check is deleted once its checks have ended, and a run of failed nights
+never pushes out a good build. Anything you still run or may roll back to goes in as `--pin`, an
+artifact digest that is never deleted. Drop `--dry-run` to delete: the artifact and its records from a directory or a
+release, the image, its records and its identity tag from a registry (which must allow deleting manifests; zot and
+the official distribution image do, a distribution registry with `storage.delete.enabled` off does not). A delete that fails is reported for its
+artifact and the exit status is 1.
 
 An Incus image is two files named by their Incus fingerprint, `<name>.incus.tar.gz` (its metadata
 and the factory's NoCloud templates) and `<name>.rootfs.squashfs`, ready for `incus image import

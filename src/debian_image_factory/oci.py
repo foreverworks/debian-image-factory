@@ -68,6 +68,7 @@ ARCHITECTURES: Final[Mapping[str, str]] = {
 """Debian architecture to the OCI `architecture` field (Go's GOARCH names)."""
 
 _DIGEST: Final = re.compile(r"sha256:([0-9a-f]{64})")
+_IDENTITY_TAG: Final = re.compile(r"identity-([0-9a-f]{64})")
 
 
 class OciError(ValueError):
@@ -149,6 +150,12 @@ def identity_tag(identity: str) -> str:
     if not HEX64.fullmatch(identity):
         raise OciError(f"identity is not 64 lowercase hex characters: {identity!r}")
     return f"identity-{identity}"
+
+
+def identity_of_tag(tag: str) -> str | None:
+    """The identity (full hex) an `identity-<identity>` tag carries, or None for any other tag."""
+    found = _IDENTITY_TAG.fullmatch(tag)
+    return found.group(1) if found else None
 
 
 def referrers_tag(digest: str) -> str:

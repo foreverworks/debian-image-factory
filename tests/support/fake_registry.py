@@ -1,7 +1,9 @@
 """A registry in a thread, speaking enough of the distribution spec (1.1) to test the client without a
 network: blob uploads (monolithic, relative or absolute `Location`), manifests by tag and digest (a
-manifest whose blobs are missing is refused, as a real registry does), the referrers API (switchable,
-with paging) and the `OCI-Subject` header, and three kinds of authentication.
+manifest whose blobs are missing is refused, as a real registry does), deletes of a manifest (by digest,
+which drops its tags too, or by tag; switchable off as a distribution registry has it by default), tag
+listings with paging, the referrers API (switchable, with paging) and the `OCI-Subject` header, and three
+kinds of authentication.
 
 The state is a plain dataclass the test reads and changes while the server runs.
 """
@@ -25,7 +27,7 @@ UNAUTHORIZED: Final = b'{"errors":[{"code":"UNAUTHORIZED","message":"authenticat
 
 _ROUTE: Final = re.compile(
     r"/v2/(?P<name>.+?)/(?:blobs/uploads/(?P<upload>[^/]*)|blobs/(?P<blob>[^/]+)"
-    r"|manifests/(?P<ref>[^/]+)|referrers/(?P<referrers>[^/]+))"
+    r"|manifests/(?P<ref>[^/]+)|referrers/(?P<referrers>[^/]+)|tags/(?P<tags>list))"
 )
 
 
@@ -40,6 +42,9 @@ class Fake:
     uploads: dict[str, bytes] = field(default_factory=dict[str, bytes])
     log: list[str] = field(default_factory=list[str])
     referrers_api: bool = True
+    delete_enabled: bool = True
+    """False answers every DELETE with 405 UNSUPPORTED, as a distribution registry does by default."""
+    tag_page_size: int | None = None
     subject_header: bool = True
     absolute_location: bool = False
     location_host: str | None = None
@@ -126,10 +131,12 @@ def handler_for(fake: Fake) -> type[BaseHTTPRequestHandler]:
                 self.blob(found["blob"])
             elif found["ref"] is not None:
                 self.manifest(found["ref"])
+            elif found["tags"] is not None:
+                self.tag_list(parse_qs(parts.query))
             else:
                 self.referrers(name, found["referrers"], parse_qs(parts.query))
 
-        do_GET = do_HEAD = do_POST = do_PUT = route  # the base class's names
+        do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = route  # the base class's names
 
         # ---- endpoints
         def token(self, query: dict[str, list[str]]) -> None:
@@ -169,7 +176,38 @@ def handler_for(fake: Fake) -> type[BaseHTTPRequestHandler]:
                 data = data[:-1] + bytes([data[-1] ^ 1])
             self.send(200, data, {"Docker-Content-Digest": digest, "Content-Type": "application/octet-stream"})
 
+        def tag_list(self, query: dict[str, list[str]]) -> None:
+            names = sorted(fake.tags)
+            last = query.get("last", [""])[0]
+            names = [one for one in names if one > last]
+            headers: dict[str, str] = {}
+            if fake.tag_page_size is not None and len(names) > fake.tag_page_size:
+                names = names[: fake.tag_page_size]
+                headers["Link"] = f'</v2/x/tags/list?last={names[-1]}>; rel="next"'
+            self.send(200, json.dumps({"name": "x", "tags": names}).encode(), headers)
+
+        def delete(self, reference: str) -> None:
+            if not fake.delete_enabled:
+                self.send(405, b'{"errors":[{"code":"UNSUPPORTED","message":"The operation is unsupported."}]}')
+                return
+            if reference.startswith("sha256:"):
+                if reference not in fake.manifests:
+                    self.send(404, b'{"errors":[{"code":"MANIFEST_UNKNOWN","message":"unknown manifest"}]}')
+                    return
+                del fake.manifests[reference]
+                for tag in [name for name, digest in fake.tags.items() if digest == reference]:
+                    del fake.tags[tag]
+            elif reference in fake.tags:
+                del fake.tags[reference]
+            else:
+                self.send(404, b'{"errors":[{"code":"MANIFEST_UNKNOWN","message":"unknown manifest"}]}')
+                return
+            self.send(202)
+
         def manifest(self, reference: str) -> None:
+            if self.command == "DELETE":
+                self.delete(reference)
+                return
             if self.command == "PUT":
                 data = self.body()
                 digest = digest_of(data)

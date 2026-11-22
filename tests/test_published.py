@@ -24,10 +24,18 @@ from debian_image_factory.published import (
     artifact_from_records,
     artifact_name,
     decide,
+    described_artifact,
+    format_target,
     parse_artifact_name,
     parse_envelope,
     parse_envelopes,
     parse_target,
+    partial_name,
+    partial_of,
+    sort_newest_first,
+)
+from debian_image_factory.published import (
+    records_digest as published_records_digest,
 )
 
 IDENTITY = "ab" * 32
@@ -308,10 +316,103 @@ class ParseRecordsTest(unittest.TestCase):
         self.assertEqual(len(parse_envelopes("\n" + prov() + "\n\n")), 1)
 
 
+class DescribedArtifactTest(unittest.TestCase):
+    """An artifact read from its records alone, the image and identity being the provenance's (what `prune` lists)."""
+
+    def test_the_image_and_the_identity_are_the_provenances(self) -> None:
+        found = described_artifact(
+            NAME, DIGEST, prov(finished="2026-11-21T02:00:00Z") + check("a", "PASSED"), IDENTITY[:16]
+        )
+        self.assertEqual(
+            found, Artifact("node-26", IDENTITY, DIGEST, NAME, "2026-11-21T02:00:00Z", {"a": "PASSED"}, False)
+        )
+
+    def test_a_full_identity_works_as_the_prefix(self) -> None:
+        self.assertIsInstance(described_artifact(NAME, DIGEST, prov(), IDENTITY), Artifact)
+
+    def test_an_identity_that_does_not_start_with_the_prefix_is_rejected(self) -> None:
+        found = described_artifact(NAME, DIGEST, prov(OTHER), IDENTITY[:16])
+        assert isinstance(found, Rejected)
+        self.assertIn(f"provenance names identity {OTHER}", found.reason)
+
+    def test_provenance_that_disagrees_with_itself_is_rejected(self) -> None:
+        found = described_artifact(NAME, DIGEST, prov() + prov(image="other"), IDENTITY[:16])
+        assert isinstance(found, Rejected)
+        self.assertIn("different images or identities", found.reason)
+
+    def test_no_provenance_and_malformed_records_are_rejected(self) -> None:
+        for records, reason in (
+            ("", "no provenance record"),
+            (check("a", "PASSED"), "no provenance record"),
+            ("x\n", "malformed"),
+        ):
+            found = described_artifact(NAME, DIGEST, records, IDENTITY[:16])
+            assert isinstance(found, Rejected)
+            self.assertIn(reason, found.reason)
+
+    def test_records_about_another_digest_are_not_about_this_one(self) -> None:
+        self.assertIsInstance(described_artifact(NAME, "34" * 32, prov(), IDENTITY[:16]), Rejected)
+
+
+class OrderTest(unittest.TestCase):
+    def test_newest_first_by_time_then_smallest_digest_with_untimed_last(self) -> None:
+        one = art("22" * 32, {}, "2026-11-21T10:00:00Z")
+        two = art("11" * 32, {}, "2026-11-21T10:00:00Z")
+        three = art("33" * 32, {}, "2026-11-22T10:00:00Z")
+        untimed = art("00" * 32, {})
+        self.assertEqual(sort_newest_first([untimed, one, three, two]), [three, two, one, untimed])
+
+
+class PartialNameTest(unittest.TestCase):
+    def test_a_partial_name_is_never_an_artifact_or_a_records_file(self) -> None:
+        partial = partial_name(NAME, "0123456789abcdef")
+        self.assertEqual(partial, f"{NAME}.partial-0123456789abcdef")
+        self.assertIsNone(parse_artifact_name(partial))
+        self.assertEqual(partial_of(partial), NAME)
+        records = partial_name(f"{DIGEST}.intoto.jsonl", "0123456789abcdef")
+        self.assertIsNone(published_records_digest(records))
+        self.assertEqual(partial_of(records), f"{DIGEST}.intoto.jsonl")
+
+    def test_other_names_are_not_partial(self) -> None:
+        for name in (NAME, f"{NAME}.partial", f"{NAME}.partial-xyz", f"{NAME}.partial-0123456789abcde", ""):
+            self.assertIsNone(partial_of(name))
+
+    def test_a_token_is_16_hex(self) -> None:
+        with self.assertRaises(ValueError):
+            partial_name(NAME, "short")
+
+
+class FormatTargetTest(unittest.TestCase):
+    def test_a_target_reads_back_as_it_was_written(self) -> None:
+        for text in ("dir:///srv/out", "oci://localhost:5000/team/app", "github-release://example/images@v1.2"):
+            self.assertEqual(format_target(parse_target(text)), text)
+
+
+class LockedInputsTest(unittest.TestCase):
+    """Whether a build lists locked inputs (dependencies with a name and a uri besides lock.json)."""
+
+    def locked(self, dependencies: object) -> bool:
+        records = AncestorsTest.provenance_with(dependencies)
+        found = artifact_from_records(NAME, DIGEST, "node-26", IDENTITY, records)
+        assert isinstance(found, Artifact)
+        return found.has_locked_inputs
+
+    def test_a_dependency_with_a_name_and_a_uri_is_a_locked_input(self) -> None:
+        self.assertTrue(self.locked([{"name": "node", "uri": "https://example.com/node.tar.gz"}]))
+
+    def test_lock_json_and_other_dependencies_are_not(self) -> None:
+        self.assertFalse(self.locked([{"name": "lock.json", "uri": "x", "digest": {"sha256": "11" * 32}}]))
+        self.assertFalse(self.locked([{"name": "parent: core", "digest": {"sha256": "11" * 32}}, "text", 3]))
+        self.assertFalse(self.locked([]))
+        self.assertFalse(self.locked(None))
+
+
 class AncestorsTest(unittest.TestCase):
     """The images a build descends from, read from its provenance's resolved dependencies."""
 
-    def ancestors(self, dependencies: object) -> tuple[tuple[str, str], ...]:
+    @staticmethod
+    def provenance_with(dependencies: object) -> str:
+        """A records file of one provenance statement whose resolved dependencies are `dependencies`."""
         statement_ = {
             "_type": "https://in-toto.io/Statement/v1",
             "subject": [{"name": NAME, "digest": {"sha256": DIGEST}}],
@@ -330,7 +431,10 @@ class AncestorsTest(unittest.TestCase):
             "payload": base64.b64encode(json.dumps(statement_).encode()).decode(),
             "signatures": [],
         }
-        (record,) = parse_envelopes(json.dumps(body) + "\n")
+        return json.dumps(body) + "\n"
+
+    def ancestors(self, dependencies: object) -> tuple[tuple[str, str], ...]:
+        (record,) = parse_envelopes(self.provenance_with(dependencies))
         assert record.build is not None
         return record.build.ancestors
 

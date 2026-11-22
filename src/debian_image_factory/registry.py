@@ -50,6 +50,7 @@ TIMEOUT: Final = 60.0
 """Seconds a request may wait for its next byte, set on every one."""
 
 MAX_PAGES: Final = 100
+TAGS_PER_PAGE: Final = 1000
 USER_AGENT: Final = "debian-image-factory"
 LOCAL_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "[::1]"})
 DOCKER_HUB: Final = ("docker.io", "index.docker.io", "registry-1.docker.io")
@@ -594,6 +595,51 @@ def put_manifest(client: Client, reference: str, data: bytes, media_type: str) -
     return Put(oci.sha256_hex(data), None if subject is None else oci.parse_digest(subject))
 
 
+def delete_reference(client: Client, reference: str) -> bool:
+    """Delete the manifest at a digest (`sha256:<hex>`) or the tag a registry lets one delete: True when it
+    was deleted, False when there was none (404). A registry that does not allow it (a distribution registry
+    without `REGISTRY_STORAGE_DELETE_ENABLED`, a read-only token) answers 405, 403 or 400: that raises
+    RegistryError with its answer. Deleting a digest also drops the tags that name it, in registries that
+    follow the distribution spec."""
+    url = _url(client, f"manifests/{_reference_path(reference)}")
+    response = _call(client, "DELETE", url, write=True)
+    if response.status in (200, 202, 204):
+        return True
+    if response.status == 404:
+        return False
+    raise _refusal(client, f"deleting manifest {reference[:19]}", response)
+
+
+def list_tags(client: Client) -> tuple[str, ...]:
+    """Every tag of the repository, sorted, following `Link` pages (`n=` is asked for, a registry may ignore
+    it). A repository the registry does not know holds none (404)."""
+    url: str | None = _url(client, f"tags/list?n={TAGS_PER_PAGE}")
+    found: list[str] = []
+    for _ in range(MAX_PAGES):
+        if url is None:
+            return tuple(sorted(set(found)))
+        response = _call(client, "GET", url)
+        if response.status == 404 and not found:
+            return ()
+        if response.status != 200:
+            raise _refusal(client, "listing tags", response)
+        try:
+            answer: object = json.loads(response.body)
+        except ValueError:
+            raise RegistryError(f"{client.name}: its tag list is not JSON") from None
+        names = answer.get("tags") if isinstance(answer, dict) else None
+        if names is None:
+            names = []
+        if not isinstance(names, list) or not all(isinstance(one, str) for one in names):
+            raise RegistryError(f"{client.name}: its tag list has no list of tags")
+        found.extend(str(one) for one in names)
+        link = _NEXT.search(response.headers.get("link", ""))
+        url = None if link is None else urllib.parse.urljoin(url, link.group(1))
+        if url is not None and not _same_origin(client, url):
+            raise RegistryError(f"{client.name}: its tag list links to another host")
+    raise RegistryError(f"{client.name}: more than {MAX_PAGES} pages of tags")
+
+
 # ---- referrers --------------------------------------------------------------------------------
 
 
@@ -630,6 +676,20 @@ def tag_index(client: Client, digest: str) -> bytes | None:
     if found is None:
         return None
     return found.data
+
+
+def referrer_descriptors(client: Client, digest: str) -> tuple[oci.Descriptor, ...]:
+    """Every manifest attached to the manifest `digest` of whatever kind (records, signatures), as the
+    referrers API lists them, else as the referrers tag's index does. Unlike `referrers_of` nothing is
+    fetched or judged: a caller that deletes an image deletes all of them."""
+    listed = _referrers_api(client, digest)
+    if listed is not None:
+        return listed
+    held = tag_index(client, digest)
+    try:
+        return oci.parse_index(held) if held is not None else ()
+    except oci.OciError as error:
+        raise RegistryError(f"{client.name}: the tag {oci.referrers_tag(digest)}: {error}") from None
 
 
 @dataclass(frozen=True, slots=True)

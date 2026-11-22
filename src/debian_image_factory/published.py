@@ -55,6 +55,8 @@ class Artifact:
     name: str
     finished_on: str | None
     results: Mapping[str, TestOutcome] = field(default_factory=dict[str, TestOutcome])
+    has_locked_inputs: bool = False
+    """Whether its provenance lists locked inputs, which adds `locked-inputs` to the checks it needs."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,19 +102,30 @@ def _newest(artifacts: Sequence[Artifact]) -> Artifact:
     return min(artifacts, key=lambda one: (-_instant(one.finished_on).timestamp(), one.digest))
 
 
+def sort_newest_first(artifacts: Sequence[Artifact]) -> list[Artifact]:
+    """The artifacts newest first, by the same order `_newest` picks by: a tie goes to the smallest digest."""
+    return sorted(artifacts, key=lambda one: (-_instant(one.finished_on).timestamp(), one.digest))
+
+
+def failed_and_missing(one: Artifact, required: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The required checks whose last result is FAILED, and the ones with no result yet, each sorted."""
+    needed = sorted(set(required))
+    bad = tuple(check for check in needed if one.results.get(check) == "FAILED")
+    missing = tuple(check for check in needed if check not in one.results)
+    return bad, missing
+
+
 def decide(artifacts: Sequence[Artifact], required: Sequence[str]) -> Decision:
     """reuse, wait or build for one image, from the artifacts found for its identity (the caller
     passes only those; a target's lookup does). `required` is the image's check set."""
-    needed = sorted(set(required))
     good: list[Artifact] = []
     candidates: list[tuple[Artifact, tuple[str, ...]]] = []
     failed: set[str] = set()
     for one in artifacts:
-        bad = {check for check in needed if one.results.get(check) == "FAILED"}
-        failed |= bad
+        bad, missing = failed_and_missing(one, required)
+        failed |= set(bad)
         if bad:
             continue
-        missing = tuple(check for check in needed if check not in one.results)
         if missing:
             candidates.append((one, missing))
         else:
@@ -184,6 +197,24 @@ def records_digest(name: str) -> str | None:
     return found["digest"] if found else None
 
 
+_PARTIAL: Final = re.compile(r"(?P<name>.+)\.partial-(?P<token>[0-9a-f]{16})")
+
+
+def partial_name(name: str, token: str) -> str:
+    """The temporary name an asset is uploaded under before it is renamed to `name`: `<name>.partial-<token>`
+    (16 lowercase hex). The hyphen is not allowed in an artifact's extension and the `.partial-` tail
+    is not a records file's, so no lookup reads such an asset as an artifact or as records."""
+    if not re.fullmatch(r"[0-9a-f]{16}", token):
+        raise ValueError(f"a partial token is 16 lowercase hex characters: {token!r}")
+    return f"{name}.partial-{token}"
+
+
+def partial_of(name: str) -> str | None:
+    """The final name an unfinished upload `name` was going to get, or None when `name` is not one."""
+    found = _PARTIAL.fullmatch(name)
+    return found["name"] if found else None
+
+
 # ---- targets ------------------------------------------------------------------------------------
 
 
@@ -240,6 +271,17 @@ def parse_target(text: str) -> Target:
     raise ValueError(f"unknown target scheme {scheme + '://'!r} (expected dir://, oci:// or github-release://)")
 
 
+def format_target(target: Target) -> str:
+    """A target as `parse_target` takes it."""
+    match target:
+        case DirTarget(path):
+            return f"dir://{path}"
+        case OciTarget(registry, repository):
+            return f"oci://{registry}/{repository}"
+        case ReleaseTarget(owner, repo, tag):
+            return f"github-release://{owner}/{repo}@{tag}"
+
+
 # ---- records ------------------------------------------------------------------------------------
 
 
@@ -262,6 +304,8 @@ class BuildClaim:
     finished_on: str | None
     ancestors: tuple[tuple[str, str], ...] = ()
     """(image, sha256) of the `parent: <image>` and `ancestor: <image>` resolved dependencies, nearest first."""
+    has_locked_inputs: bool = False
+    """Whether it lists locked inputs: resolved dependencies other than `lock.json` with both a name and a uri."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,7 +389,24 @@ def _provenance(predicate: object) -> BuildClaim:
         times = _object(metadata, "runDetails.metadata") if metadata is not None else {}
         if "finishedOn" in times:
             finished = _finish_time(times["finishedOn"], "finishedOn")
-    return BuildClaim(image, identity, finished, _ancestors(definition.get("resolvedDependencies")))
+    dependencies = definition.get("resolvedDependencies")
+    return BuildClaim(
+        image,
+        identity,
+        finished,
+        _ancestors(dependencies),
+        has_locked_inputs=isinstance(dependencies, list) and any(_is_locked_input(one) for one in dependencies),
+    )
+
+
+def _is_locked_input(dependency: object) -> bool:
+    """A resolved dependency that is a locked input: it has a name and a uri, and is not `lock.json` itself."""
+    return (
+        isinstance(dependency, dict)
+        and isinstance(dependency.get("name"), str)
+        and isinstance(dependency.get("uri"), str)
+        and dependency.get("name") != "lock.json"
+    )
 
 
 def _ancestors(value: object) -> tuple[tuple[str, str], ...]:
@@ -471,4 +532,30 @@ def artifact_from_records(name: str, digest: str, image: str, identity: str, rec
         if build.identity != identity:
             return Rejected(name, f"provenance names identity {build.identity}, not {identity}")
     finished = max((build.finished_on for build in builds if build.finished_on), key=_instant, default=None)
-    return Artifact(image, identity, digest, name, finished, last_results(about))
+    locked = any(build.has_locked_inputs for build in builds)
+    return Artifact(image, identity, digest, name, finished, last_results(about), locked)
+
+
+def described_artifact(name: str, digest: str, records: str, identity_prefix: str) -> Artifact | Rejected:
+    """The artifact file `name` whose real sha256 is `digest`, as its records file `records` describes it,
+    when nothing is known about it but the start of its identity (a file name carries 16 hex, a registry tag
+    all 64). The image and the full identity are the provenance's; every provenance about the digest must
+    agree on both, and the identity must start with `identity_prefix`. Else the reason it does not count."""
+    try:
+        statements = parse_envelopes(records)
+    except RecordsError as error:
+        return Rejected(name, f"records file is malformed, {error}")
+    builds = [
+        one.build
+        for one in statements
+        if one.build is not None and any(subject.sha256 == digest for subject in one.subjects)
+    ]
+    if not builds:
+        return Rejected(name, "no provenance record is about this file's sha256")
+    claims = {(build.image, build.identity) for build in builds}
+    if len(claims) != 1:
+        return Rejected(name, "its provenance records name different images or identities")
+    image, identity = next(iter(claims))
+    if not identity.startswith(identity_prefix):
+        return Rejected(name, f"provenance names identity {identity}, which does not start with {identity_prefix}")
+    return artifact_from_records(name, digest, image, identity, records)

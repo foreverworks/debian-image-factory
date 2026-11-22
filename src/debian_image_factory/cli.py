@@ -2,7 +2,7 @@
 
 This release has `lock check`, `lock snapshot`, `lock checksums`, `lock baseline`, `plan`, `fetch`, `build`
 (core, oci, incus, installer and os), `test`, `publish` (to `dir://`, `oci://` and `github-release://`) and
-`verify`; the other commands arrive in later releases.
+`verify` and `prune`; the other commands arrive in later releases.
 """
 
 import argparse
@@ -11,7 +11,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from . import __version__, checks, commands, definition, fetch, publish, resolve, verify
+from . import __version__, checks, commands, definition, fetch, prune, publish, resolve, verify
 from . import tools as builder
 from .build import run as build_run
 
@@ -190,6 +190,36 @@ def parser() -> argparse.ArgumentParser:
         default=Path("factory.toml"),
         help="the definition --require-checks reads (default factory.toml)",
     )
+
+    prune_ = commands_.add_parser(
+        "prune", help="delete the builds beyond the newest good ones and candidates, never a pinned one"
+    )
+    prune_.add_argument(
+        "--against",
+        action="append",
+        default=[],
+        required=True,
+        metavar="TARGET",
+        help="dir://PATH, oci://REGISTRY/REPOSITORY or github-release://OWNER/REPO@TAG (repeat)",
+    )
+    prune_.add_argument(
+        "--pin",
+        action="append",
+        default=[],
+        metavar="DIGEST",
+        help="an artifact digest in full that is never deleted (repeat)",
+    )
+    prune_.add_argument("--keep-good", type=int, default=5, metavar="N", help="good builds kept per image (default 5)")
+    prune_.add_argument(
+        "--keep-candidates", type=int, default=1, metavar="N", help="candidates kept per image (default 1)"
+    )
+    prune_.add_argument("--dry-run", action="store_true", help="list what would be deleted and delete nothing")
+    prune_.add_argument(
+        "--definition",
+        type=Path,
+        default=Path("factory.toml"),
+        help="the definition that says which checks make a build good (default factory.toml)",
+    )
     return top
 
 
@@ -284,7 +314,17 @@ def dispatch(arguments: argparse.Namespace) -> int:
             pull_wanted=arguments.pull,
             artifact=arguments.artifact,
         )
-    raise commands.Usage("a command is needed: lock, plan, fetch, build, test, publish or verify")
+    if arguments.command == "prune":
+        return prune.prune_command(
+            arguments.against,
+            arguments.pin,
+            arguments.keep_good,
+            arguments.keep_candidates,
+            arguments.dry_run,
+            arguments.definition,
+            sys.stdout,
+        )
+    raise commands.Usage("a command is needed: lock, plan, fetch, build, test, publish, verify or prune")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

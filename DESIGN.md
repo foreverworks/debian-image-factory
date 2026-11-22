@@ -129,7 +129,7 @@ own requirements.
 | `os` | parent rootfs, kernel, bootloader and host packages, apt sources policy, hooks | OS root filesystem tarball, SBOM, provenance |
 | `test` | an artifact and the checks its image requires | one in-toto test result per check, on the artifact digest |
 | `publish` | built artifacts and their records, targets | pushed images and files, identity tags or names, records attached |
-| `prune` | the published state, the consumer's pins, a retention rule | the list of artifacts to delete (and, without `--dry-run`, the deletions) |
+| `prune` | the published state, the definition's required checks, the consumer's pins, a retention rule | one line per artifact, kept or deleted with its reason (and, without `--dry-run`, the deletions) |
 
 ### 5.3 How a stage builds
 
@@ -786,7 +786,10 @@ The plan never keeps a list of what was built. It asks the targets, by identity:
 - **File targets** (`github-release://`, `dir://`): artifact files are named
   `<image>-<suite>-<arch>-<first 16 hex of the identity>-<first 12 hex of the digest>.<ext>`. A
   listing filtered by the image and identity prefix answers; the provenance in the
-  `<digest>.intoto.jsonl` beside it must name the full identity before the artifact counts.
+  `<digest>.intoto.jsonl` beside it must name the full identity before the artifact counts. On a
+  release, an asset is uploaded under `<name>.partial-<16 hex>`, which no lookup reads as an artifact
+  or as records, and renamed to its final name only when whole (9.1); a lookup lists one it finds
+  under `rejected`.
 
 Each image then gets one of three states:
 
@@ -1184,6 +1187,7 @@ debian-image-factory publish out/ --to TARGET... [--sign none|keyless|key:REF]
 debian-image-factory verify REF [--pull [--artifact NAME|SHA256]] [--require-checks] [--lock FILE] [--definition FILE]
                                                          records match the bits, provenance names the lock, checks complete
 debian-image-factory prune --against TARGET... --pin DIGEST... [--keep-good 5] [--keep-candidates 1] [--dry-run]
+                           [--definition FILE]
 ```
 
 `lock`, `plan` and `fetch` read snapshots from snapshot.debian.org, or through `--mirror URL`, any
@@ -1202,7 +1206,7 @@ their boot checks (`test --vm-image` names the image QEMU runs in, `scripts/buil
 and `lock checksums`: input-lock's `refresh` on a lock the definition agrees with, for the entries
 `--entry` names or those whose version moved since the git ref `--base`. It writes nothing unless every
 entry verified (a `deb` entry through its vendor's signed `InRelease`), and checks the result against
-the definition again. Each later command arrives with its milestone, `fetch --bundle` with M6.
+the definition again. M6 adds `prune` and, with the rest of the nightly loop, `fetch --bundle`.
 
 `build` reads the plan, and also the lock and the definition (`--lock`, `--definition`, as `plan`
 does): hooks and file trees live beside the definition, and provenance names the lock. Before it
@@ -1228,6 +1232,18 @@ takes its kind and the command names what it left). An OCI image is pushed with 
 attaches only what the registry lacks. Credentials come from the Docker config (`$DOCKER_CONFIG`
 or `~/.docker`: `auths`, `credHelpers`, `credsStore`); registries on `localhost`, `127.0.0.1` and
 `[::1]` are spoken to over http, all others over https.
+
+A `github-release://` target takes the files, as a `dir://` target does, with the release's assets as
+its files. GitHub keeps an asset under the name it was uploaded with from the first byte, so an upload
+that is cut off would leave half a file under its final name, where a later plan could read it. Each
+asset is therefore uploaded as `<name>.partial-<16 random hex>`, checked (the size the API reports
+against the file's, and its `digest` against the file's sha256 where the API states one; a mismatch
+deletes the asset and fails the publish), and only then renamed to `<name>` with a `PATCH` of the
+asset's `name`. A name that was taken in the meantime fails the rename and nothing is overwritten.
+The records asset `<digest>.intoto.jsonl` goes last, after its artifact is in place, by the same two
+steps. A `.partial-` asset a crashed run left behind is deleted at the start of the next publish to the
+release (publishers to one release must not run at the same moment, as for the records merge), and
+every lookup lists it as rejected.
 
 `verify REF` takes `oci://<registry>/<repository>@sha256:<hex>`, `oci://<registry>/<repository>:<tag>`,
 a local `.oci` layout directory, or an artifact file with its `<digest>.intoto.jsonl` beside it,
@@ -1268,6 +1284,35 @@ What it checks:
 
 Exit codes: 0 done, 1 a check or validation failed (with every problem named), 2 usage. `plan`
 exits 0 whether or not anything needs building; `plan.json` and the Action's `changed` output say.
+
+`prune` reads what each `--against` target holds (every artifact that counts, whatever its image and
+identity: 7.4's checks, with the image and identity taken from the provenance), asks the definition
+(`--definition`, default `factory.toml`) which checks make each image's builds good, and applies the
+retention rule (11) to each target on its own. It prints one line per artifact, `<target>: <name> kept,
+<reason>` or `deleted, <reason>` (`would be deleted` with `--dry-run`, which deletes nothing and sends no
+delete request), then one `ignored` line for each file that looks like an artifact but does not count
+(no records, a digest that does not match its name, an unfinished upload): those are never deleted. A
+`--pin` is a full sha256 digest (`sha256:` optional): an artifact's file digest, an Incus image's
+fingerprint, an image's manifest digest. It keeps that artifact in every target and does not count
+against the two limits; a pin that matches nothing is noted. A build of an image the definition does
+not name is kept, since nothing says which checks make it good. What a delete removes:
+
+- `dir://`: the artifact file (an Incus image's two) and its `<digest>.intoto.jsonl`.
+- `github-release://`: the same files, as assets.
+- `oci://`: the image's manifest by digest, the records attached to it (referrers, or the index of the
+  `sha256-<digest>` tag under the tag schema), and the `identity-<identity>` tag if it still names the
+  manifest. Only manifests an `identity-` tag names are listed: older manifests a moved tag left behind
+  and the consumer's own tags are not seen, and a consumer's tag that names a deleted manifest is
+  dropped with it by the registry, so such an image is protected by `--pin`, not by its tag. Layers and
+  blobs are the registry's to collect. A registry must allow `DELETE` on manifests: zot and the official
+  distribution image's default configuration do; a distribution registry with `storage.delete.enabled`
+  false (`REGISTRY_STORAGE_DELETE_ENABLED=false`) answers 405, and prune reports each artifact.
+
+An artifact goes before its records, and an image before the records attached to it, so a failure in
+between leaves records without an artifact (harmless) and never an artifact without records (which no
+lookup accepts). Records a kept artifact of the same digest shares stay. A delete that fails, a registry
+that refuses `DELETE` included, is reported for that artifact on standard error, the others go on, and
+the exit status is 1; it is never silent.
 
 ### 9.2 The GitHub Action
 
@@ -1323,8 +1368,10 @@ reported as not run, never as passed, and the build stays a candidate until they
 6. **Approve your way.** Move your pins or tags once every required check is good, and write the new
    build snapshot into the lock in the same change, so the lock never runs ahead of a verified
    build. Move the baseline at point releases, through the gate your persistent systems use.
-7. **Prune** with your pins: by default the newest 5 good builds and 1 candidate per image stay,
-   and a pinned artifact is never pruned.
+7. **Prune** with your pins: by default the newest 5 good builds and 1 candidate per image stay in
+   each target, failed builds are deleted once their checks end, and a pinned artifact is never
+   pruned. Pass every digest you still run or may roll back to as `--pin`; `--dry-run` shows the list
+   first.
 
 ## 10. What stays with the consumer, what lives in the factory
 
@@ -1363,7 +1410,16 @@ Each runs on the exact artifact and emits one test result.
 | `os-boot` | os | the test harness lays the root filesystem onto a scratch GPT disk (an ESP with the OS's own `grub-mkstandalone` image, an ext4 root labelled `factory-root` from the tarball), OVMF boots it to multi-user (`degraded` warns), installed and running kernel match, first boot creates a machine ID and, with openssh-server, host keys |
 
 Failed, cancelled or incomplete checks leave the artifact a candidate; the consumer's pins do not
-move, and `prune` deletes it once its checks end.
+move, and `prune` deletes it once its checks end. For `prune` a build is **good** when every required
+check has a passing last result, **failed** when one failed and every required check has a result (its
+checks have ended), and a **candidate** otherwise: it includes a build whose failed check left others
+without a result, because a checker that stops at its first failure or is cancelled never ends them, and
+it leaves through the candidate limit instead of staying forever or being deleted while a check may
+still report. The rules, per image and per target: a pinned digest is never deleted and takes no place in
+the limits; the newest `keep_good` good builds stay; the newest `keep_candidates` candidates stay;
+failed builds are deleted. The two counts are separate, so a run of failed nights never pushes out a good
+build, and an image keeps at most `keep_good + keep_candidates` builds plus its pins. "Newest" is 7.4's
+order (the latest `finishedOn`, none older than any, a tie to the smallest digest).
 
 ## 12. Test plan
 
@@ -1411,8 +1467,21 @@ pre-release (3.16.0a2 today), so a coming break is seen weeks before it matters.
 - OCI layout: manifest, config and layer digests; annotations; identity tags; referrer manifests
   and the serialized tag-schema index update.
 - Incus fingerprint and `metadata.yaml`.
-- Retention: a run of failed nights never pushes out a good build; pins are never pruned; at most
-  `keep_good + keep_candidates` per image plus pins.
+- Retention (`retention`, pure): the newest `keep_good` good builds and `keep_candidates` candidates
+  stay and the rest go, by finish time with the smallest digest breaking a tie and listing order
+  irrelevant; a failed build whose checks have ended is deleted, one whose other checks have no result
+  is a candidate; a run of failed nights never pushes out a good build; pins are never pruned, whatever
+  their standing, and take no place in the limits; at most `keep_good + keep_candidates` per image plus
+  pins; an image the definition does not name is kept; `locked-inputs` is required only of a build whose
+  provenance lists locked inputs.
+- Prune, against `dir://` on a temporary directory, a fake GitHub API and an in-process registry (with
+  and without the referrers API, paged tag lists): the lines printed, `--dry-run` sending no delete,
+  records and rootfs files removed with their artifact, shared records kept, ignored files untouched,
+  the registry's records and tags removed with the image, a registry or release that refuses a delete
+  reported per artifact with exit 1, and the exit codes. Integration: the same against zot and the
+  distribution registry.
+- Release publishing: every asset uploaded under a `.partial-` name and renamed, the records last, a
+  failed rename or a short upload leaving nothing a lookup reads, a leftover deleted by the next publish.
 
 **Fixture archive, seconds**
 
@@ -1566,7 +1635,8 @@ M3, M4 and M5 are independent once M2 lands and can run side by side.
     the consumer's. "Good build" is derived from test results whenever it is asked, never stored.
 16. **Retention is a pure function** of the published builds, their results and the consumer's
     pins: the newest 5 good builds and 1 candidate per image by default, pins never pruned, failed
-    builds deleted when their checks end.
+    builds deleted when their checks end (a failed build whose other checks have no result is still a
+    candidate, 11).
 17. **Names carry identity and digest.** Every artifact is found by its identity and told apart by
     its digest, so two builds never collide and a name alone says which bits it means.
 18. **Distribution as a zipapp and an Action.** One `.pyz` file needs nothing beyond python3; the
