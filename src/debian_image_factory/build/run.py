@@ -32,6 +32,7 @@ from input_lock.records import Statement, statement, subject
 from .. import (
     ENGINE,
     __version__,
+    capacity,
     commands,
     debian,
     definition,
@@ -55,7 +56,7 @@ from .. import tools as builder
 from ..checks import ancestry, kit, squashfs_scan, tarball
 from ..identity import FileFact
 from ..published import artifact_name, records_name_for
-from . import boot, booting, core, initrd, parents
+from . import boot, booting, core, initrd, parents, schedule
 from . import incus as incus_build
 from . import oci as oci_build
 
@@ -1083,6 +1084,7 @@ def build_command(
     parent_targets: Sequence[str] = (),
     offline: bool = False,
     bundle: Path | None = None,
+    jobs: int = 0,
 ) -> int:
     """`build`. With `bundle`, the build is a replay: the bundle is unpacked as the download cache (in a scratch
     directory of `out_dir`), checked against its manifest, and the one image it was fetched for is built from
@@ -1097,7 +1099,7 @@ def build_command(
         return build_plan(
             commands.read_text(plan_path), plan_path, lock_path, definition_path, sources,
             out_dir=out_dir, images=images, builder_image=builder_image, out=out,
-            directories=directories, registries=registries,
+            directories=directories, registries=registries, jobs=jobs,
         )  # fmt: skip
     out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".bundle-", dir=out_dir) as scratch:
@@ -1107,7 +1109,7 @@ def build_command(
         return build_plan(
             replay_.plan.decode("utf-8"), bundle, lock_path, definition_path, replace(sources, cache=replay_.cache),
             out_dir=out_dir, images=[replay_.image], builder_image=builder_image, out=out,
-            directories=directories, registries=registries, verified_at=replay_.verified_at,
+            directories=directories, registries=registries, verified_at=replay_.verified_at, jobs=jobs,
         )  # fmt: skip
 
 
@@ -1125,6 +1127,7 @@ def build_plan(
     directories: Sequence[Path],
     registries: Sequence[published.TargetTemplate],
     verified_at: datetime | None = None,
+    jobs: int = 0,
 ) -> int:
     """Build the images of the plan text `plan_text` (read from `plan_path`, or from a bundle) from the cache
     in `sources`."""
@@ -1157,18 +1160,68 @@ def build_plan(
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / PLAN_COPY).write_text(plan_text)
     run = Run(plan, lock, loaded, sources, mirror, releases, builder_, source, out_dir, directories, registries)
-    built: dict[str, parents.ParentArtifact] = {}
-    for image in chosen:
-        with tempfile.TemporaryDirectory(prefix=f".work-{image}-", dir=out_dir) as scratch:
-            kind = plan["images"][image]["kind"]
-            if kind == "core":
-                result = build_core(run, image, Path(scratch))
-            elif kind == "incus":
-                result = build_incus(run, image, Path(scratch), built)
-            elif kind == "oci":
-                result = build_oci(run, image, Path(scratch), built)
-            else:
-                result = build_booting(run, image, Path(scratch), built)
-        built[image] = result.artifact
-        print(f"{image}: {result.artifact.name} ({result.packages} packages)", file=out)
+    schedule_images(run, chosen, jobs, out)
     return 0
+
+
+def build_image(run: Run, image: str, built: Mapping[str, parents.ParentArtifact]) -> Result:
+    """One image in a work directory of its own under the output directory, removed when it is done. The
+    directory, the builder container's name (none: docker names it) and the log (`<image>.build.log`) are
+    this image's alone, so images build side by side without sharing a path."""
+    with tempfile.TemporaryDirectory(prefix=f".work-{image}-", dir=run.out_dir) as scratch:
+        kind = run.plan["images"][image]["kind"]
+        if kind == "core":
+            return build_core(run, image, Path(scratch))
+        if kind == "incus":
+            return build_incus(run, image, Path(scratch), built)
+        if kind == "oci":
+            return build_oci(run, image, Path(scratch), built)
+        return build_booting(run, image, Path(scratch), built)
+
+
+def failure_text(image: str, error: BaseException) -> str:
+    """One failed image's message with its name in front of every line."""
+    text = str(error) if isinstance(error, commands.Failed | commands.Usage) else f"{type(error).__name__}: {error}"
+    first, *rest = text.splitlines() or [""]
+    return "\n".join([f"{image}: {first}", *(f"  {line}" for line in rest)])
+
+
+def pool_size(jobs: int, images: int) -> tuple[int, str]:
+    """How many images build at once, and why: `--jobs`, else the CPUs held back by free memory against the
+    budget of a build (`capacity`), and never more than there are images."""
+    if jobs > 0:
+        return min(jobs, images), f"{min(jobs, images)} at a time: --jobs {jobs}"
+    count, why = capacity.choose_workers(capacity.cpus(), capacity.available_memory(), capacity.BUILD_BUDGET)
+    return min(count, images), f"{min(count, images)} at a time: {why.split(': ', 1)[1]}"
+
+
+def schedule_images(run: Run, chosen: Sequence[str], jobs: int, out: TextIO) -> None:
+    """Build `chosen` as the graph of their parent links (siblings together, `pool_size` at a time) and print one
+    line per image as it starts and as it ends, each starting with the image's name. Raises Failed naming every
+    image that failed; the images that built before it keep their artifacts."""
+    size, why = pool_size(jobs, len(chosen))
+    if len(chosen) > 1:
+        print(f"building {len(chosen)} images, {why}", file=out)
+    images = run.plan["images"]
+
+    def done(image: str, result: Result) -> None:
+        print(f"{image}: {result.artifact.name} ({result.packages} packages)", file=out)
+
+    def failed(image: str, error: BaseException) -> None:
+        print(f"{image}: FAILED", file=out)
+
+    outcome = schedule.run(
+        chosen,
+        {image: images[image]["parent"] for image in chosen},
+        lambda image, built: build_image(run, image, {name: one.artifact for name, one in built.items()}),
+        jobs=size,
+        on_start=lambda image: print(f"{image}: building", file=out) if len(chosen) > 1 else None,
+        on_done=done,
+        on_fail=failed,
+    )
+    if outcome.failed:
+        lines = [failure_text(image, error) for image, error in outcome.failed.items()]
+        if outcome.skipped:
+            lines.append(f"not started: {', '.join(outcome.skipped)}")
+        unexpected = next((one for one in outcome.failed.values() if not isinstance(one, commands.Failed)), None)
+        raise commands.Failed("\n".join(lines)) from unexpected

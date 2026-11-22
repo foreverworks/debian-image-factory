@@ -1313,7 +1313,7 @@ debian-image-factory plan [--against TARGET]... [--snapshot lock|latest|ID] [--p
                           [--rebuild IMAGE --reason TEXT] [--previous PLAN] [--out FILE] > plan.json
 debian-image-factory fetch plan.json [--mirror URL] [--bundle [--bundle-dir DIR]]
 debian-image-factory build [plan.json] --out out/ [--image NAME]... [--parents TARGET]... [--builder-image REF]
-                           [--offline] [--bundle FILE] [--builder container|host]
+                           [--jobs N] [--offline] [--bundle FILE] [--builder container|host]
 debian-image-factory test out/ [--check NAME]... [--url URL] [--definition FILE] [--parent FILE]...
                            [--parents TARGET]... [--twin DIR]...
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
@@ -1358,6 +1358,29 @@ artifact name: the identity prefix and the digest the plan names), then from eac
 (`dir://` holding the core tarball or an `.oci` layout, or `oci://`, pulled by digest); a parent found
 nowhere fails the build naming the image, the digest and the places looked in. Images of kinds a release cannot build yet are listed as not built. `--builder host` arrives later;
 every build already runs with no network in the builder.
+
+`build` runs the images of the plan as the graph their `parent` links make: an image starts when its parent is
+built (or at once when its parent is not built in this run), and images that do not depend on each other build
+together. A plan such as `core`, `oci-base` and three Node images builds `core`, then `oci-base`, then the three
+Node images side by side. The pool is `min(CPUs, available memory / 1 GiB)` and at most the number of images:
+the same rule as the test runner's (`scripts/run-tests`), kept in one place, `capacity.py`, which takes the
+tighter of the host's `MemAvailable` and what the process's cgroup has left, so a container with a limit is sized
+to its limit. The 1 GiB is a build's budget, twice the peak measured for the biggest image of the example
+definition (an OS root filesystem, 0.5 GiB in its builder container; six images at once peaked at 0.7 GiB
+together). `--jobs N` replaces the rule (`--jobs 1` is the serial build, one image after another in plan order);
+the first line of a build with several images says the pool and why.
+
+Every image builds in a work directory of its own (`.work-<image>-*` under `out/`, removed when it ends), writes
+its builder's log to `<image>.build.log` and its artifact and records under names that carry their digests, and
+runs its builder container unnamed, so docker gives each its own; nothing but read-only inputs is shared (the
+download cache and mirror, the lock, a parent's artifact). The artifacts, their digests and the records of a
+parallel build are therefore the bytes of a serial build of the same plan (the records but for their `startedOn`,
+`finishedOn` and `created` times, which no two builds share); the integration tier builds the same images both ways
+and compares the files (`tests/integration/test_parallel_build.py`). Output is one line per event, each starting
+with the image's name (`node-26: building`, `node-26: <artifact> (75 packages)`), printed from one thread so a line
+is never split. When an image fails nothing new starts; the images already running finish (a builder container
+is run to its end, never cut off half way), and `build` exits 1 with every failure, each under its image's name
+and the end of its log, and the images it did not start.
 
 `fetch` reads only for the images the plan says to build (7.7); with `--bundle` it also writes one inputs
 bundle for each, into `--bundle-dir` (default `bundles/` beside the plan). `build --offline` makes any use of
@@ -1563,6 +1586,7 @@ tier):
 | `publish` | `false` | `true` publishes what was built to the `against` targets (needs `build`) |
 | `sign` | `none` | `publish --sign`: `none`, `keyless` or `key:REF`. Anything but `none` installs cosign 3.1.4 (`sigstore/cosign-installer`, pinned by commit) before `publish`; `keyless` needs `permissions: id-token: write` in the job |
 | `mirror` | none | `--mirror`, a server that serves snapshot.debian.org's paths |
+| `jobs` | none | `build --jobs`, how many images build at a time; empty is the default of 9.1 (the CPUs held back by free memory), `1` builds one after another; the release the lock pins must have `build --jobs` |
 | `pyz` | none | a local `.pyz` to run instead of the lock's release, unchecked: for testing the factory itself |
 | `token` | `${{ github.token }}` | the GitHub token `plan` and `publish` get as `GITHUB_TOKEN` (through `env:`, never on a command line), for `github-release://` targets; no other step sees it |
 | `keep-work` | `true` | the work directory (`plan.json`, the build output, the logs) stays after the run, so the `plan` output names a file later steps can read, and the runner empties `runner.temp` before each job; `false` makes the last step remove it, whether the run passed or failed |

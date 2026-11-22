@@ -41,16 +41,18 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path[:0] = [str(ROOT), str(ROOT / "src"), str(ROOT / ".vendor")]
+
+from debian_image_factory.capacity import GIB, available_memory, choose_workers  # noqa: E402  # the path is set above
+
 DURATIONS = ROOT / "tests" / "durations.json"
 TIERS = ("unit", "integration", "boot")
 BOOT_MODULES = ("tests.integration.test_boot_checks", "tests.integration.test_m5_acceptance")
 TOP = 15
 """How many of the slowest classes and tests the summary lists."""
-GIB = 1024**3
 BUDGETS = {"unit": GIB // 2, "integration": 3 * GIB, "boot": 6 * GIB}
 """Memory one worker of a tier may need, in bytes: a unit class is small, an integration class runs mmdebstrap and
 docker builds, a boot class a QEMU guest on top."""
-CGROUP = Path("/sys/fs/cgroup")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -128,64 +130,6 @@ def batches(weights: Mapping[str, float], workers: int) -> list[Job]:
     if names:
         jobs.append(Job(len(jobs), tuple(names), load))
     return jobs
-
-
-def meminfo_available(text: str) -> int | None:
-    """MemAvailable of /proc/meminfo in bytes, or None when the file does not say."""
-    for line in text.splitlines():
-        if line.startswith("MemAvailable:"):
-            fields = line.split()
-            if len(fields) >= 2 and fields[1].isdigit():
-                return int(fields[1]) * 1024
-    return None
-
-
-def cgroup_headroom(limit: str | None, current: str | None) -> int | None:
-    """What the cgroup still has: memory.max less memory.current, in bytes. None when there is no limit (`max`,
-    or the files are absent or unreadable); 0 when the group is at or over its limit."""
-    if limit is None or current is None:
-        return None
-    if not (limit.strip().isdigit() and current.strip().isdigit()):
-        return None
-    return max(int(limit) - int(current), 0)
-
-
-def tighter(first: int | None, second: int | None) -> int | None:
-    """The smaller of two optional amounts; the other when one is unknown."""
-    known = [one for one in (first, second) if one is not None]
-    return min(known) if known else None
-
-
-def memory_cap(available: int | None, budget: int) -> int | None:
-    """How many workers of `budget` bytes fit in `available` bytes, at least one; None when memory is unknown."""
-    return None if available is None else max(available // budget, 1)
-
-
-def choose_workers(cpus: int, available: int | None, budget: int) -> tuple[int, str]:
-    """The default worker count, min(cpus, memory cap), and the sentence saying why."""
-    if available is None:
-        return cpus, f"{cpus} workers: one per CPU (available memory unknown)"
-    cap = memory_cap(available, budget) or 1
-    count = min(cpus, cap)
-    limit = "memory" if cap < cpus else "CPUs"
-    return count, (
-        f"{count} workers: {limit} is the limit ({cpus} CPUs, {available / GIB:.1f} GiB available, "
-        f"{budget / GIB:.1f} GiB a job)"
-    )
-
-
-def read_text(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-
-def available_memory() -> int | None:
-    """The memory a new worker can count on, in bytes: the tighter of the host's MemAvailable and the cgroup's room."""
-    meminfo = read_text(Path("/proc/meminfo"))
-    host = meminfo_available(meminfo) if meminfo is not None else None
-    return tighter(host, cgroup_headroom(read_text(CGROUP / "memory.max"), read_text(CGROUP / "memory.current")))
 
 
 def parse_shard(text: str) -> tuple[int, int]:
@@ -418,7 +362,6 @@ def main(argv: Sequence[str]) -> int:
         index, count = parse_shard(arguments.shard)
     except ValueError as error:
         parser.error(str(error))
-    sys.path[:0] = [str(ROOT), str(ROOT / "src"), str(ROOT / ".vendor")]
     known = read_durations(DURATIONS.read_text(encoding="utf-8")) if DURATIONS.is_file() else {}
     names = selected(arguments.tier)
     weights = shard_of(weigh(names, known), index, count)

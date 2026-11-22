@@ -270,6 +270,7 @@ class ActionFileTest(unittest.TestCase):
                 "publish",
                 "sign",
                 "mirror",
+                "jobs",
                 "pyz",
                 "token",
                 "keep-work",

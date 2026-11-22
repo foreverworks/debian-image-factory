@@ -14,6 +14,7 @@
   "tests.integration.test_oci_acceptance.OciAcceptanceTest": 224,
   "tests.integration.test_oci_build.OciBuildTest": 89,
   "tests.integration.test_oci_checks.OciChecksTest": 10,
+  "tests.integration.test_parallel_build.ParallelBuildTest": 147,
   "tests.integration.test_registries.RegistriesTest": 14.5,
   "tests.integration.test_replay.ReplayTest": 134,
   "tests.integration.test_spike_plan.SpikeTest": 89,

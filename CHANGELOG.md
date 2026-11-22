@@ -12,6 +12,13 @@
   not signed again. `verify` checks signatures with `--key`, or `--certificate-identity` and
   `--certificate-oidc-issuer` (and their `-regexp` forms), and `--require-signature` refuses an unsigned record.
   The Action installs cosign (`sigstore/cosign-installer`, pinned) when `sign` is not `none`.
+- `build` builds images that do not depend on each other at the same time: an image waits for its parent and
+  siblings run together, as many as the CPUs allow, held back by free memory at 1 GiB a build (the test runner's
+  sizing rule, now one function shared in `capacity.py`). `--jobs N` sets the pool, `--jobs 1` builds one image
+  after another as before; the Action passes its `jobs` input as `--jobs`. Output lines start with the image's
+  name; when images fail, nothing new starts, the running ones finish, and every failure is reported by name.
+  Artifacts, digests and records are the same as a serial build's.
+
 - A workflow rewrites the checksum of the input-lock entry on Renovate's branches, so its pull requests no longer
   carry a stale `sha256`.
 - `publish --image NAME` publishes only the images it names.

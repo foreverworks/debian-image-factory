@@ -132,6 +132,14 @@ def parser() -> argparse.ArgumentParser:
         help="the factory may use no network at all: no download, no registry pull (--parents oci:// is refused)",
     )
     build.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="build N images at a time (default: the CPUs, held back by free memory at 1 GiB a build; "
+        "images wait for their parent, siblings run together). --jobs 1 builds one after another",
+    )
+    build.add_argument(
         "--bundle",
         type=Path,
         metavar="FILE",
@@ -383,6 +391,8 @@ def dispatch(arguments: argparse.Namespace) -> int:
             bundle_dir=arguments.bundle_dir,
         )
     if arguments.command == "build":
+        if arguments.jobs is not None and arguments.jobs < 1:
+            raise commands.Usage(f"--jobs wants a number of at least 1, not {arguments.jobs}")
         return build_run.build_command(
             arguments.plan_file,
             arguments.lock,
@@ -395,6 +405,7 @@ def dispatch(arguments: argparse.Namespace) -> int:
             parent_targets=arguments.parents,
             offline=arguments.offline,
             bundle=arguments.bundle,
+            jobs=arguments.jobs or 0,
         )
     if arguments.command == "test":
         effects = checks.Effects(

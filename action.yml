@@ -36,6 +36,9 @@ inputs:
   mirror:
     description: A server that serves snapshot.debian.org's paths, passed as --mirror. Empty for snapshot.debian.org itself.
     default: ""
+  jobs:
+    description: How many images build at a time, passed to build as --jobs. Empty for the default, the runner's CPUs held back by its free memory; 1 builds one image after another. Needs a release of the factory that has build --jobs.
+    default: ""
   pyz:
     description: A local .pyz to run instead of the release the lock pins, not checked against the lock. Only for testing the factory itself.
     default: ""
@@ -240,6 +243,7 @@ runs:
         DEFINITION: ${{ inputs.definition }}
         LOCK: ${{ inputs.lock }}
         MIRROR: ${{ inputs.mirror }}
+        JOBS: ${{ inputs.jobs }}
         AGAINST: ${{ inputs.against }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
@@ -248,6 +252,7 @@ runs:
         builder=$("$ACTION_PATH/scripts/builder" build)
         args=(build "$PLAN" --out "$WORK/out" --lock "$LOCK" --definition "$DEFINITION" --builder-image "$builder")
         [ -z "$MIRROR" ] || args+=(--mirror "$MIRROR")
+        [ -z "$JOBS" ] || args+=(--jobs "$JOBS")
         # A night on which only Node moved builds the child and reuses its parent from where it is published: the
         # parent is read from the targets that can hold one (a release holds none). A registry is read with the
         # Docker config, so log in in an earlier step.
