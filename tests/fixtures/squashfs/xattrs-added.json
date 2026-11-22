@@ -1,0 +1,7 @@
+[
+{"gid":0,"group":null,"kind":"dir","major":0,"minor":0,"mode":493,"mtime":1700000000,"nlink":3,"path":"/","sha256":null,"size":0,"target":"","uid":0,"xattrs":[["security.fixture","736563"],["trusted.fixture","7472"],["user.fixture","757372"]]},
+{"gid":0,"group":null,"kind":"dir","major":0,"minor":0,"mode":493,"mtime":1700000000,"nlink":2,"path":"/dir","sha256":null,"size":0,"target":"","uid":0,"xattrs":[["security.fixture","736563"],["trusted.fixture","7472"],["user.fixture","757372"]]},
+{"gid":0,"group":null,"kind":"file","major":0,"minor":0,"mode":420,"mtime":1700000000,"nlink":1,"path":"/dir/file","sha256":"8b911a8716b94442f9ca3dff20584048536e4c2f47b8b5bb9096cbd43c3432d5","size":5,"target":"","uid":0,"xattrs":[["security.fixture","736563"],["trusted.fixture","7472"],["user.fixture","757372"]]},
+{"gid":0,"group":null,"kind":"fifo","major":0,"minor":0,"mode":420,"mtime":1700000000,"nlink":1,"path":"/fifo","sha256":null,"size":0,"target":"","uid":0,"xattrs":[["security.fixture","736563"],["trusted.fixture","7472"]]},
+{"gid":0,"group":null,"kind":"symlink","major":0,"minor":0,"mode":511,"mtime":1700000000,"nlink":1,"path":"/link","sha256":null,"size":8,"target":"dir/file","uid":0,"xattrs":[["security.fixture","736563"],["trusted.fixture","7472"]]}
+]

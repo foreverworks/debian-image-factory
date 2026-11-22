@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+# Regenerate tests/fixtures/squashfs: small squashfs images and, beside each, a .json listing made from the
+# source tree it was built from (not from the image), so the reader tests compare against an independent view.
+#
+#   scripts/make-squashfs-fixtures
+#
+# Everything runs in a throw-away `debian:trixie` container with squashfs-tools as Debian 13 ships it (4.6.1),
+# as root, so owners can be set. Needs docker (rootless is fine) and network. A rootless container cannot
+# mknod, so the device files come from mksquashfs pseudo-file definitions; the fifo and the socket are real.
+# Images are kept under 64 KiB each.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+out=$root/tests/fixtures/squashfs
+work=$root/dist/squashfs-fixtures
+mkdir -p "$out" "$work"
+rm -f "$out"/*.sqsh "$out"/*.json
+
+cat >"$work/inner.sh" <<'INNER'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get -qq update
+apt-get -qq install -y --no-install-recommends squashfs-tools attr python3 >/dev/null
+mksquashfs -version >/work/version
+head -n1 /work/version
+out=/out
+stamp=1700000000
+
+# blob <random|text|zeros|planted> <size> <seed>: deterministic file content on stdout (planted: zeros with
+# the text of seed `<offset>:<text>` at that offset).
+cat >/work/blob.py <<'PY'
+import random
+import sys
+
+kind, size, seed = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+if kind == "zeros":
+    data = bytes(size)
+elif kind == "planted":
+    offset, needle = seed.split(":")
+    buffer = bytearray(size)
+    buffer[int(offset) : int(offset) + len(needle)] = needle.encode()
+    data = bytes(buffer)
+elif kind == "random":
+    data = random.Random(seed).randbytes(size)
+else:
+    data = b"".join(b"line %d of the fixture text\n" % n for n in range(size))[:size]
+sys.stdout.buffer.write(data)
+PY
+
+# expect.py <tree> <json> [--mtime N] [--pseudo file] [--add name=value]...: the listing of a source tree.
+cat >/work/expect.py <<'PY'
+import argparse
+import hashlib
+import json
+import os
+import stat
+
+parser = argparse.ArgumentParser()
+parser.add_argument("tree")
+parser.add_argument("output")
+parser.add_argument("--mtime", type=int)
+parser.add_argument("--pseudo")
+parser.add_argument("--add", action="append", default=[])
+args = parser.parse_args()
+
+KINDS = {
+    stat.S_IFREG: "file",
+    stat.S_IFDIR: "dir",
+    stat.S_IFLNK: "symlink",
+    stat.S_IFCHR: "char",
+    stat.S_IFBLK: "block",
+    stat.S_IFIFO: "fifo",
+    stat.S_IFSOCK: "socket",
+}
+added = [tuple(item.split("=", 1)) for item in args.add]
+
+
+def xattrs_of(path, kind):
+    found = {}
+    for name in os.listxattr(path, follow_symlinks=False):
+        found[name] = os.getxattr(path, name, follow_symlinks=False)
+    for name, value in added:
+        # mksquashfs puts a user.* xattr on regular files and directories only, any other on every inode
+        if not name.startswith("user.") or kind in ("file", "dir"):
+            found[name] = value.encode()
+    return [[name, found[name].hex()] for name in sorted(found)]
+
+
+def record(path, kind, mode, uid, gid, mtime, size, nlink, **more):
+    base = {
+        "path": path,
+        "kind": kind,
+        "mode": mode,
+        "uid": uid,
+        "gid": gid,
+        "mtime": args.mtime or mtime,
+        "size": size,
+        "nlink": nlink,
+        "target": "",
+        "major": 0,
+        "minor": 0,
+        "group": None,
+        "sha256": None,
+        "xattrs": [],
+    }
+    base.update(more)
+    return base
+
+
+groups = {}
+
+
+def describe(full, relative):
+    info = os.lstat(full)
+    kind = KINDS[stat.S_IFMT(info.st_mode)]
+    more = {"xattrs": xattrs_of(full, kind)}
+    size, nlink = 0, info.st_nlink
+    if kind == "file":
+        size = info.st_size
+        with open(full, "rb") as handle:
+            more["sha256"] = hashlib.sha256(handle.read()).hexdigest()
+        if info.st_nlink > 1:
+            more["group"] = groups.setdefault((info.st_dev, info.st_ino), len(groups))
+    elif kind == "symlink":
+        more["target"] = os.readlink(full)
+        size = len(os.fsencode(more["target"]))
+    elif kind == "dir":
+        # squashfs counts a directory as 2 plus its subdirectories
+        nlink = 2 + sum(1 for _ in os.scandir(full) if _.is_dir(follow_symlinks=False))
+    mode, mtime = stat.S_IMODE(info.st_mode), int(info.st_mtime)
+    return record(relative, kind, mode, info.st_uid, info.st_gid, mtime, size, nlink, **more)
+
+
+records = [describe(args.tree, "/")]
+for here, dirs, files in os.walk(args.tree):
+    for name in dirs + files:
+        full = os.path.join(here, name)
+        records.append(describe(full, "/" + os.path.relpath(full, args.tree)))
+
+if args.pseudo:
+    with open(args.pseudo) as handle:
+        for line in handle:
+            name, kind, mode, uid, gid, major, minor = line.split()
+            others = [[n, v.encode().hex()] for n, v in sorted(added) if not n.startswith("user.")]
+            records.append(
+                record(
+                    "/" + name,
+                    {"c": "char", "b": "block"}[kind],
+                    int(mode, 8),
+                    int(uid),
+                    int(gid),
+                    0,
+                    0,
+                    1,
+                    major=int(major),
+                    minor=int(minor),
+                    xattrs=others,
+                )
+            )
+
+records.sort(key=lambda r: tuple(os.fsencode(part) for part in r["path"].split("/")[1:]))
+with open(args.output, "w") as handle:
+    handle.write("[\n" + ",\n".join(json.dumps(r, sort_keys=True, separators=(",", ":")) for r in records) + "\n]\n")
+PY
+
+# sq <image> <source> [mksquashfs options]
+sq() {
+    local image=$1 source=$2
+    shift 2
+    mksquashfs "$source" "$image" -quiet -noappend -mkfs-time "$stamp" "$@" >/dev/null
+}
+
+# settle <tree>: one modification time for everything, the way a reproducible build would.
+settle() {
+    find "$1" -exec touch -h -d "@$stamp" {} +
+}
+
+main_tree() {
+    local t=$1
+    mkdir -p "$t"/etc "$t"/var/empty "$t"/usr/share/doc/pkg/examples/deep "$t"/data "$t"/link "$t"/dev "$t"/owned
+    : >"$t/etc/machine-id"
+    printf 'fixture\n' >"$t/etc/hostname"
+    printf 'ID=fixture\nNAME="Fixture OS"\n' >"$t/etc/os-release"
+    printf 'copyright notice\n' >"$t/usr/share/doc/pkg/copyright"
+    printf 'deep\n' >"$t/usr/share/doc/pkg/examples/deep/deep.txt"
+    chmod 0700 "$t/var/empty"
+    python3 /work/blob.py random 4096 one >"$t/data/block-exact.bin"
+    python3 /work/blob.py random 9426 multi >"$t/data/multi.bin"
+    python3 /work/blob.py text 12298 text >"$t/data/text.txt"
+    python3 /work/blob.py zeros 12388 zero >"$t/data/zeros.bin"
+    python3 /work/blob.py zeros 8192 zero >"$t/data/zeros-blocks.bin"
+    : >"$t/data/empty"
+    local n
+    for n in 1 2 3 4 5; do
+        printf 'tiny file number %s\n' "$n" >"$t/data/tiny-$n"
+    done
+    printf 'a name with a space\n' >"$t/data/with space"
+    printf 'unicode\n' >"$t/data/$(printf 'caf\303\251.txt')"
+    ln "$t/data/tiny-1" "$t/data/tiny-1-hard"
+    ln "$t/data/multi.bin" "$t/data/multi-hard.bin"
+    ln -s ../data/text.txt "$t/link/relative"
+    ln -s /etc/hostname "$t/link/absolute"
+    ln -s nowhere "$t/link/dangling"
+    mkfifo -m 0640 "$t/dev/fifo"
+    python3 -c "import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" "$t/dev/socket"
+    printf 'owned\n' >"$t/owned/user-file"
+    printf 'owned too\n' >"$t/owned/other-file"
+    printf 'setuid\n' >"$t/owned/setuid"
+    printf 'no access\n' >"$t/owned/closed"
+    mkdir "$t/owned/sticky"
+    chown 1000:2000 "$t/owned/user-file"
+    chown 65534:4242 "$t/owned/other-file"
+    chmod 0640 "$t/owned/other-file"
+    chmod 4755 "$t/owned/setuid"
+    chmod 0000 "$t/owned/closed"
+    chmod 1777 "$t/owned/sticky"
+    chown 1000:2000 "$t/owned/sticky"
+    chmod 0755 "$t"
+    settle "$t"
+    touch -h -d @1500000000 "$t/data/text.txt" "$t/link/relative"
+}
+
+# Devices: a rootless container cannot mknod, so mksquashfs makes them (name, type, mode, uid, gid, major, minor).
+cat >/work/devices.pseudo <<'DEV'
+dev/null c 666 0 0 1 3
+dev/loop0 b 660 0 6 7 0
+dev/wide c 600 1000 2000 259 300
+DEV
+
+# 1. The main tree, default gzip, 4 KiB blocks, file tails in fragments, and the devices.
+main_tree /work/tree
+sq "$out/tree-gzip.sqsh" /work/tree -b 4096 -tailends -all-time "$stamp" -pf /work/devices.pseudo
+python3 /work/expect.py /work/tree "$out/tree-gzip.json" --mtime "$stamp" --pseudo /work/devices.pseudo
+
+# 2. The same tree with nothing compressed, and its own modification times.
+sq "$out/tree-uncompressed.sqsh" /work/tree -b 4096 -noI -noD -noF -noX
+python3 /work/expect.py /work/tree "$out/tree-uncompressed.json"
+
+# 3. The default 128 KiB block: a file of holes, one of exactly a block, one with a tail.
+mkdir -p /work/big
+python3 /work/blob.py zeros 393221 zero >/work/big/zeros.bin
+python3 /work/blob.py text 131072 one >/work/big/one-block.bin
+python3 /work/blob.py text 150000 tail >/work/big/with-tail.bin
+printf 'small\n' >/work/big/small
+settle /work/big
+sq "$out/bigblock.sqsh" /work/big
+python3 /work/expect.py /work/big "$out/bigblock.json"
+
+# 4. A directory of more than 256 entries.
+mkdir -p /work/many/entries /work/many/aaa /work/many/zzz
+for n in $(seq -w 1 400); do
+    printf '%s\n' "$n" >"/work/many/entries/file-with-a-longish-name-$n"
+done
+printf 'first\n' >/work/many/aaa/first
+printf 'last\n' >/work/many/zzz/last
+settle /work/many
+sq "$out/bigdir.sqsh" /work/many
+python3 /work/expect.py /work/many "$out/bigdir.json"
+
+# 5. User xattrs, one value shared by two names (stored once, out of line), and a set shared by two files.
+x=/work/xattrs
+mkdir -p $x/dir
+printf 'one\n' >$x/f1
+printf 'two\n' >$x/f2
+printf 'three\n' >$x/f3
+printf 'four\n' >$x/f4
+printf 'inside\n' >$x/dir/inside
+setfattr -n user.test -v value $x/f1
+setfattr -n user.test -v value $x/f4
+setfattr -n user.a -v same-value $x/f2
+setfattr -n user.b -v same-value $x/f2
+setfattr -n user.bin -v 0x00ff10 $x/f2
+setfattr -n user.long -v "$(head -c 300 /dev/zero | tr '\0' 'x')" $x/f3
+setfattr -n user.dir -v dirvalue $x/dir
+settle $x
+sq "$out/xattrs.sqsh" $x
+python3 /work/expect.py $x "$out/xattrs.json"
+
+# 6. Every prefix squashfs stores, added to every inode by mksquashfs (a rootless container cannot set them).
+a=/work/added
+mkdir -p $a/dir
+printf 'file\n' >$a/dir/file
+ln -s dir/file $a/link
+mkfifo $a/fifo
+settle $a
+added=(-xattrs-add security.fixture=sec -xattrs-add trusted.fixture=tr -xattrs-add user.fixture=usr)
+sq "$out/xattrs-added.sqsh" $a "${added[@]}"
+python3 /work/expect.py $a "$out/xattrs-added.json" --add security.fixture=sec --add trusted.fixture=tr --add user.fixture=usr
+# 7. What the file checks look for: a key block, a needle in a path, a link target, small files and across the
+# read boundaries, a file whose content a check asks for, the other kinds of entries.
+s=/work/scan
+needle=20261121T004329Z
+key=$(printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n')
+mkdir -p $s/etc/apt $s/root $s/srv $s/dev $s/big $s/usr/share/doc/ssh $s/usr/share/man/man1 "$s/var/$needle"
+printf 'uninitialized\n' >$s/etc/machine-id
+printf 'scan-host\n' >$s/etc/hostname
+ln -s hostname $s/etc/alias
+printf 'nothing to see\n' >$s/etc/notes
+ln $s/etc/notes $s/etc/notes-hard
+printf 'nothing\n' >$s/etc/clean
+printf 'deb file:/%s\n' "$needle" >$s/etc/apt/sources
+ln -s "/mnt/$needle" $s/etc/link
+printf '%s' "$key" >$s/root/id
+printf 'text\n%s' "$key" >$s/srv/key
+printf '%s' "$key" >$s/usr/share/doc/ssh/example
+printf '%s' "$key" >$s/usr/share/doc/ssh/example.gz
+printf '%s' "$key" >$s/usr/share/man/man1/ssh.1.gz
+: >"$s/var/$needle/x"
+python3 /work/blob.py planted 200000 "65529:$needle" >$s/big/chunk-boundary
+python3 /work/blob.py planted 300000 "131065:$needle" >$s/big/block-boundary
+python3 /work/blob.py planted 200000 "5:other" >$s/big/clean
+mkfifo $s/dev/fifo
+python3 -c "import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" $s/dev/socket
+settle $s
+sq "$out/scan.sqsh" $s -all-time "$stamp" -pf /work/devices.pseudo
+python3 /work/expect.py $s "$out/scan.json" --mtime "$stamp" --pseudo /work/devices.pseudo
+INNER
+
+docker run --rm -v "$work:/work-in:ro" -v "$out:/out" debian:trixie bash -c 'mkdir /work && cp /work-in/inner.sh /work/ && cd /work && bash /work/inner.sh'
+
+if find "$out" -name '*.sqsh' -size +64k | grep -q .; then
+    echo "a fixture image is over 64 KiB" >&2
+    exit 1
+fi
+ls -l "$out"
