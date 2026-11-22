@@ -1110,7 +1110,7 @@ def build_command(
         return build_plan(
             replay_.plan.decode("utf-8"), bundle, lock_path, definition_path, replace(sources, cache=replay_.cache),
             out_dir=out_dir, images=[replay_.image], builder_image=builder_image, out=out,
-            directories=directories, registries=registries,
+            directories=directories, registries=registries, verified_at=replay_.verified_at,
         )  # fmt: skip
 
 
@@ -1127,6 +1127,7 @@ def build_plan(
     out: TextIO,
     directories: Sequence[Path],
     registries: Sequence[published.OciTarget],
+    verified_at: datetime | None = None,
 ) -> int:
     """Build the images of the plan text `plan_text` (read from `plan_path`, or from a bundle) from the cache
     in `sources`."""
@@ -1151,7 +1152,7 @@ def build_plan(
         return 0
     for image in chosen:
         verify_identity(lock, loaded, plan, image, params)
-        fetch.reverify_vouched(image, plan["images"][image], plan["debian"]["architecture"], sources.cache)
+        fetch.reverify_vouched(image, plan["images"][image], plan["debian"]["architecture"], sources.cache, verified_at)
     mirror = fetch.mirror_dir(sources.cache, plan["snapshot"])
     releases = in_releases(mirror, plan)
     builder_ = open_builder(builder_image)

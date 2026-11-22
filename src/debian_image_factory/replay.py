@@ -6,6 +6,7 @@ manifest (`bundle.unpack`), checks the manifest against the plan it carries, and
 what the image's build reads. The build itself then runs on that cache with `Sources(cache=...)`.
 """
 
+import datetime
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,9 @@ class Replay:
     """The bundle's plan.json, byte for byte."""
     cache: Path
     """The cache the bundle was unpacked into."""
+    verified_at: datetime.datetime | None
+    """When `fetch` verified the image's vendor repositories, if it has any: their Releases' Valid-Until is judged
+    at this time (DESIGN 7.7)."""
 
 
 def check(unpacked: bundle.Unpacked, plan: planfile.Plan, source: Path) -> None:
@@ -79,4 +83,6 @@ def open_replay(bundle_path: Path, scratch: Path, plan_path: Path | None) -> Rep
             raise Failed(f"{plan_path}: {error.strerror or error}") from None
         if given != unpacked.plan:
             raise Failed(f"{plan_path} is not the plan {bundle_path} was fetched from: build it from the bundle's own")
-    return Replay(unpacked.manifest["image"], unpacked.plan, unpacked.cache)
+    text = unpacked.manifest.get("verified_at")
+    verified = datetime.datetime.fromisoformat(text) if text is not None else None
+    return Replay(unpacked.manifest["image"], unpacked.plan, unpacked.cache, verified)

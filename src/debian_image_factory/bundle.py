@@ -11,6 +11,7 @@ member must be a regular file the manifest lists, and its bytes must match the m
 Pure apart from `write` and `unpack`, which read and write files.
 """
 
+import datetime
 import hashlib
 import io
 import json
@@ -19,7 +20,7 @@ import tarfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Final, TypedDict
+from typing import Final, NotRequired, TypedDict
 
 from input_lock.identity import HEX64
 
@@ -51,6 +52,10 @@ class Manifest(TypedDict):
     architecture: str
     files: list[ManifestFile]
     """Every member but the manifest itself, sorted by path."""
+    verified_at: NotRequired[str]
+    """When `fetch` verified the image's vendor repositories (RFC 3339 UTC), if it installs a vendor .deb: a
+    replay judges their Releases' Valid-Until at this time, not at the present. Signatures and hashes are
+    checked in full all the same."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +101,14 @@ def hashed(path: str, source: Path) -> Member:
 
 
 def manifest_bytes(
-    *, image: str, identity: str, snapshot: str, suite: str, architecture: str, members: Sequence[Member]
+    *,
+    image: str,
+    identity: str,
+    snapshot: str,
+    suite: str,
+    architecture: str,
+    members: Sequence[Member],
+    verified_at: str | None = None,
 ) -> bytes:
     """The manifest's JSON text: sorted keys and members, so equal inputs give equal bytes."""
     files: list[ManifestFile] = [
@@ -111,6 +123,8 @@ def manifest_bytes(
         "architecture": architecture,
         "files": files,
     }
+    if verified_at is not None:
+        document["verified_at"] = verified_at
     return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
@@ -192,7 +206,7 @@ def parse_manifest(data: object) -> Manifest:
     identity = _text(document.get("identity"), "the manifest's identity")
     if not HEX64.fullmatch(identity):
         raise ValueError("the manifest's identity must be 64 lowercase hex digits")
-    return {
+    parsed: Manifest = {
         "schema": SCHEMA,
         "image": _text(document.get("image"), "the manifest's image"),
         "identity": identity,
@@ -201,6 +215,14 @@ def parse_manifest(data: object) -> Manifest:
         "architecture": _text(document.get("architecture"), "the manifest's architecture"),
         "files": files,
     }
+    if "verified_at" in document:
+        moment = _text(document["verified_at"], "the manifest's verified_at")
+        try:
+            datetime.datetime.fromisoformat(moment)
+        except ValueError:
+            raise ValueError("the manifest's verified_at is not an RFC 3339 time") from None
+        parsed["verified_at"] = moment
+    return parsed
 
 
 def unpack(bundle: Path, into: Path) -> Unpacked:

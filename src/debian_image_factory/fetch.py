@@ -98,6 +98,9 @@ class ImageFetch:
     it needs. A parent's own packages come with the parent artifact."""
     inputs: tuple[LockedInput, ...]
     """Every locked input the image installs, sorted by name: the build stages each of them."""
+    vendor: tuple[str, ...] = ()
+    """The sha256 of each vendor .deb the image installs: their Releases' Valid-Until is judged at the time of
+    `fetch`, which a bundle records."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +230,9 @@ def fetch_plan(plan: Plan) -> FetchPlan:
                 key=lambda item: (item.name, item.url, item.checksums),
             )
         )
-        images.append(ImageFetch(image, entry["identity"], own, own_inputs))
+        images.append(
+            ImageFetch(image, entry["identity"], own, own_inputs, tuple(sorted(item.entry.sha256 for item in own_apt)))
+        )
         packages.update(own)
         inputs.update(own_inputs)
         vouched.update(vouched_inputs(image, entry))
@@ -357,6 +362,9 @@ def download_input(item: LockedInput, sources: Sources) -> bool:
 
 NOTES: Final = "vouched"
 """`<cache>/vouched/<input sha256>.json`: which signed list vouched for an input, and which signature."""
+
+VERIFIED: Final = "verified"
+"""The note's key for the time `fetch` verified the files it names (a vendor .deb's Release is judged at it)."""
 
 NOTED: Final = ("list", "signature", "index")
 """What a note names, in this order: the signed file (a checksum list, or a repository's InRelease or Release),
@@ -540,12 +548,46 @@ def reverify_vouched(
         raise Failed(f"images.{image}: the signed lists its inputs rely on do not verify:\n" + "\n".join(problems))
 
 
-def write_note(cache: Path, sha256: str, files: Mapping[str, tuple[str, bytes]]) -> None:
-    """Store every file in the cache and the note naming them (`NOTED` keys to (URL, bytes))."""
-    note = {key: {"uri": url, "sha256": archive.store(cache, data).name} for key, (url, data) in files.items()}
+def write_note(
+    cache: Path, sha256: str, files: Mapping[str, tuple[str, bytes]], verified: datetime.datetime | None = None
+) -> None:
+    """Store every file in the cache and the note naming them (`NOTED` keys to (URL, bytes)); `verified` is the
+    time `fetch` verified them, kept for a vendor .deb's Valid-Until (`verified_at`)."""
+    note: dict[str, object] = {
+        key: {"uri": url, "sha256": archive.store(cache, data).name} for key, (url, data) in files.items()
+    }
+    if verified is not None:
+        note[VERIFIED] = stamp(verified)
     path = note_path(cache, sha256)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(note, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def stamp(moment: datetime.datetime) -> str:
+    """A time as a note and a bundle's manifest keep it: RFC 3339 UTC, to the second."""
+    return moment.astimezone(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def verified_at(cache: Path, sha256: str) -> datetime.datetime | None:
+    """When `fetch` verified the signed files noted for the input with this sha256; None when the note does not say."""
+    try:
+        note: object = json.loads(note_path(cache, sha256).read_text(encoding="utf-8"))
+        text = note.get(VERIFIED) if isinstance(note, dict) else None
+        return datetime.datetime.fromisoformat(text) if isinstance(text, str) else None
+    except (OSError, ValueError):
+        return None
+
+
+def stamp_note(cache: Path, sha256: str, moment: datetime.datetime) -> None:
+    """Add the time to a note that has none (one `fetch` wrote before it kept the time)."""
+    path = note_path(cache, sha256)
+    try:
+        note: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(note, dict) and VERIFIED not in note:
+        note[VERIFIED] = stamp(moment)
+        path.write_text(json.dumps(note, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def cached_reader(cache: Path, noted: Sequence[records.Remote]) -> vendordeb.Read:
@@ -580,6 +622,7 @@ def check_apt(item: AptVouched, sources: Sources, now: datetime.datetime | None 
     if noted:
         try:
             vendordeb.verify(item.pin, ring, cached_reader(sources.cache, noted), moment, item.architecture)
+            stamp_note(sources.cache, item.entry.sha256, moment)
             return False
         except vendordeb.VendorError:
             pass  # a cache is never an authority: read the repository again
@@ -588,7 +631,7 @@ def check_apt(item: AptVouched, sources: Sources, now: datetime.datetime | None 
     except vendordeb.VendorError as error:
         raise Failed(f"{item.entry.name}: {error}") from None
     files = dict(zip(("list", "signature"), verified.signed, strict=False))
-    write_note(sources.cache, item.entry.sha256, {**files, "index": verified.index})
+    write_note(sources.cache, item.entry.sha256, {**files, "index": verified.index}, moment)
     return True
 
 
@@ -725,7 +768,9 @@ def write_bundles(
     for image in plan.images:
         files = bundle_files(image, plan, indices, found, cache)
         members = [bundle.hashed(bundle.PLAN, plan_path)] + [bundle.hashed(name, path) for name, path in files.items()]
+        times = [moment for sha in image.vendor if (moment := verified_at(cache, sha)) is not None]
         manifest = bundle.manifest_bytes(
+            verified_at=stamp(min(times)) if times else None,
             image=image.image,
             identity=image.identity,
             snapshot=plan.snapshot,

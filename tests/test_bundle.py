@@ -151,6 +151,7 @@ class FetchBundleTest(BundleCase):
         self.assertEqual((manifest["image"], manifest["snapshot"]), ("app-a", FIRST_ID))
         self.assertEqual(manifest["identity"], plan["images"]["app-a"]["identity"])
         self.assertEqual(found["plan.json"], plan_path.read_bytes())
+        self.assertNotIn("verified_at", manifest, "no vendor .deb: no Release to judge")
         self.assertEqual(
             {one["path"]: one["sha256"] for one in manifest["files"]},
             {name: sha256(data) for name, data in found.items() if name != "manifest.json"},

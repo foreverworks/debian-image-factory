@@ -16,7 +16,7 @@ from pathlib import Path
 import input_lock
 from input_lock import JsonValue
 
-from debian_image_factory import archive, commands, fetch, planfile, remote
+from debian_image_factory import archive, bundle, commands, fetch, planfile, remote, replay
 from tests.support import signing, vendor_repo
 from tests.support.definitions import jsonable
 from tests.support.fixture_archive import FIRST_ID
@@ -290,6 +290,64 @@ class FetchTest(VendorCase):
         later = datetime.datetime(2099, 1, 1, tzinfo=datetime.UTC)
         with self.assertRaisesRegex(commands.Failed, "example-tool: .*(expired|Valid-Until)"):
             fetch.reverify_vouched("app-b", entry, "amd64", cache, later)
+
+    def bundled(self) -> tuple[Path, Path, planfile.ImageEntry]:
+        """A vendor workspace fetched with --bundle: the cache, the bundle of the image with the .deb, its entry."""
+        root = self.deb_workspace()
+        self.run_plan(root)
+        cache, directory = Path(tempfile.mkdtemp(dir=self.tmp)), Path(tempfile.mkdtemp(dir=self.tmp))
+        fetch.fetch_command(
+            root / "plan.json",
+            self.vendor_sources(self.repo.files, cache),
+            bundle=True,
+            out=io.StringIO(),
+            bundle_dir=directory,
+        )
+        entry = planfile.read_plan(root / "plan.json")["images"]["app-b"]
+        return cache, directory / bundle.bundle_name("app-b", "trixie", "amd64", entry["identity"]), entry
+
+    def test_a_bundle_records_when_the_vendors_release_was_verified(self) -> None:
+        cache, path, _entry = self.bundled()
+        noted = fetch.verified_at(cache, vendor_repo.sha256(self.deb))
+        self.assertIsNotNone(noted)
+        assert noted is not None
+        unpacked = bundle.unpack(path, Path(tempfile.mkdtemp(dir=self.tmp)) / "into")
+        self.assertEqual(unpacked.manifest.get("verified_at"), fetch.stamp(noted))
+
+    def test_a_replay_judges_the_release_at_the_time_fetch_verified_it_and_still_checks_signatures(self) -> None:
+        _cache, path, entry = self.bundled()
+        opened = replay.open_replay(path, Path(tempfile.mkdtemp(dir=self.tmp)) / "into", None)
+        assert opened.verified_at is not None
+        later = datetime.datetime(2099, 1, 1, tzinfo=datetime.UTC)
+        with self.assertRaisesRegex(commands.Failed, "expired|Valid-Until"):
+            fetch.reverify_vouched("app-b", entry, "amd64", opened.cache, later)  # the present, after the expiry
+        fetch.reverify_vouched("app-b", entry, "amd64", opened.cache, opened.verified_at)
+        resigned = vendor_repo.build_repo(self.signer, self.deb, signed_by=self.stranger)
+        noted = fetch.vouched_by(opened.cache, vendor_repo.sha256(self.deb))
+        forged = {"list": (noted[0].uri, resigned.files[vendor_repo.IN_RELEASE])}
+        forged["index"] = (noted[1].uri, resigned.files[vendor_repo.PACKAGES])
+        fetch.write_note(opened.cache, vendor_repo.sha256(self.deb), forged, opened.verified_at)
+        with self.assertRaisesRegex(commands.Failed, "the signature does not verify"):
+            fetch.reverify_vouched("app-b", entry, "amd64", opened.cache, opened.verified_at)
+
+    def test_a_note_without_a_time_gets_the_time_of_the_fetch_that_verified_it_again(self) -> None:
+        root = self.deb_workspace()
+        self.run_plan(root)
+        cache = Path(tempfile.mkdtemp(dir=self.tmp))
+
+        def fetch_into_cache() -> None:
+            fetch.fetch_command(
+                root / "plan.json", self.vendor_sources(self.repo.files, cache), bundle=False, out=io.StringIO()
+            )
+
+        fetch_into_cache()
+        note = fetch.note_path(cache, vendor_repo.sha256(self.deb))
+        document = json.loads(note.read_text())
+        del document[fetch.VERIFIED]
+        note.write_text(json.dumps(document))
+        self.assertIsNone(fetch.verified_at(cache, vendor_repo.sha256(self.deb)))
+        fetch_into_cache()
+        self.assertIsNotNone(fetch.verified_at(cache, vendor_repo.sha256(self.deb)))
 
     def test_a_deb_that_left_the_cache_fails_the_build(self) -> None:
         cache, entry = self.fetched()

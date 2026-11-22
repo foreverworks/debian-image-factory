@@ -891,15 +891,22 @@ the rare case inputs cannot see (an archive key rotation, say).
   every suite, the pool files the image adds, its locked inputs (keyrings, vendor `.deb` files, tarballs) by
   sha256, and the signed checksum lists, signatures and indices that vouched for them with their notes (what
   provenance names, 8.2). The manifest holds the schema, the image, its identity, the snapshot, the suite and
-  the architecture, and every other member with its size and sha256. Members are sorted and every header
-  has the same time (0), owner (uid and gid 0, no names) and mode (0644), so two fetches of one plan write
-  byte-identical bundles. Bundles are off by default (16.4).
+  the architecture, and every other member with its size and sha256; for an image that installs a vendor
+  `.deb` it also holds `verified_at`, the time `fetch` verified the vendors' signed Release (the earliest of
+  them, kept in each input's note beside the signed files). Members are sorted and every header has the same
+  time (0), owner (uid and gid 0, no names) and mode (0644), so two fetches of one plan write byte-identical
+  bundles; the one input that could differ is that time, which `fetch` keeps from the first verification in a
+  cache, so a vendor image's bundle is identical across fetches into one cache and differs only in
+  `verified_at` (and the note) across fresh ones. Bundles are off by default (16.4).
 - **Replay.** `build --offline --bundle <file>` rebuilds the bundle's image from it with snapshot.debian.org
   unreachable. A replay is the normal build path reading a different directory, not a separate mode: the
   bundle is unpacked into a scratch cache under `out/` (every member checked against the manifest's size and
   sha256, a member the manifest does not list or a link refused), the manifest is checked against the plan it
   carries (the image's identity, the snapshot, the suite) and the cache against what the build reads (every
-  suite's `InRelease`, every locked input of the image), and the ordinary build then runs with that cache. The
+  suite's `InRelease`, every locked input of the image), and the ordinary build then runs with that cache. A
+  vendor repository's Release expires (`Valid-Until`), and a replay is for later: the build's re-verification
+  of the signed lists (15.8) judges that Release at the manifest's `verified_at`, not at the present.
+  Signatures, keyrings and hashes are checked in full all the same; only the clock is the fetch's. The
   plan comes from the bundle; a plan given beside it must be the same bytes. `--offline` also makes any
   network access of the factory process itself a hard error: no download, no registry pull (`--parents
   oci://` is refused, a parent is given as `dir://`), so nothing can fall back to a mirror. A bundle holds one
