@@ -3,14 +3,17 @@
 plan, fetch, build core twice (offline, in the builder), test, publish to a `dir://` target, and plan
 against it. It proves the milestone's four claims: two builds from one lock resolve the same set (and
 here give the same bytes, which also guards the engine revision); the artifact carries no machine
-identity; the build snapshot is nowhere in its bytes; its SBOM lists every installed package. Needs
+identity; the build snapshot is nowhere in its bytes, and the same package set built at a second build
+snapshot gives the same bytes (DESIGN 11); its SBOM lists every installed package. Needs
 docker, the builder image (`scripts/builder build`) and network access to snapshot.debian.org.
 """
 
 import contextlib
+import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -25,6 +28,10 @@ EXPECTED_CORE: dict[int, str] = {1: "6b9547107518bccd947bb570cc9689447192b85e9fa
 """The engine revision guard (DESIGN 12): the sha256 of the example core at the example lock's
 snapshot, per engine revision. A change that alters these bytes without raising ENGINE fails here;
 a change to the example's core, its lock or the builder updates the digest in the same commit."""
+
+SECOND_SNAPSHOT = "20261120T203430Z"
+"""A build snapshot other than the example lock's at which core resolves to the same package set: both
+archives sit at earlier snapshots under this ID, and none of core's packages moved in between."""
 
 CORE_CHECKS = (
     "no-build-snapshot",
@@ -50,6 +57,10 @@ def files(*paths: Path) -> list[str]:
     return ["--lock", str(EXAMPLES / "lock.json"), "--definition", str(EXAMPLES / "factory.toml"), *map(str, paths)]
 
 
+def sha256_of(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def artifact(out: Path) -> Path:
     found = [path for path in out.iterdir() if published.parse_artifact_name(path.name) is not None]
     if len(found) != 1:
@@ -62,6 +73,7 @@ class CoreBuildTest(unittest.TestCase):
     work: Path
     scratch: tempfile.TemporaryDirectory[str]
     plan: dict[str, object]
+    second_plan: dict[str, object]
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -82,6 +94,19 @@ class CoreBuildTest(unittest.TestCase):
             )
         factory("test", str(cls.work / "out1"))
         cls.plan = json.loads(plan.read_text())
+        # The same definition with its lock moved to a second build snapshot: plan, fetch, build core.
+        second = cls.work / "second"
+        shutil.copytree(EXAMPLES, second)
+        second_files = ["--lock", str(second / "lock.json"), "--definition", str(second / "factory.toml")]
+        factory("lock", "snapshot", "--lock", str(second / "lock.json"), "--id", SECOND_SNAPSHOT)
+        second_plan = cls.work / "plan-second.json"
+        factory("plan", *second_files, "--out", str(second_plan))
+        factory("fetch", str(second_plan))
+        factory(
+            "build", str(second_plan), "--out", str(cls.work / "out-second"), "--image", "core",
+            "--builder-image", tag, *second_files,
+        )  # fmt: skip
+        cls.second_plan = json.loads(second_plan.read_text())
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -117,14 +142,32 @@ class CoreBuildTest(unittest.TestCase):
         self.assertEqual(self.sbom_packages("out1"), planned)
         self.assertEqual(self.sbom_packages("out2"), planned)
         first, second = artifact(self.work / "out1"), artifact(self.work / "out2")
-        self.assertEqual(first.name, second.name, "two builds from the same inputs gave different bytes")
+        self.assertEqual(first.name, second.name)
+        self.assertEqual(sha256_of(first), sha256_of(second), "two builds from the same inputs gave different bytes")
+
+    def test_one_package_set_at_two_build_snapshots_gives_the_same_bytes(self) -> None:
+        images, second_images = self.plan["images"], self.second_plan["images"]
+        assert isinstance(images, dict) and isinstance(second_images, dict)
+        self.assertNotEqual(self.plan["snapshot"], self.second_plan["snapshot"])
+        self.assertEqual(
+            sorted(second_images["core"]["packages"]),
+            sorted(images["core"]["packages"]),
+            f"core's package set moved at {SECOND_SNAPSHOT}: choose a snapshot where it did not",
+        )
+        self.assertEqual(second_images["core"]["identity"], images["core"]["identity"])
+        self.assertEqual(
+            sha256_of(artifact(self.work / "out-second")),
+            sha256_of(artifact(self.work / "out1")),
+            "the build snapshot reached the bytes: one package set at two build snapshots gave different bytes",
+        )
 
     def test_engine_revision_guard(self) -> None:
         name = published.parse_artifact_name(artifact(self.work / "out1").name)
         assert name is not None
         self.assertIn(ENGINE, EXPECTED_CORE, f"record the example core's digest for engine revision {ENGINE}")
-        self.assertTrue(
-            EXPECTED_CORE[ENGINE].startswith(name.digest12),
+        self.assertEqual(
+            sha256_of(artifact(self.work / "out1")),
+            EXPECTED_CORE[ENGINE],
             "the example core's bytes changed without a raised engine revision (DESIGN 7.1)",
         )
 
