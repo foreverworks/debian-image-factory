@@ -15,9 +15,9 @@ Needs docker, network access to snapshot.debian.org and cli.github.com, and abou
 Builds the builder and boot images (`scripts/builder build`, `scripts/builder vm`). Takes about 20 minutes
 under TCG.
 
-Two classes, each building the flag-on images for itself: M5BootTest boots and publishes them and plans the
-flag-off and moved-baseline cases against what it published, M5FlagTest builds the flag-off images and checks
-the vendor package is gone. A parallel run puts them on two workers.
+Two classes, each building what it checks: M5BootTest builds the flag-on images, boots and publishes them and
+plans the flag-off and moved-baseline cases against what it published; M5FlagTest builds the flag-off images
+and checks the vendor package is gone. A parallel run puts them on two workers.
 """
 
 import contextlib
@@ -125,7 +125,7 @@ def tested(out: Path, *argv: str) -> str:
 
 
 class Prepared(NamedTuple):
-    """What both classes below start from: the definition with its lock, and the flag-on build of the three images."""
+    """What both classes below start from: the definition with its lock, and a build of the three images."""
 
     work: Path
     definition: Path
@@ -135,22 +135,23 @@ class Prepared(NamedTuple):
     out: Path
 
 
-def prepare(work: Path, builder: str) -> Prepared:
+def prepare(work: Path, builder: str, flag: bool) -> Prepared:
     """Copy the examples, add the vendor package's checksums, then plan, fetch and build core, the installer and
-    the OS with the vendor flag on."""
+    the OS with the vendor flag on or off, into work/out-on or work/out-off."""
+    name = "on" if flag else "off"
     definition = work / "def"
     shutil.copytree(EXAMPLES, definition)
     lock = definition / "lock.json"
     vendor_lock(EXAMPLES / "lock.json", lock)
     files = ["--lock", str(lock), "--definition", str(definition / "factory.toml")]
     factory("lock", "checksums", *files, "--entry", "gh")
-    on = work / "plan-on.json"
-    factory("plan", *files, "--param", "vendor_tools=true", "--out", str(on))
-    factory("fetch", str(on))
-    out_on = work / "out-on"
+    plan = work / f"plan-{name}.json"
+    factory("plan", *files, "--param", f"vendor_tools={str(flag).lower()}", "--out", str(plan))
+    factory("fetch", str(plan))
+    out = work / f"out-{name}"
     built = ["--image", "core", "--image", "installer", "--image", "os"]
-    factory("build", str(on), "--out", str(out_on), *built, "--builder-image", builder, *files)
-    return Prepared(work, definition, lock, files, on, out_on)
+    factory("build", str(plan), "--out", str(out), *built, "--builder-image", builder, *files)
+    return Prepared(work, definition, lock, files, plan, out)
 
 
 def scratch_of(prefix: str) -> tempfile.TemporaryDirectory[str]:
@@ -166,6 +167,7 @@ class M5BootTest(unittest.TestCase):
     against what was published then reuse or rebuild exactly what a flag off and a moved baseline change."""
 
     scratch: ClassVar[tempfile.TemporaryDirectory[str]]
+    work: ClassVar[Path]
     tested: ClassVar[str]
     plans: ClassVar[dict[str, dict[str, dict[str, object]]]]
 
@@ -173,8 +175,8 @@ class M5BootTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         builder, vm_image = builder_images.image(), builder_images.image("vm")
         cls.scratch = scratch_of("integration-m5-boot-")
-        work = Path(cls.scratch.name)
-        prepared = prepare(work, builder)
+        work = cls.work = Path(cls.scratch.name)
+        prepared = prepare(work, builder, True)
         files, definition, lock = prepared.files, prepared.definition, prepared.lock
         moved = definition / "lock-moved.json"
         shutil.copy(lock, moved)
@@ -215,6 +217,13 @@ class M5BootTest(unittest.TestCase):
             failed = [line for line in lines.values() if " FAILED" in line]
             self.assertEqual(failed, [], self.tested)
 
+    # ---- the flag on puts the vendor package in both
+
+    def test_the_vendor_package_is_in_both_with_the_flag_on(self) -> None:
+        out = self.work / "out-on"
+        self.assertIn("gh", os_packages(artifact_of(out, "os", "tar.gz")))
+        self.assertIn("gh", kit_packages(artifact_of(out, "installer", "tar"), self.work))
+
     # ---- a flag off changes both identities and no other ------------------------------------------
 
     def test_the_flag_off_changes_both_identities_and_no_other(self) -> None:
@@ -238,33 +247,21 @@ class M5BootTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("DIF_INTEGRATION") == "1", "set DIF_INTEGRATION=1 to run integration tests")
 class M5FlagTest(unittest.TestCase):
-    """A flag off removes its module's package from both images. The flag-off build finds its parent core in the
-    flag-on build's output, so it does not wait for the boots and publishing of M5BootTest, which a parallel
-    run spreads over another worker."""
+    """A flag off removes its module's package from both images. It builds the flag-off images itself, so a
+    parallel run spreads it and M5BootTest (the flag-on build, its boots and publishing) over two workers."""
 
     scratch: ClassVar[tempfile.TemporaryDirectory[str]]
     work: ClassVar[Path]
 
     @classmethod
     def setUpClass(cls) -> None:
-        builder = builder_images.image()
         cls.scratch = scratch_of("integration-m5-flag-")
-        work = cls.work = Path(cls.scratch.name)
-        prepared = prepare(work, builder)
-        off = work / "plan-off.json"
-        factory("plan", *prepared.files, "--param", "vendor_tools=false", "--out", str(off))
-        factory("fetch", str(off))
-        factory("build", str(off), "--out", str(work / "out-off"), "--image", "installer", "--image", "os",
-                "--parents", f"dir://{prepared.out}", "--builder-image", builder, *prepared.files)  # fmt: skip
+        cls.work = Path(cls.scratch.name)
+        prepare(cls.work, builder_images.image(), False)
 
     @classmethod
     def tearDownClass(cls) -> None:
         cls.scratch.cleanup()
-
-    def test_the_vendor_package_is_in_both_with_the_flag_on(self) -> None:
-        out = self.work / "out-on"
-        self.assertIn("gh", os_packages(artifact_of(out, "os", "tar.gz")))
-        self.assertIn("gh", kit_packages(artifact_of(out, "installer", "tar"), self.work))
 
     def test_the_flag_off_removes_the_vendor_package_from_both(self) -> None:
         out = self.work / "out-off"
