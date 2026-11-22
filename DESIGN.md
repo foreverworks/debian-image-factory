@@ -1480,7 +1480,7 @@ tier):
 | `mirror` | none | `--mirror`, a server that serves snapshot.debian.org's paths |
 | `pyz` | none | a local `.pyz` to run instead of the lock's release, unchecked: for testing the factory itself |
 | `token` | `${{ github.token }}` | the GitHub token `plan` and `publish` get as `GITHUB_TOKEN` (through `env:`, never on a command line), for `github-release://` targets; no other step sees it |
-| `keep-work` | `false` | `true` keeps the work directory (`plan.json`, the build output, the logs) after the run; by default the last step removes it, whether the run passed or failed, and the `plan` output then names a file that is gone |
+| `keep-work` | `true` | the work directory (`plan.json`, the build output, the logs) stays after the run, so the `plan` output names a file later steps can read, and the runner empties `runner.temp` before each job; `false` makes the last step remove it, whether the run passed or failed |
 
 Outputs: `changed` (`true` when the plan builds at least one image), `plan` (the path of `plan.json`)
 and `artifacts` (JSON: image to digest, of what the plan reuses or waits for and what the run built).

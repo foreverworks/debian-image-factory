@@ -312,8 +312,8 @@ put that token in a step's environment by itself, which is why the input exists.
 
 The inputs are `definition`, `lock`, `params`, `snapshot`, `against`, `steps` (default
 `plan,fetch,build,test`), `publish`, `sign`, `mirror`, `token` (default the workflow's token) and
-`keep-work` (default `false`: the work directory, with the build output, is removed when the run ends, so
-a later step that reads the `plan` output sets it to `true`); the outputs are `changed`, `plan` (the path of
+`keep-work` (default `true`, so later steps can read the `plan` output; `false` removes the work directory,
+with the build output, when the run ends); the outputs are `changed`, `plan` (the path of
 `plan.json`) and `artifacts` (JSON of image to digest). The runner needs Docker to build, and `apt`
 and `gpgv` to plan (the Action installs the last two when they are missing). Until the first public
 release publishes the builder image, the Action builds it from its own checkout: pin the Action at the

@@ -400,7 +400,7 @@ class InputChecksTest(unittest.TestCase):
 
 
 class CleanupTest(unittest.TestCase):
-    """The last step removes the work directory, whether or not the run passed, unless keep-work says not to."""
+    """keep-work false makes the last step remove the work directory, passed or failed; by default it stays."""
 
     @staticmethod
     def failing_run(root: Path, **inputs: str) -> action.Result:
@@ -411,7 +411,7 @@ class CleanupTest(unittest.TestCase):
 
     def test_a_failed_run_leaves_no_work_directory(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            result = self.failing_run(Path(raw))
+            result = self.failing_run(Path(raw), **{"keep-work": "false"})
             self.assertFalse(result.ok)
             self.assertEqual(result.failed, "plan")
             self.assertIn("cleanup", result.outputs)
@@ -419,9 +419,9 @@ class CleanupTest(unittest.TestCase):
             self.assertTrue(work.parent.is_dir())
             self.assertFalse(work.exists())
 
-    def test_keep_work_keeps_it(self) -> None:
+    def test_by_default_it_stays(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            result = self.failing_run(Path(raw), **{"keep-work": "true"})
+            result = self.failing_run(Path(raw))
             self.assertNotIn("cleanup", result.outputs)
             self.assertTrue(Path(result.outputs["setup"]["work"]).is_dir())
 

@@ -42,8 +42,8 @@ inputs:
       factory reads the Docker config instead: log in to the registry in an earlier step (docker/login-action).
     default: ${{ github.token }}
   keep-work:
-    description: Whether to keep the Action's work directory (plan.json, the build output, the logs) after the run (true or false). By default it is removed at the end, and the plan output then names a file that is gone.
-    default: "false"
+    description: Whether to keep the Action's work directory (plan.json, the build output, the logs) after the run (true or false). It is kept by default, so the plan output names a file later steps can read; the runner empties runner.temp before each job. false removes it when the run ends, passed or failed, for a persistent runner short of disk.
+    default: "true"
 
 outputs:
   changed:
@@ -296,11 +296,12 @@ runs:
         json=$(python3 "$ACTION_PATH/scripts/action-support" artifacts --pyz "$PYZ" "$PLAN" "${out[@]}")
         echo "json=$json" >> "$GITHUB_OUTPUT"
 
-    # The work directory holds the build output, which can be gigabytes: it goes when the run ends, whether the run
-    # passed or not, unless keep-work asks for it (a later step that reads the plan output needs it).
+    # The work directory holds the build output, which can be gigabytes. It stays by default (the plan output names a
+    # file in it, and the runner empties runner.temp before each job); keep-work: false removes it when the run ends,
+    # whether the run passed or not.
     - name: Remove the work directory
       id: cleanup
-      if: always() && steps.setup.outputs.work != '' && inputs.keep-work != 'true'
+      if: always() && steps.setup.outputs.work != '' && inputs.keep-work == 'false'
       shell: bash
       env:
         WORK: ${{ steps.setup.outputs.work }}
