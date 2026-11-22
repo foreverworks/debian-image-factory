@@ -10,7 +10,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, commands, publish, resolve
+from . import __version__, commands, fetch, publish, resolve
 from . import tools as builder
 from .build import run as build_run
 
@@ -82,6 +82,11 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--previous", type=Path, metavar="PLAN", help="an earlier plan.json, to say what moved")
     plan.add_argument("--out", type=Path, metavar="FILE", help="write plan.json here instead of standard output")
 
+    fetch_ = commands_.add_parser("fetch", help="download what a plan names and lay out the partial mirror")
+    fetch_.add_argument("plan", type=Path, metavar="PLAN", help="the plan.json the plan command wrote")
+    sources_options(fetch_)
+    fetch_.add_argument("--bundle", action="store_true", help="also write an inputs bundle per image (not yet)")
+
     build = commands_.add_parser(
         "build", help="build the images a plan says to build, offline, from what fetch laid out"
     )
@@ -152,6 +157,8 @@ def dispatch(arguments: argparse.Namespace) -> int:
             except OSError as error:
                 raise commands.Failed(f"{arguments.out}: {error.strerror or error}") from None
         return status
+    if arguments.command == "fetch":
+        return fetch.fetch_command(arguments.plan, sources_of(arguments), bundle=arguments.bundle, out=sys.stdout)
     if arguments.command == "build":
         return build_run.build_command(
             arguments.plan_file,

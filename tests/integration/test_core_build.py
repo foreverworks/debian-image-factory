@@ -26,7 +26,14 @@ EXPECTED_CORE: dict[int, str] = {1: "6b9547107518bccd947bb570cc9689447192b85e9fa
 snapshot, per engine revision. A change that alters these bytes without raising ENGINE fails here;
 a change to the example's core, its lock or the builder updates the digest in the same commit."""
 
-CORE_CHECKS = ("no-build-snapshot", "no-machine-identity", "package-set", "same-resolution", "sbom-complete", "two-clones")
+CORE_CHECKS = (
+    "no-build-snapshot",
+    "no-machine-identity",
+    "package-set",
+    "same-resolution",
+    "sbom-complete",
+    "two-clones",
+)
 
 
 def factory(*argv: str) -> str:
@@ -67,7 +74,9 @@ class CoreBuildTest(unittest.TestCase):
         factory("plan", *files(), "--out", str(plan))
         factory("fetch", str(plan))
         for out in ("out1", "out2"):
-            factory("build", str(plan), "--out", str(cls.work / out), "--image", "core", "--builder-image", tag, *files())
+            factory(
+                "build", str(plan), "--out", str(cls.work / out), "--image", "core", "--builder-image", tag, *files()
+            )
         factory("test", str(cls.work / "out1"))
         cls.plan = json.loads(plan.read_text())
 
@@ -120,7 +129,9 @@ class CoreBuildTest(unittest.TestCase):
         results: dict[str, str] = {}
         for one in self.statements("out1"):
             predicate = one["predicate"]
-            if one["predicateType"] == "https://in-toto.io/attestation/test-result/v0.1" and isinstance(predicate, dict):
+            if one["predicateType"] == "https://in-toto.io/attestation/test-result/v0.1" and isinstance(
+                predicate, dict
+            ):
                 results[predicate["configuration"][0]["name"]] = predicate["result"]
         self.assertEqual(results, dict.fromkeys(CORE_CHECKS, "PASSED"))
 
