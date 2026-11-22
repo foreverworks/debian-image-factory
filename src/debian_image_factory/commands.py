@@ -4,6 +4,7 @@ Every command returns its exit status and writes to the streams it is given: 0 d
 validation failed (every problem named), 2 usage.
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -16,7 +17,20 @@ from typing import Final, TextIO
 import input_lock
 from input_lock import JsonValue, Lock, Package
 
-from . import archive, definition, identity, listings, lockrules, plan, published, remote, resolve, snapshots, targets
+from . import (
+    archive,
+    definition,
+    identity,
+    listings,
+    lockrules,
+    plan,
+    published,
+    remote,
+    resolve,
+    snapshots,
+    targets,
+    vendordeb,
+)
 from . import tools as builder
 from .definition import Definition, DefinitionError, Param
 from .files import read_files
@@ -236,28 +250,73 @@ def given_params(pairs: Sequence[str], params_file: Path | None) -> dict[str, st
     return given
 
 
+CHILD_ONLY: Final = ("builtin:deb", "builtin:file")
+"""Modules a core image cannot use: mmdebstrap builds core, and the module install step runs in a child build."""
+
+
 def unsupported_modules(lock: Lock, loaded: Loaded, params: Mapping[str, Param]) -> list[str]:
     found = []
-    for image in loaded.definition.images:
+    for image, spec in loaded.definition.images.items():
+        if spec.kind != "core":
+            continue
         for module in identity.modules_used(lock, loaded.definition, image, params):
-            if loaded.definition.modules[module].use == "builtin:deb":
+            use = loaded.definition.modules[module].use
+            if use in CHILD_ONLY:
                 found.append(
-                    f"images.{image}: module {module} (builtin:deb) is resolved from a later release on; "
-                    "plan with its switch off for now"
+                    f"images.{image}: module {module} ({use}) installs into child images only: "
+                    "give its entries to an image derived from core"
                 )
+    return found
+
+
+def keyring_of(lock: Lock, name: str, sources: Sources) -> bytes:
+    """The keyring entry `name`, read through `sources`, checked against the lock's checksums, unarmored."""
+    entry = lock["inputs"].get(name)
+    if entry is None:
+        raise Failed(f"signed_by names {name}, which is not an entry of the lock")
+    url = input_lock.render_url(entry)
+    try:
+        data = sources.read(url)
+    except (OSError, ValueError) as error:
+        raise Failed(f"{url}: cannot be read: {error}") from None
+    try:
+        return vendordeb.checked_keyring(url, data, input_lock.checksums(entry))
+    except vendordeb.VendorError as error:
+        raise Failed(str(error)) from None
+
+
+def verified_debs(
+    lock: Lock, entries: Mapping[str, Mapping[str, input_lock.Value]], sources: Sources, arch: str
+) -> list[vendordeb.Verified]:
+    """Every vendor .deb entry, checked through its repository's signed InRelease (`vendordeb.verify`)."""
+    rings: dict[str, bytes] = {}
+    found: list[vendordeb.Verified] = []
+    now = datetime.datetime.now(datetime.UTC)
+    for name, entry in sorted(entries.items()):
+        signer = str(entry.get("signed_by"))
+        if signer not in rings:
+            rings[signer] = keyring_of(lock, signer, sources)
+        pin = vendordeb.pin_of(name, input_lock.build_fields(entry), str(entry.get("registryUrl")))
+        try:
+            found.append(vendordeb.verify(pin, rings[signer], sources.read, now, arch))
+        except vendordeb.VendorError as error:
+            raise Failed(f"inputs.{name}: {error}") from None
     return found
 
 
 def resolve_all(
     lock: Lock, loaded: Loaded, params: Mapping[str, Param], snapshot_id: str, sources: Sources, workdir: Path
 ) -> dict[str, tuple[Package, ...]]:
+    """Every image's package set, top down. A vendor .deb is resolved with the image that installs it, from a
+    stanza verified through its repository's signature, in the same transaction as the image's packages."""
     spec = loaded.definition
+    arch = spec.debian.architectures[0]
     try:
         opened = resolve.open_archive(
             snapshot_id,
             spec.debian.suite,
             spec.debian.components,
-            spec.debian.architectures[0],
+            arch,
             keyring=sources.keyring,
             cache=sources.cache,
             workdir=workdir,
@@ -265,6 +324,7 @@ def resolve_all(
             read=sources.read,
         )
         resolved: dict[str, tuple[Package, ...]] = {}
+        vendor: dict[Package, Mapping[str, str]] = {}
         for name in definition.top_down(spec):
             image = spec.images[name]
             if image.parent is None:
@@ -276,7 +336,12 @@ def resolve_all(
                     )
             else:
                 asked = plan.request(spec, name, identity.modules_used(lock, spec, name, params))
-                resolved[name] = resolve.resolve_child(opened, resolved[image.parent], asked, name)
+                debs = verified_debs(lock, lockrules.deb_entries(lock, spec, name, params), sources, arch)
+                own = [one.stanza for one in debs]
+                resolved[name] = resolve.resolve_child(
+                    opened, resolved[image.parent], asked, name, own=own, vendor=vendor
+                )
+                vendor.update({vendordeb.package_of(one): one.stanza for one in debs})
     except (archive.ArchiveError, resolve.ResolveError, OSError, ValueError, KeyError) as error:
         raise Failed(str(error)) from None
     return resolved

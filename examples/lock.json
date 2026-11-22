@@ -20,15 +20,26 @@
       "apt": "example-tool",
       "datasource": "deb",
       "depName": "example-tool",
-      "description": "A vendor .deb, made up for the example: the vendor and its checksum are placeholders.",
+      "description": "A vendor .deb, made up for the example: the vendor and its checksum are placeholders. fetch verifies it through the vendor's signed InRelease (signed_by).",
       "module": "vendor-deb",
       "registryUrl": "https://packages.example.com/debian?suite=trixie&components=main&binaryArch=amd64",
       "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "signed_by": "example-vendor-keys",
       "url": "https://packages.example.com/debian/pool/main/e/example-tool/example-tool_{version_noepoch}_amd64.deb",
       "used_by": [
         "os"
       ],
       "version": "2.4.0-1"
+    },
+    "example-vendor-keys": {
+      "description": "The keyring the example vendor signs its repository's InRelease with, made up like its .deb. A trust root: moved by hand, as a reviewed diff.",
+      "module": "vendor-deb",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "url": "https://packages.example.com/debian/example-archive-keyring.pgp",
+      "used_by": [
+        "os"
+      ],
+      "version": "2026.1"
     },
     "node-26": {
       "datasource": "node-version",

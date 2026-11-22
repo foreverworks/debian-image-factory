@@ -254,6 +254,7 @@ def prepare_work(
             files=spec.files is not None,
             module_lines=module_lines(loaded.definition, entry, epoch),
             hooks=scripts,
+            debs=deb_paths(entry),
         )
     )
 
@@ -277,15 +278,26 @@ def place(source: Path, target: Path) -> None:
         shutil.copyfile(source, target)
 
 
+def deb_paths(entry: planfile.ImageEntry) -> list[str]:
+    """Where the image's vendor .deb files are in the builder: staged with every input (`stage_run`)."""
+    return [f"{core.WORK}/run/inputs/{name}/{input_file_name(entry['inputs'][name])}" for name in sorted(entry["debs"])]
+
+
 def module_lines(spec: definition.Definition, entry: planfile.ImageEntry, source_date_epoch: int) -> list[str]:
     """What every switched-on built-in module the image uses runs in the builder (modules.install_lines),
-    each module with its own lock entries, in module-name order."""
+    each module with its own lock entries but the keyrings (trust roots, never installed), in module-name
+    order."""
+    roots = {trust["signed_by"] for trust in entry["trust"].values()}
     lines: list[str] = []
     for name in entry["modules"]:
         module = spec.modules[name]
         if not module.use.startswith("builtin:"):
             continue  # a script: it runs as a hook, before the image's own (identity.script_paths)
-        own = {entry_name: fields for entry_name, fields in entry["inputs"].items() if fields.get("module") == name}
+        own = {
+            entry_name: fields
+            for entry_name, fields in entry["inputs"].items()
+            if fields.get("module") == name and entry_name not in roots
+        }
         lines.append(f"# module {name} ({module.use})")
         lines += modules.install_lines(
             module, own, inputs=f"{core.WORK}/run/inputs", source_date_epoch=source_date_epoch

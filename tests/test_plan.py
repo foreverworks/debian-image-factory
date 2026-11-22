@@ -296,7 +296,7 @@ class DocumentTest(unittest.TestCase):
 
     def test_a_module_adds_the_packages_its_install_needs_at_run_time(self) -> None:
         spec = parse_definition(
-            "[modules.node]\nuse = 'builtin:node-tarball'\n[modules.f]\nuse = 'builtin:file'\n"
+            "[modules.node]\nuse = 'builtin:node-tarball'\n[modules.f]\nuse = 'builtin:file'\npath = '/opt/f'\n"
             "[images.core]\nkind = 'core'\n" + child("k", "oci", "core", 'packages = ["zz"]\n')
         )
         self.assertEqual(plan.request(spec, "k", ("f", "node")), ["libatomic1", "zz"])

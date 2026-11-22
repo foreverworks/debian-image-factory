@@ -20,7 +20,7 @@ from typing import Final
 
 from input_lock import Package
 
-from . import archive, debian, remote
+from . import archive, debian, remote, vendordeb
 from .debian import Suite as Suite
 from .debian import suites as suites
 
@@ -119,21 +119,13 @@ def open_archive(
     ]
     mirror = archive.lay_out_mirror(indices, workdir / "mirror")
     root = workdir / "apt"
-    for directory in (
-        "state/lists/partial",
-        "cache/archives/partial",
-        "etc/sources.list.d",
-        "etc/apt.conf.d",
-        "etc/preferences.d",
-    ):
-        (root / directory).mkdir(parents=True, exist_ok=True)
-    (root / "status").write_text("")
-    (root / "apt.conf").write_text(apt_conf(root, arch))
-    (root / "sources.list").write_text(
+    make_root(
+        root,
+        arch,
         "".join(
             f"deb [signed-by={keyring}] file:{mirror / one.archive} {one.dist} {' '.join(components)}\n"
             for one in suites(suite)
-        )
+        ),
     )
     run_apt(root, "update")
     stanzas: dict[Package, Mapping[str, str]] = {}
@@ -165,11 +157,14 @@ def parse_simulation(output: str) -> list[Inst]:
     return found
 
 
-def status_text(open_archive_: OpenArchive, installed: Sequence[Package]) -> str:
-    """A dpkg status file of `installed`, written from the same Packages stanzas apt resolved them from."""
+def status_text(
+    open_archive_: OpenArchive, installed: Sequence[Package], vendor: Mapping[Package, Mapping[str, str]] | None = None
+) -> str:
+    """A dpkg status file of `installed`, written from the same Packages stanzas apt resolved them from: the
+    snapshot's, or for a vendor .deb an ancestor installs, its verified stanza in `vendor`."""
     paragraphs = []
     for package in sorted(installed):
-        stanza = open_archive_.stanzas.get(package)
+        stanza = open_archive_.stanzas.get(package) or (vendor or {}).get(package)
         if stanza is None:
             raise ResolveError(f"{package[0]} {package[1]} ({package[2]}) is not in this snapshot's indices")
         fields = [(key, value) for key, value in stanza.items() if key not in STATUS_DROP]
@@ -178,13 +173,53 @@ def status_text(open_archive_: OpenArchive, installed: Sequence[Package]) -> str
     return "\n".join(paragraphs)
 
 
+def make_root(root: Path, arch: str, sources: str) -> None:
+    """A scratch apt root reading `sources` (a sources.list), with an empty status."""
+    for directory in (
+        "state/lists/partial",
+        "cache/archives/partial",
+        "etc/sources.list.d",
+        "etc/apt.conf.d",
+        "etc/preferences.d",
+    ):
+        (root / directory).mkdir(parents=True, exist_ok=True)
+    (root / "status").write_text("")
+    (root / "apt.conf").write_text(apt_conf(root, arch))
+    (root / "sources.list").write_text(sources)
+
+
+def vendor_root(open_archive_: OpenArchive, label: str, stanzas: Sequence[Mapping[str, str]]) -> Path:
+    """An apt root for one image alone: the snapshot's sources plus a local flat repository holding the vendor
+    stanzas that image installs, so no other image's resolution can see them.
+
+    The flat repository is `[trusted=yes]`: apt has no signature to check there, and needs none, because each
+    stanza in it was read from a Packages index its vendor's signed InRelease vouches for, with the stanza's
+    sha256 equal to the lock's (`vendordeb.verify`), before it was written here."""
+    root = open_archive_.root.parent / f"apt-{label}"
+    flat = root / "vendor"
+    flat.mkdir(parents=True)
+    (flat / "Packages").write_text(vendordeb.stanza_text(stanzas))
+    shared = (open_archive_.root / "sources.list").read_text()
+    make_root(root, open_archive_.arch, f"{shared}deb [trusted=yes] file:{flat} ./\n")
+    run_apt(root, "update")
+    return root
+
+
 def simulate(
-    open_archive_: OpenArchive, installed: Sequence[Package], request: Sequence[str], *, allow_upgrade: bool, label: str
+    open_archive_: OpenArchive,
+    installed: Sequence[Package],
+    request: Sequence[str],
+    *,
+    allow_upgrade: bool,
+    label: str,
+    root: Path | None = None,
+    vendor: Mapping[Package, Mapping[str, str]] | None = None,
 ) -> tuple[Package, ...]:
-    """The package set after installing `request` on top of `installed`."""
+    """The package set after installing `request` on top of `installed`, in the archive's apt root or `root`."""
+    apt_root = open_archive_.root if root is None else root
     status = open_archive_.root / f"status-{label}"
-    status.write_text(status_text(open_archive_, installed))
-    output = run_apt(open_archive_.root, "--simulate", "install", "--", *sorted(set(request)), status=status)
+    status.write_text(status_text(open_archive_, installed, vendor))
+    output = run_apt(apt_root, "--simulate", "install", "--", *sorted(set(request)), status=status)
     result = {name: (name, version, arch) for name, version, arch in installed}
     for inst in parse_simulation(output):
         if inst.old is not None and not allow_upgrade:
@@ -203,6 +238,21 @@ def resolve_core(open_archive_: OpenArchive, packages: Sequence[str]) -> tuple[P
 
 
 def resolve_child(
-    open_archive_: OpenArchive, parent: Sequence[Package], request: Sequence[str], label: str
+    open_archive_: OpenArchive,
+    parent: Sequence[Package],
+    request: Sequence[str],
+    label: str,
+    *,
+    own: Sequence[Mapping[str, str]] = (),
+    vendor: Mapping[Package, Mapping[str, str]] | None = None,
 ) -> tuple[Package, ...]:
-    return simulate(open_archive_, parent, request, allow_upgrade=False, label=label)
+    """A child's set on top of its parent's. `own` are the verified vendor stanzas the child installs: each is
+    asked for as `name=version` in the same transaction as `request`, from an apt root of the child's own.
+    `vendor` holds the verified stanzas of every vendor .deb an ancestor installs, for the status file."""
+    if not own:
+        return simulate(open_archive_, parent, request, allow_upgrade=False, label=label, vendor=vendor)
+    root = vendor_root(open_archive_, label, own)
+    pinned = [f"{stanza['Package']}={stanza['Version']}" for stanza in own]
+    return simulate(
+        open_archive_, parent, [*request, *pinned], allow_upgrade=False, label=label, root=root, vendor=vendor
+    )

@@ -222,7 +222,7 @@ class ImageEntriesTest(unittest.TestCase):
         spec, lock = example_definition(), example_lock()
         self.assertEqual(lockrules.image_entries(lock, spec, "os", {"vendor_tools": False}), {})
         on = lockrules.image_entries(lock, spec, "os", {"vendor_tools": True})
-        self.assertEqual(sorted(on), ["example-tool"])
+        self.assertEqual(sorted(on), ["example-tool", "example-vendor-keys"])
 
     def test_an_image_gets_only_its_own_entries(self) -> None:
         spec, lock = example_definition(), example_lock()

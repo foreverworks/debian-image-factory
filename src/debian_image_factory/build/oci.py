@@ -40,6 +40,8 @@ RUN: Final = "/run/factory"
 CHILD_MIRROR: Final = f"{RUN}/mirror"
 """Where the mirror is bind-mounted inside the image's root, so that the image's own apt can read it."""
 CHILD_KEYRING: Final = f"{RUN}/keyring.pgp"
+DEBS: Final = f"{RUN}/debs"
+"""Where an image's vendor .deb files wait inside its root while apt installs them."""
 
 DEV_NODES: Final = ("null", "zero", "full", "random", "urandom", "tty")
 """The devices a maintainer script may open. Bound from the builder's own /dev onto a tmpfs over the
@@ -150,14 +152,33 @@ def apt_setup_lines() -> list[str]:
     return lines
 
 
-def install_lines(request: Sequence[str]) -> list[str]:
-    """apt from the mirror, inside the root, with no recommends."""
-    packages = " ".join(shlex.quote(name) for name in sorted(set(request)))
-    return [
-        "# the image's packages, from the mirror, with the image's own apt",
+def install_lines(request: Sequence[str], debs: Sequence[str] = ()) -> list[str]:
+    """apt from the mirror, inside the root, with no recommends: the `request` packages and the vendor .deb
+    files at the builder paths `debs` (each verified by fetch through its repository's signature), in one
+    transaction, so the .deb's dependencies come from the snapshot as apt resolves them with the rest.
+
+    The files are copied into the root under `DEBS` for the transaction and removed after it."""
+    names = [shlex.quote(name) for name in sorted(set(request))]
+    lines = ["# the image's packages, from the mirror, with the image's own apt"]
+    if debs:
+        lines += [
+            "# the image's vendor .deb files, verified by fetch, installed in the same transaction",
+            f'mkdir -p "$root{DEBS}"',
+            *(f'install -m 0644 {shlex.quote(path)} "$root{DEBS}/{deb_name(path)}"' for path in sorted(set(debs))),
+        ]
+        names += [shlex.quote(f"{DEBS}/{deb_name(path)}") for path in sorted(set(debs))]
+    lines += [
         'chroot "$root" apt-get update',
-        f'chroot "$root" apt-get --yes --no-install-recommends install {packages}',
+        f'chroot "$root" apt-get --yes --no-install-recommends install {" ".join(names)}',
     ]
+    if debs:
+        lines.append(f'rm -rf "$root{DEBS}"')
+    return lines
+
+
+def deb_name(path: str) -> str:
+    """The file name a vendor .deb has inside the root: its own, which apt reads as a file because of the path."""
+    return path.rstrip("/").rsplit("/", 1)[-1]
 
 
 def apt_cleanup_lines() -> list[str]:
@@ -226,17 +247,19 @@ def build_script(
     files: bool,
     module_lines: Sequence[str],
     hooks: Sequence[str],
+    debs: Sequence[str] = (),
 ) -> str:
     """The builder's entry point for one OCI child: `layers` parent layers in, one layer out.
 
-    `request` is what the image installs with apt (nothing: no apt setup), `module_lines` what the
-    switched-on builtin modules run in the builder with the root as `$root`, `hooks` the scripts that run
-    in the chroot after them. `owner` (`uid:gid`) hands the outputs back where the container's root is
-    the host's."""
+    `request` is what the image installs with apt and `debs` the builder paths of its vendor .deb files,
+    installed in the same transaction (neither: no apt setup), `module_lines` what the switched-on builtin
+    modules run in the builder with the root as `$root`, `hooks` the scripts that run in the chroot after
+    them. `owner` (`uid:gid`) hands the outputs back where the container's root is the host's."""
+    apt = bool(request or debs)
     cleanup_trap = [
         "cleanup() {",
         "    status=$?",
-        *(f"    {line}" for line in unmount_lines(mirror=bool(request), quiet=True)),
+        *(f"    {line}" for line in unmount_lines(mirror=apt, quiet=True)),
         f'    rm -rf --one-file-system "$root" {ASIDE}',
         '    exit "$status"',
         "}",
@@ -252,8 +275,8 @@ def build_script(
         *unpack_lines(layers, source_date_epoch),
         *mount_lines(),
     ]
-    if request:
-        lines += [*apt_setup_lines(), *install_lines(request)]
+    if apt:
+        lines += [*apt_setup_lines(), *install_lines(request, debs)]
     if files:
         lines += core.files_lines()
     lines += list(module_lines)
@@ -262,12 +285,12 @@ def build_script(
             *core.hook_lines(hooks),
             *(f'rm -rf "$root{core.HOOK_DIR}/{name}"' for name in ("hooks", "inputs", "build.env")),
         ]
-    if request:
+    if apt:
         lines += apt_cleanup_lines()
     lines += [
         *trace_lines(),
         *core.identity_lines(),
-        *unmount_lines(mirror=bool(request)),
+        *unmount_lines(mirror=apt),
         *run_cleanup_lines(),
         *pack_lines(source_date_epoch, owner),
         "",

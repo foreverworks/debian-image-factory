@@ -607,11 +607,11 @@ class BuildOciTest(unittest.TestCase):
         ((use, entries, inputs, epoch),) = seen
         self.assertEqual(
             (use, sorted(entries), inputs, epoch),
-            ("builtin:node-tarball", ["node-26", "node-release-keys"], "/factory/run/inputs", EPOCH),
+            ("builtin:node-tarball", ["node-26"], "/factory/run/inputs", EPOCH),
         )
         seen_ = self.seen
         assert seen_ is not None
-        self.assertIn("# stub installs ['node-26', 'node-release-keys']", seen_.script)
+        self.assertIn("# stub installs ['node-26']", seen_.script)
         # inputs are staged for a module although the image has no hooks (the M2 gap)
         self.assertEqual(
             seen_.inputs,

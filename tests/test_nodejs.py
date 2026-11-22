@@ -60,7 +60,7 @@ class TableTest(unittest.TestCase):
         self.assertEqual(definition.parse(text).modules["node"].enabled_by, "flag")
 
     def test_other_modules_are_not_held_to_these_keys(self) -> None:
-        text = HEADER + '[images.core]\nkind = "core"\n[modules.f]\nuse = "builtin:file"\nlinks = false\n'
+        text = HEADER + '[images.core]\nkind = "core"\n[modules.f]\nuse = "hooks/f.sh"\nlinks = false\n'
         self.assertEqual(definition.parse(text).modules["f"].table["links"], False)
 
 
@@ -178,7 +178,7 @@ class InstallLinesTest(unittest.TestCase):
         text = modules.helper_files(node_module())[modules.NODE_INSTALL]
         self.assertIn("def install(", text)
         self.assertEqual(modules.node_install_text(), text)
-        self.assertEqual(modules.helper_files(Module("f", "builtin:file", None, {})), {})
+        self.assertEqual(modules.helper_files(Module("d", "builtin:deb", None, {})), {})
 
     def test_the_script_imports_nothing_of_the_factory(self) -> None:
         text = modules.node_install_text()
@@ -187,7 +187,7 @@ class InstallLinesTest(unittest.TestCase):
 
     def test_another_module_is_not_installed_here(self) -> None:
         with self.assertRaises(NotImplementedError):
-            modules.install_lines(Module("f", "builtin:file", None, {}), ENTRIES, inputs="/i", source_date_epoch=0)
+            modules.install_lines(Module("s", "hooks/s.sh", None, {}), ENTRIES, inputs="/i", source_date_epoch=0)
 
     def test_a_file_name_that_is_not_safe_is_staged_as_file(self) -> None:
         self.assertEqual(modules.input_file_name({"url": "https://x.example/"}), "file")
@@ -218,4 +218,4 @@ class ProbesTest(unittest.TestCase):
 
     def test_another_module_has_no_probes_yet(self) -> None:
         with self.assertRaises(NotImplementedError):
-            modules.probes(Module("f", "builtin:file", None, {}), ENTRIES)
+            modules.probes(Module("s", "hooks/s.sh", None, {}), ENTRIES)

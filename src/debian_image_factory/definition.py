@@ -7,13 +7,13 @@ is the edge's question (`files.py`).
 
 import re
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
 from input_lock import JsonValue
 
-from . import nodejs
+from . import filemodule, nodejs, vendordeb
 
 SCHEMA: Final = 1
 
@@ -215,6 +215,14 @@ def parse_params(data: Mapping[str, JsonValue], found: list[str]) -> dict[str, P
     return params
 
 
+TABLE_PROBLEMS: Final[Mapping[str, Callable[[Mapping[str, object]], list[str]]]] = {
+    nodejs.MODULE: nodejs.table_problems,
+    vendordeb.MODULE: vendordeb.table_problems,
+    filemodule.MODULE: filemodule.table_problems,
+}
+"""Each builtin module's own check of its table (DESIGN 6.4): unknown keys are refused, naming them."""
+
+
 def parse_modules(data: Mapping[str, JsonValue], params: Mapping[str, Param], found: list[str]) -> dict[str, Module]:
     modules: dict[str, Module] = {}
     for name, raw in table(data, "modules", "", found).items():
@@ -232,8 +240,9 @@ def parse_modules(data: Mapping[str, JsonValue], params: Mapping[str, Param], fo
             found.append(f"{where}.use: {use!r} is not one of {list(BUILTIN_MODULES)}")
         elif not use.startswith("builtin:") and not relative_path(use):
             found.append(f"{where}.use: a script path is relative to the definition and stays inside it")
-        if use == nodejs.MODULE:
-            found.extend(f"{where}: {problem}" for problem in nodejs.table_problems(raw))
+        checker = TABLE_PROBLEMS.get(use)
+        if checker is not None:
+            found.extend(f"{where}: {problem}" for problem in checker(raw))
         enabled_by = text(raw, "enabled_by", where, found)
         if enabled_by is not None:
             if enabled_by not in params:

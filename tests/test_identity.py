@@ -284,11 +284,12 @@ class DefinitionRowsTest(IdentityCase):
         self.assertEqual(self.changed_by_definition(text), ["node-26", "node-child"])
 
     def test_a_modules_use_change_does_the_same(self) -> None:
-        text = (example_text() + EXTRA).replace('use = "builtin:node-tarball"', 'use = "builtin:file"')
+        text = (example_text() + EXTRA).replace('use = "builtin:node-tarball"', 'use = "builtin:file"\nunpack = true')
+        text = text.replace('prefix = "/usr/local"', 'path = "/opt/node"')
         self.assertEqual(self.changed_by_definition(text), ["node-26", "node-child"])
 
     def test_a_module_no_image_uses_changes_nothing(self) -> None:
-        text = (example_text() + EXTRA).replace('use = "builtin:deb"', 'use = "builtin:file"')
+        text = (example_text() + EXTRA).replace('use = "builtin:deb"', 'use = "builtin:file"\npath = "/opt/tool"')
         self.assertEqual(self.changed_by_definition(text), [])
 
     def test_a_hook_content_change_changes_that_image_and_its_children(self) -> None:

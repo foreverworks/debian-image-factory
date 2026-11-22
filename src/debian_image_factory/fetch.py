@@ -16,8 +16,15 @@ An entry that has `signed_by` and `sums_url` (input-lock 0.2.0's trust fields, D
 against its vendor's signed checksum list: `gpgv` verifies the list with the keyring entry `signed_by` names, and
 the list's checksum for the file must equal the lock's (Node's `SHASUMS256.txt.asc` is one). The list is kept in
 the cache by its sha256, with a small note keyed by the entry's sha256 that `vouched_by` reads back for provenance.
+
+A vendor .deb (an image's `debs`, the `builtin:deb` module) is verified the same way through its repository: the
+keyring from the cache, the repository's signed `InRelease` (or `Release` and `Release.gpg`) checked by `gpgv`,
+its suite and Valid-Until, the `Packages` index by the sha256 the Release lists, and the index's stanza, whose
+sha256 must be the lock's (`vendordeb.verify`). The signed file and the index are kept in the cache with the same
+kind of note. Vendor packages are not looked for in the snapshot's indices: they are not Debian's.
 """
 
+import datetime
 import filecmp
 import hashlib
 import json
@@ -34,7 +41,7 @@ from input_lock import Package, Value
 from input_lock.fetch import gpgv
 from input_lock.signed import dearmor, listed, sums_name
 
-from . import archive, debian, records, resolve
+from . import archive, debian, records, resolve, vendordeb
 from .commands import Failed, Sources, Usage
 from .planfile import ImageEntry, Plan, read_plan
 
@@ -66,6 +73,16 @@ class Vouched:
 
 
 @dataclass(frozen=True, slots=True)
+class AptVouched:
+    """A vendor .deb whose checksum its repository's signed InRelease vouches for, and what verifies it."""
+
+    entry: LockedInput
+    keyring: LockedInput
+    pin: vendordeb.Pin
+    architecture: str
+
+
+@dataclass(frozen=True, slots=True)
 class FetchPlan:
     """What `fetch` reads of a plan.json: the snapshot, where to look, and everything to fetch."""
 
@@ -79,6 +96,8 @@ class FetchPlan:
     """Every locked input of every image, once each, sorted."""
     vouched: tuple[Vouched, ...]
     """Every input with a signed checksum list, once each, sorted."""
+    apt: tuple[AptVouched, ...] = ()
+    """Every vendor .deb, once each, sorted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +141,7 @@ def vouched_inputs(image: str, entry: ImageEntry) -> list[Vouched]:
     found: list[Vouched] = []
     for name, trust in sorted(entry["trust"].items()):
         if "sums_url" not in trust:
-            continue  # an apt entry's signed list is its repository's Release, read by the deb module (M5)
+            continue  # an apt entry's signed list is its repository's InRelease: `apt_inputs`
         keyring = trust["signed_by"]
         if keyring not in entry["inputs"] or name not in entry["inputs"]:
             raise Failed(f"plan: images.{image}.trust.{name}: {name} and its keyring {keyring} must both be inputs")
@@ -140,24 +159,48 @@ def vouched_inputs(image: str, entry: ImageEntry) -> list[Vouched]:
     return found
 
 
+def apt_inputs(image: str, entry: ImageEntry, architecture: str) -> list[AptVouched]:
+    """The vendor .deb files an image installs (`debs`), each with the keyring its `signed_by` names.
+
+    Failed when the plan's inputs do not hold what the plan's `debs` names."""
+    found: list[AptVouched] = []
+    for name, deb in sorted(entry["debs"].items()):
+        keyring = entry["trust"][name]["signed_by"]
+        fields = entry["inputs"][name]
+        if keyring not in entry["inputs"]:
+            raise Failed(f"plan: images.{image}.debs.{name}: its keyring {keyring} must be an input of the image")
+        if (fields.get("apt"), fields.get("version")) != (deb["package"], deb["version"]):
+            raise Failed(f"plan: images.{image}.debs.{name}: the package and version are not the input's")
+        item = locked_input(image, name, fields)
+        pin = vendordeb.Pin(name, deb["package"], deb["version"], deb["registry_url"], item.url, item.sha256)
+        found.append(AptVouched(item, locked_input(image, keyring, entry["inputs"][keyring]), pin, architecture))
+    return found
+
+
 def fetch_plan(plan: Plan) -> FetchPlan:
-    """What fetch needs of a plan: the union of every image's packages and locked inputs."""
+    """What fetch needs of a plan: the union of every image's packages and locked inputs. A vendor .deb is a
+    locked input, not a snapshot package: it leaves `packages` (in every image, its descendants included)."""
     packages: set[Package] = set()
     inputs: set[LockedInput] = set()
     vouched: set[Vouched] = set()
+    apt: set[AptVouched] = set()
+    architecture = plan["debian"]["architecture"]
     for image, entry in sorted(plan["images"].items()):
         packages.update(entry["packages"])
         inputs.update(locked_input(image, name, fields) for name, fields in sorted(entry["inputs"].items()))
         vouched.update(vouched_inputs(image, entry))
+        apt.update(apt_inputs(image, entry, architecture))
+    vendor = {(item.pin.package, item.pin.version) for item in apt}
     debian_ = plan["debian"]
     return FetchPlan(
         plan["snapshot"],
         debian_["suite"],
         debian_["components"],
-        debian_["architecture"],
-        tuple(sorted(packages)),
+        architecture,
+        tuple(sorted(package for package in packages if package[:2] not in vendor)),
         tuple(sorted(inputs, key=lambda item: (item.name, item.url, item.checksums))),
         tuple(sorted(vouched, key=lambda item: (item.entry.name, item.entry.url, item.keyring.name))),
+        tuple(sorted(apt, key=lambda item: (item.entry.name, item.entry.url, item.keyring.name))),
     )
 
 
@@ -272,6 +315,10 @@ def download_input(item: LockedInput, sources: Sources) -> bool:
 NOTES: Final = "vouched"
 """`<cache>/vouched/<input sha256>.json`: which signed list vouched for an input, and which signature."""
 
+NOTED: Final = ("list", "signature", "index")
+"""What a note names, in this order: the signed file (a checksum list, or a repository's InRelease or Release),
+its detached signature when it has one, and, for a vendor .deb, the Packages index the Release vouched for."""
+
 
 def note_path(cache: Path, sha256: str) -> Path:
     return cache / NOTES / f"{sha256}.json"
@@ -287,15 +334,16 @@ def _remote(value: object) -> records.Remote | None:
 
 def vouched_by(cache: Path, sha256: str) -> tuple[records.Remote, ...]:
     """The signed files `fetch` verified for the input with this sha256, as provenance names dependencies: the
-    checksum list, then its detached signature when it has one, each with its address and the sha256 of the
-    file in the cache. Empty when there is no note or a file it names is not in the cache any more."""
+    checksum list (or the repository's InRelease), then its detached signature when it has one, then the
+    Packages index for a vendor .deb, each with its address and the sha256 of the file in the cache. Empty when
+    there is no note or a file it names is not in the cache any more."""
     try:
         note: object = json.loads(note_path(cache, sha256).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return ()
     if not isinstance(note, dict) or "list" not in note:
         return ()
-    files = [_remote(note.get(key)) for key in ("list", "signature") if key in note]
+    files = [_remote(note.get(key)) for key in NOTED if key in note]
     found = [one for one in files if one is not None]
     ok = len(found) == len(files) and all(archive.cached(cache, one.sha256) is not None for one in found)
     return tuple(found) if ok else ()
@@ -364,14 +412,62 @@ def check_vouched(item: Vouched, sources: Sources) -> bool:
     data = read_url(item.sums_url, sources)
     signature = None if item.sums_sig_url is None else read_url(item.sums_sig_url, sources)
     judged(item, ring, data, signature)
-    note: dict[str, dict[str, str]] = {
-        "list": {"uri": item.sums_url, "sha256": archive.store(sources.cache, data).name}
-    }
+    files = {"list": (item.sums_url, data)}
     if signature is not None and item.sums_sig_url is not None:
-        note["signature"] = {"uri": item.sums_sig_url, "sha256": archive.store(sources.cache, signature).name}
-    path = note_path(sources.cache, item.entry.sha256)
+        files["signature"] = (item.sums_sig_url, signature)
+    write_note(sources.cache, item.entry.sha256, files)
+    return True
+
+
+def write_note(cache: Path, sha256: str, files: Mapping[str, tuple[str, bytes]]) -> None:
+    """Store every file in the cache and the note naming them (`NOTED` keys to (URL, bytes))."""
+    note = {key: {"uri": url, "sha256": archive.store(cache, data).name} for key, (url, data) in files.items()}
+    path = note_path(cache, sha256)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(note, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def cached_reader(cache: Path, noted: Sequence[records.Remote]) -> vendordeb.Read:
+    """A reader that serves only the files a note names, from the cache; any other URL cannot be read."""
+    files = {one.uri: archive.cached(cache, one.sha256) for one in noted}
+
+    def read(url: str) -> bytes:
+        path = files.get(url)
+        if path is None:
+            raise OSError(f"{url}: not in the cache")
+        return path.read_bytes()
+
+    return read
+
+
+def check_apt(item: AptVouched, sources: Sources, now: datetime.datetime | None = None) -> bool:
+    """Make sure the vendor's signed repository vouches for the .deb's locked sha256; True when it was read.
+
+    The keyring comes from the cache (where `download_input` checked it against the lock's checksum). The
+    copies a note names are verified again, the whole chain, never trusted; when they no longer verify (a
+    Release past its Valid-Until, a rotated key) the chain is read from the repository again. Raises Failed
+    naming the URL that fails."""
+    keyring_file = archive.cached(sources.cache, item.keyring.sha256)
+    if keyring_file is None:
+        raise Failed(f"{item.keyring.url}: the keyring is not in the cache {sources.cache}")
+    try:
+        ring = vendordeb.checked_keyring(item.keyring.url, keyring_file.read_bytes(), dict(item.keyring.checksums))
+    except vendordeb.VendorError as error:
+        raise Failed(str(error)) from None
+    moment = now or datetime.datetime.now(datetime.UTC)
+    noted = vouched_by(sources.cache, item.entry.sha256)
+    if noted:
+        try:
+            vendordeb.verify(item.pin, ring, cached_reader(sources.cache, noted), moment, item.architecture)
+            return False
+        except vendordeb.VendorError:
+            pass  # a cache is never an authority: read the repository again
+    try:
+        verified = vendordeb.verify(item.pin, ring, sources.read, moment, item.architecture)
+    except vendordeb.VendorError as error:
+        raise Failed(f"{item.entry.name}: {error}") from None
+    files = dict(zip(("list", "signature"), verified.signed, strict=False))
+    write_note(sources.cache, item.entry.sha256, {**files, "index": verified.index})
     return True
 
 
@@ -501,6 +597,14 @@ def fetch_command(plan_path: Path, sources: Sources, *, bundle: bool, out: TextI
                     vouched_reused += 1
             except Failed as error:
                 problems.append(str(error))
+        for apt in plan.apt:
+            try:
+                if check_apt(apt, sources):
+                    vouched_fetched += 1
+                else:
+                    vouched_reused += 1
+            except Failed as error:
+                problems.append(str(error))
     if problems:
         raise Failed("\n".join(problems))
     mirror = mirror_dir(sources.cache, plan.snapshot)
@@ -512,10 +616,10 @@ def fetch_command(plan_path: Path, sources: Sources, *, bundle: bool, out: TextI
     print(f"suites: {len(indices)} verified at snapshot {plan.snapshot}", file=out)
     print(f"packages: {fetched} fetched, {reused} already cached ({len(found)} in all)", file=out)
     print(f"inputs: {inputs_fetched} fetched, {inputs_reused} already cached ({len(plan.inputs)} in all)", file=out)
-    if plan.vouched:
+    if plan.vouched or plan.apt:
         print(
             f"signed checksum lists: {vouched_fetched} fetched, {vouched_reused} already cached "
-            f"({len(plan.vouched)} in all), each verified with its keyring",
+            f"({len(plan.vouched) + len(plan.apt)} in all), each verified with its keyring",
             file=out,
         )
     print(f"mirror: {mirror}", file=out)

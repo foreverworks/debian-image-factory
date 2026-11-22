@@ -71,9 +71,17 @@ VENDOR_ENTRY = {
     "registryUrl": "https://packages.example.com/debian?suite=trixie&components=main&binaryArch=amd64",
     "sha256": "1" * 64,
     "url": "https://packages.example.com/pool/example-tool_{version}_amd64.deb",
+    "signed_by": "vendor-keys",
     "used_by": ["app-b"],
     "version": "2.4.0-1",
     "depName": "example-tool",
+}
+VENDOR_KEYS = {
+    "module": "vendor",
+    "sha256": "2" * 64,
+    "url": "https://packages.example.com/debian/keyring.pgp",
+    "used_by": ["app-b"],
+    "version": "1",
 }
 INSTALLS_LIB_A = ["app-a", "app-c"]
 """app-a installs tool-a, which needs lib-a; app-c is its child. Core and app-b do not have it."""
@@ -393,14 +401,20 @@ class ExitCodeTest(CliCase):
         self.assertEqual(run.code, 1)
         self.assertIn("lock.json: inputs.thing.used_by names ['ghost']", run.err)
 
-    def test_a_switched_on_builtin_deb_module_is_exit_1(self) -> None:
-        root = self.workspace(inputs={"example-tool": VENDOR_ENTRY})
+    def test_a_switched_on_builtin_deb_module_on_core_is_exit_1(self) -> None:
+        # a vendor .deb that resolves is planned in tests/test_vendor_deb.py, against a signed fixture repository
+        on_core = {"used_by": ["core"]}
+        inputs: dict[str, object] = {
+            "example-tool": {**VENDOR_ENTRY, **on_core},
+            "vendor-keys": {**VENDOR_KEYS, **on_core},
+        }
+        root = self.workspace(inputs=inputs)
         self.assertEqual(
             self.plan(root, "--snapshot", FIRST_ID).code, 0
         )  # the switch is off: its entry is installed nowhere
         run = self.plan(root, "--snapshot", FIRST_ID, "--param", "vendor=true")
         self.assertEqual(run.code, 1)
-        self.assertIn("images.app-b: module vendor (builtin:deb) is resolved from a later release on", run.err)
+        self.assertIn("images.core: module vendor (builtin:deb) installs into child images only", run.err)
 
     def test_a_failing_package_is_exit_1_with_apts_message(self) -> None:
         root = self.workspace(factory=FACTORY.replace('packages = ["tool-a"]', 'packages = ["no-such-package"]'))
