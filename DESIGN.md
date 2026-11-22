@@ -207,9 +207,64 @@ release fixes: mmdebstrap, apt, dpkg, tar, gzip, cpio, squashfs-tools and python
 ships them, plus the tools that only move or check bytes (gnupg, gpgv, oras, util-linux). Its
 recipe is `builder/Dockerfile`; its snapshot is the `debian_snapshot` of the repository's own
 `lock.json`, which also pins input-lock.
-A later release publishes that builder image through `publish.push_layout`, pinned by digest, from
-the layout `docker save` writes; `push_layout` takes any single-image OCI layout and assumes none of
-the factory's annotations.
+A release publishes that builder image to `ghcr.io/<owner>/debian-image-factory-builder` and signs it
+(`release.yml` does both today); `push_layout` takes any single-image OCI layout and assumes none of
+the factory's annotations. What is **planned for the first public release** is that the `.pyz` pins
+that image by digest, so a stranger's build uses exactly the builder the release published; the
+subsection below is that design, and nothing in it is published yet.
+
+#### The published builder (planned, first public release)
+
+- **Where.** `ghcr.io/foreverworks/debian-image-factory-builder`, tagged with the release
+  (`vX.Y.Z`, as `release.yml` pushes it now) and always used by digest: the tag only tells a reader
+  which release it came from. The package is made public together with the repository (a package's
+  visibility is its own setting, not the repository's), so that an anonymous `docker pull` works for
+  every consumer and for the Action.
+- **How the `.pyz` learns its digest.** The release builds the builder first, pushes it and reads
+  the digest the registry gave the manifest (`docker image inspect` on the pushed tag, as the
+  signing step does), and only then builds the `.pyz`, which `scripts/build-pyz` is given that
+  reference (`--builder ghcr.io/foreverworks/debian-image-factory-builder@sha256:<digest>`). It
+  writes it into the archive next to `builder/tools.json`, as `debian_image_factory/builder/image`.
+  `release.yml` therefore swaps two steps (the builder before the `.pyz`); its signing steps stay as
+  they are. The `.pyz` stays reproducible from the commit and the reference: the reference is an
+  input of the build, named in the release notes beside the `.pyz`'s own sha256, and a builder image
+  is not itself reproducible bit for bit (its layers carry build times), which is why its digest is
+  recorded and signed rather than recomputed.
+- **The default.** `--builder-image` defaults to the reference in the archive when it has one;
+  a source checkout, a development build or a `.pyz` built without `--builder` has none and keeps
+  the local tag `debian-image-factory-builder:<snapshot>` that `scripts/builder build` gives
+  (`tools.BUILDER_IMAGE`). A reference with a digest is pulled when the image is not local, and the
+  tools check (`open_builder`) runs on it exactly as on a local image: the pinned `tools.json`
+  decides whether this release may use it.
+- **What the identity holds: the builder's tools, never its digest.** The recipe digest (7.1) has
+  the byte-writing packages and their versions, not the image's digest. Publishing the builder
+  again, with a changed label or a rebuilt layer, must rebuild nothing, and only a change of the
+  tools' versions can change bytes. The digest goes where a reader looks for what built an
+  artifact: the provenance's `resolvedDependencies` (8.2), as `oci://<repository>` with the digest
+  of the manifest the `.pyz` pinned (a local tag still records the image ID, as today). Both guards
+  hold at once: the digest says which image ran, the tools check says that it may.
+- **How the Action uses it.** The Action (9.2) reads the `.pyz`, takes the reference from it, pulls
+  by digest, verifies the signature (below) before the first build and hands the reference to
+  `build --builder-image`. Nothing about the builder is chosen in a workflow file: the factory
+  version in the consumer's lock decides the builder, as it decides the `.pyz`.
+- **How a consumer verifies it.** The signature is keyless Sigstore, made by the release workflow:
+
+  ```sh
+  cosign verify "$REF" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-identity-regexp '^https://github.com/foreverworks/debian-image-factory/\.github/workflows/release\.yml@refs/tags/v[0-9]'
+  ```
+
+  where `$REF` is the digest reference read from the `.pyz` (`unzip -p <pyz>
+  debian_image_factory/builder/image`). The certificate identity is the release workflow at a
+  release tag, so an image pushed by any other workflow, ref or fork does not verify; the digest in
+  an artifact's provenance is then the same reference, for anyone who wants to check what built it.
+- **While the repository is private** nothing changes: the default is the local tag, built by
+  `scripts/builder build` on the runner (as CI and the integration tier do), `release.yml` pushes
+  and signs the builder to the private package and puts no reference in the `.pyz`, and a consumer
+  inside the organisation who wants the published one passes `--builder-image <reference>` and logs
+  in to ghcr. Provenance records the image ID. Making the repository and the package public, and
+  the two `release.yml` steps swapping places with `build-pyz --builder`, are one release's work.
 
 - **In CI and by default locally**, the builder is a container image the factory release pins by
   digest. From the first milestone it is built by the factory's own release pipeline from a fixed
@@ -1154,8 +1209,9 @@ does): hooks and file trees live beside the definition, and provenance names the
 builds an image it recomputes the identity from them with the plan's package set and refuses a
 plan they no longer match, so records always describe what was built, and it verifies again, from the
 cache alone, every signed checksum list or vendor chain the image's inputs rely on (15.8). `--builder-image REF` names
-the builder; the default is the tag `scripts/builder build` gives, until a release pins the
-published builder by digest. A child whose parent this run does not build reads it from `out/` (by
+the builder; the default is the tag `scripts/builder build` gives. (Planned for the first public
+release: a `.pyz` carries the digest reference of the builder its release published, signed, and that
+is its default; 5.4.) A child whose parent this run does not build reads it from `out/` (by
 artifact name: the identity prefix and the digest the plan names), then from each `--parents TARGET`
 (`dir://` holding the core tarball or an `.oci` layout, or `oci://`, pulled by digest); a parent found
 nowhere fails the build naming the image, the digest and the places looked in. Images of kinds a release cannot build yet are listed as not built. `--offline` (a replay from an inputs bundle) arrives with M6 and `--builder host` later;
@@ -1217,8 +1273,9 @@ exits 0 whether or not anything needs building; `plan.json` and the Action's `ch
 
 A composite action at the repository root, `foreverworks/debian-image-factory@<commit>`. It reads
 the factory version from the consumer's lock (`debian-image-factory` entry), downloads that `.pyz`,
-checks its sha256 against the lock, and runs the requested steps in the release's pinned builder
-container. The Action's own ref changes only when its bootstrap logic does; the factory version has
+checks its sha256 against the lock, and runs the requested steps in a builder container: the local
+tag the repository builds while it is private; from the first public release, the release's builder
+by digest, read from the `.pyz` and verified with cosign before it runs (5.4). The Action's own ref changes only when its bootstrap logic does; the factory version has
 one home, the lock.
 
 ```yaml
