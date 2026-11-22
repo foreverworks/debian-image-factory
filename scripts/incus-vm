@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+"""Run a command as root in a Debian 13 VM that has Incus, for the factory's Incus checks (DESIGN 11, 12).
+
+    scripts/incus-vm [--snapshot ID] [--share HOST_DIR:NAME]... [--memory MB] [--cpus N] [--timeout MIN] \\
+        -- COMMAND...
+
+COMMAND runs as root inside the VM with each share mounted read-write at /mnt/NAME. Its stdout and
+stderr come out on this script's stdout (the VM's second serial port, streamed as it runs). The exit
+status is COMMAND's; 124 when --timeout (default 60 minutes) ran out, after QEMU was killed; 125 when
+the VM never got to run the command (the end of the console log is printed to stderr).
+
+The same script runs locally (QEMU TCG: slow but real) and on a runner with /dev/kvm (KVM). Everything
+happens inside `docker run --privileged` of a small harness image: Debian 13 pinned by digest with QEMU,
+qemu-img and xorriso. The harness image is built once per Dockerfile text and reused.
+
+The VM boots Debian 13's official genericcloud amd64 image, pinned to one dated build directory and
+verified against that directory's SHA512SUMS. A NoCloud seed (cidata ISO) carries the user-data:
+it installs `incus` and `dnsmasq-base` (the one recommendation `incus admin init --minimal` needs for its
+bridge, nothing else) with apt from deb.debian.org, or with --snapshot ID from
+snapshot.debian.org (trixie, trixie-updates and trixie-security, Valid-Until check off), runs
+`incus admin init --minimal`, and powers off. That prepared state is cached (below); a second seed
+then boots a throwaway overlay of the prepared disk, mounts the shares (virtiofs: the cloud
+kernel has no 9p), runs COMMAND and powers off.
+
+Cached under ${XDG_CACHE_HOME:-~/.cache}/debian-image-factory/incus-vm/ (delete it to start over):
+  base/<image>.qcow2 and .sha512    the downloaded cloud image, verified once; never booted directly
+  prepared-<sha512 prefix>-<snapshot or "current">.qcow2
+                                    the base with incus installed and initialised, for that snapshot ID
+                                    (without --snapshot the key is "current": the archive as of that
+                                    first run, until the file is deleted). Its machine identity (host
+                                    keys, machine-id) is shared by every run and irrelevant to the checks,
+                                    which test containers. Every run boots a fresh overlay of it.
+
+Pins, read live on 2026-11-22: debian:trixie index digest from `docker buildx imagetools inspect`;
+the newest genericcloud build directory under https://cloud.debian.org/images/cloud/trixie/.
+"""
+
+import argparse
+import base64
+import hashlib
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+# debian:trixie, the multi-arch index digest, read with `docker buildx imagetools inspect debian:trixie` on 2026-11-22.
+HARNESS_BASE = "debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6"
+HARNESS_PACKAGES = ("ca-certificates", "python3", "qemu-system-x86", "qemu-utils", "virtiofsd", "xorriso")
+# The newest build directory of the Debian 13 cloud images on 2026-11-22.
+CLOUD_BUILD = "20261116-2664"
+CLOUD_URL = f"https://cloud.debian.org/images/cloud/trixie/{CLOUD_BUILD}"
+CLOUD_IMAGE = f"debian-13-genericcloud-amd64-{CLOUD_BUILD}.qcow2"
+DISK_SIZE = "10G"
+DEFAULT_TIMEOUT_MINUTES = 60.0
+DEFAULT_MEMORY_MB = 2048
+EXIT_TIMEOUT = 124
+EXIT_NOT_RUN = 125
+SNAPSHOT = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+SHARE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+SCRIPT_IN_CONTAINER = "/opt/incus-vm"
+CACHE_IN_CONTAINER = "/cache"
+SHARES_IN_CONTAINER = "/shares"
+PATH_IN_GUEST = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+@dataclass(frozen=True)
+class Share:
+    path: str
+    name: str
+
+
+@dataclass(frozen=True)
+class Options:
+    command: tuple[str, ...]
+    snapshot: str | None = None
+    shares: tuple[Share, ...] = ()
+    memory: int = DEFAULT_MEMORY_MB
+    cpus: int = 4
+    timeout_minutes: float = DEFAULT_TIMEOUT_MINUTES
+    inner: bool = False
+    accel: str = "tcg"
+
+
+class UsageError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What the console log says happened inside the VM."""
+
+    started: bool
+    status: int | None
+
+
+# --- pure functions -----------------------------------------------------------------------------
+
+
+def parse_share(text: str) -> Share:
+    path, sep, name = text.rpartition(":")
+    if not sep or not path:
+        raise UsageError(f"--share takes HOST_DIR:NAME, not {text!r}")
+    if SHARE_NAME.match(name) is None:
+        raise UsageError(f"share name {name!r}: letters, digits, '.', '_' and '-', starting with a letter or digit")
+    if "," in path:
+        raise UsageError(f"share path {path!r} must not contain a comma")
+    return Share(path, name)
+
+
+def parse_args(argv: Sequence[str], cpu_count: int) -> Options:
+    """The options, with the command after the first `--`. Raises UsageError."""
+    if "--" not in argv:
+        raise UsageError("COMMAND is missing: put it after `--`")
+    split = list(argv).index("--")
+    command = tuple(argv[split + 1 :])
+    if not command:
+        raise UsageError("COMMAND is missing: put it after `--`")
+    parser = argparse.ArgumentParser(prog="incus-vm", add_help=False, exit_on_error=False)
+    parser.add_argument("--snapshot")
+    parser.add_argument("--share", action="append", default=[])
+    parser.add_argument("--memory", type=int, default=DEFAULT_MEMORY_MB)
+    parser.add_argument("--cpus", type=int, default=min(cpu_count, 4))
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_MINUTES)
+    parser.add_argument("--inner", action="store_true")
+    parser.add_argument("--accel", choices=("kvm", "tcg"), default="tcg")
+    try:
+        ns = parser.parse_args(list(argv[:split]))
+    except argparse.ArgumentError as error:
+        raise UsageError(str(error)) from error
+    snapshot: str | None = ns.snapshot
+    shares = tuple(parse_share(text) for text in list[str](ns.share))
+    memory: int = ns.memory
+    cpus: int = ns.cpus
+    timeout: float = ns.timeout
+    if snapshot is not None and SNAPSHOT.match(snapshot) is None:
+        raise UsageError(f"--snapshot takes an archive timestamp such as 20261110T000000Z, not {snapshot!r}")
+    if len({share.name for share in shares}) != len(shares):
+        raise UsageError("two shares have the same NAME")
+    if memory < 512 or cpus < 1 or timeout <= 0:
+        raise UsageError("--memory must be at least 512, --cpus at least 1 and --timeout above 0")
+    return Options(command, snapshot, shares, memory, cpus, timeout, bool(ns.inner), str(ns.accel))
+
+
+def harness_dockerfile() -> str:
+    packages = " ".join(HARNESS_PACKAGES)
+    return (
+        f"FROM {HARNESS_BASE}\n"
+        "ENV DEBIAN_FRONTEND=noninteractive\n"
+        f"RUN apt-get update -q && apt-get install -y -q --no-install-recommends {packages} "
+        "&& rm -rf /var/lib/apt/lists/*\n"
+    )
+
+
+def harness_tag(dockerfile: str) -> str:
+    return "debian-image-factory-incus-vm:" + hashlib.sha256(dockerfile.encode()).hexdigest()[:12]
+
+
+def docker_user_args(rootless: bool, uid: int, gid: int, kvm_gid: int | None) -> list[str]:
+    """Rootless docker maps the container's root to the caller, so files written into shares are the
+    caller's. Rootful docker needs the caller's own ids for the same, plus the kvm group for /dev/kvm."""
+    if rootless:
+        return []
+    args = ["--user", f"{uid}:{gid}"]
+    if kvm_gid is not None:
+        args += ["--group-add", str(kvm_gid)]
+    return args
+
+
+def inner_args(options: Options, accel: str) -> list[str]:
+    args = [
+        "--inner",
+        "--accel",
+        accel,
+        "--memory",
+        str(options.memory),
+        "--cpus",
+        str(options.cpus),
+        "--timeout",
+        str(options.timeout_minutes),
+    ]
+    if options.snapshot is not None:
+        args += ["--snapshot", options.snapshot]
+    for share in options.shares:
+        args += ["--share", f"{SHARES_IN_CONTAINER}/{share.name}:{share.name}"]
+    return [*args, "--", *options.command]
+
+
+def docker_run_command(
+    options: Options, tag: str, script: Path, cache: Path, accel: str, user_args: Sequence[str]
+) -> list[str]:
+    command = ["docker", "run", "--rm", "--init", "--privileged", "-e", "HOME=/tmp", *user_args]
+    if accel == "kvm":
+        command += ["--device", "/dev/kvm"]
+    command += ["--mount", f"type=bind,src={script},dst={SCRIPT_IN_CONTAINER},readonly"]
+    command += ["--mount", f"type=bind,src={cache},dst={CACHE_IN_CONTAINER}"]
+    for share in options.shares:
+        command += ["--mount", f"type=bind,src={share.path},dst={SHARES_IN_CONTAINER}/{share.name}"]
+    return [*command, tag, "python3", SCRIPT_IN_CONTAINER, *inner_args(options, accel)]
+
+
+def parse_sha512sums(text: str, name: str) -> str:
+    """The checksum of `name` in the text of a SHA512SUMS file. Raises KeyError when it is not listed."""
+    for line in text.splitlines():
+        digest, _, listed = line.partition("  ")
+        if listed.strip() == name:
+            return digest.strip()
+    raise KeyError(name)
+
+
+def cache_key(base_sha512: str, snapshot: str | None) -> str:
+    return f"{base_sha512[:16]}-{snapshot or 'current'}"
+
+
+def apt_sources(snapshot: str | None) -> str:
+    """The deb822 sources the guest installs from: the live mirrors, or the three suites at a snapshot."""
+    if snapshot is None:
+        main, security = "http://deb.debian.org/debian", "http://deb.debian.org/debian-security"
+    else:
+        main = f"https://snapshot.debian.org/archive/debian/{snapshot}/"
+        security = f"https://snapshot.debian.org/archive/debian-security/{snapshot}/"
+    return (
+        f"Types: deb\nURIs: {main}\nSuites: trixie trixie-updates\nComponents: main\n"
+        "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp\n\n"
+        f"Types: deb\nURIs: {security}\nSuites: trixie-security\nComponents: main\n"
+        "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp\n"
+    )
+
+
+PREPARE_STEPS = """\
+exec >"$log" 2>&1
+set -eu
+rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list
+printf '%s' "$APT_SOURCES" >/etc/apt/sources.list.d/debian.sources
+if [ -n "$SNAPSHOT" ]; then
+    printf 'Acquire::Check-Valid-Until "false";\\n' >/etc/apt/apt.conf.d/99snapshot
+fi
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -q
+apt-get install -y -q --no-install-recommends incus dnsmasq-base
+incus admin init --minimal
+incus admin waitready --timeout 120
+"""
+
+MOUNT_STEP = 'mkdir -p /mnt/@NAME@ && mount -t virtiofs @NAME@ /mnt/@NAME@ || fail "mounting @NAME@ failed"'
+
+RUN_STEPS = """\
+fail() { echo "incus-vm guest: $*" >"$console"; exit 125; }
+incus admin waitready --timeout 300 || fail "incus did not become ready"
+stty -F /dev/ttyS1 raw -echo || fail "no second serial port"
+@MOUNTS@
+cd /
+"$@" </dev/null >/dev/ttyS1 2>&1
+"""
+
+
+def guest_script(nonce: str, mode: str, snapshot: str | None, shares: Sequence[str], command: Sequence[str]) -> str:
+    """The script cloud-init runs as root in the guest; mode is "prepare" or "run".
+
+    The console (ttyS0) carries the progress markers, the command's own output goes to ttyS1.
+    """
+    if mode == "prepare":
+        steps = (
+            f"APT_SOURCES={shlex.quote(apt_sources(snapshot))}\nSNAPSHOT={shlex.quote(snapshot or '')}\n"
+            + PREPARE_STEPS
+        )
+    else:
+        mounts = "\n".join(MOUNT_STEP.replace("@NAME@", name) for name in shares)
+        steps = RUN_STEPS.replace("@MOUNTS@", mounts or ":")
+    arguments = shlex.join(command) if mode == "run" else ""
+    return (
+        "#!/bin/bash\n"
+        f"export PATH={PATH_IN_GUEST}\n"
+        "console=/dev/ttyS0\n"
+        "log=/var/log/incus-vm.log\n"
+        'rm -f "$log"\n'
+        f'printf "INCUS-VM-START {nonce}\\n" >"$console"\n'
+        f"body() {{\n{steps}}}\n"
+        f"( body {arguments} )\n"
+        "status=$?\n"
+        # The console's login getty hangs up a tty held open since before it started: write to it in short
+        # opens, and keep long output in a file that is copied there when the step failed.
+        'if [ "$status" -ne 0 ] && [ -f "$log" ]; then tail -n 60 "$log" >"$console"; fi\n'
+        f'printf "INCUS-VM-EXIT {nonce} %d\\n" "$status" >"$console"\n'
+        "systemctl poweroff\n"
+    )
+
+
+def user_data(nonce: str, mode: str, snapshot: str | None, shares: Sequence[Share], command: Sequence[str]) -> str:
+    script = guest_script(nonce, mode, snapshot, [share.name for share in shares], command)
+    encoded = base64.b64encode(script.encode()).decode()
+    return (
+        "#cloud-config\n"
+        "write_files:\n"
+        "  - path: /usr/local/sbin/incus-vm-run\n"
+        "    permissions: '0755'\n"
+        "    encoding: b64\n"
+        f"    content: {encoded}\n"
+        "runcmd:\n"
+        "  - [/usr/local/sbin/incus-vm-run]\n"
+    )
+
+
+def meta_data(instance: str) -> str:
+    return f"instance-id: incus-vm-{instance}\nlocal-hostname: incus-vm\n"
+
+
+def seed_iso_command(iso: Path, directory: Path) -> list[str]:
+    return [
+        "xorriso",
+        "-as",
+        "mkisofs",
+        "-quiet",
+        "-output",
+        str(iso),
+        "-volid",
+        "cidata",
+        "-joliet",
+        "-rock",
+        str(directory / "user-data"),
+        str(directory / "meta-data"),
+    ]
+
+
+def socket_path(socket_dir: Path, share: Share) -> Path:
+    return socket_dir / f"virtiofsd-{share.name}.sock"
+
+
+def virtiofsd_command(share: Share, socket: Path) -> list[str]:
+    """One virtiofsd per share. It runs as the caller (no sandbox), so files the guest writes are the caller's."""
+    return [
+        "/usr/libexec/virtiofsd",
+        f"--socket-path={socket}",
+        f"--shared-dir={share.path}",
+        "--sandbox=none",
+        "--cache=auto",
+        "--log-level=error",
+    ]
+
+
+def qemu_command(
+    disk: Path,
+    seed: Path,
+    console: Path,
+    shares: Sequence[Share],
+    socket_dir: Path,
+    memory: int,
+    cpus: int,
+    accel: str,
+) -> list[str]:
+    """The QEMU command line. ttyS0 is the console (kept in a file, read for the markers); ttyS1 is
+    this process's stdout, where the command's own output goes."""
+    kvm = accel == "kvm"
+    accel_args = ["-accel", "kvm" if kvm else "tcg,thread=multi", "-cpu", "host" if kvm else "max"]
+    command = [
+        "qemu-system-x86_64",
+        "-machine",
+        "q35,memory-backend=mem0",
+        "-object",
+        f"memory-backend-memfd,id=mem0,size={memory}M,share=on",  # virtiofs shares guest memory with virtiofsd
+        *accel_args,
+        "-smp",
+        str(cpus),
+        "-m",
+        str(memory),
+        "-nodefaults",
+        "-vga",
+        "std",  # without a display adapter the cloud image's kernel never gets past GRUB
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-no-reboot",
+        "-serial",
+        f"file:{console}",
+        "-chardev",
+        "stdio,id=cmdout,signal=off",
+        "-device",
+        "isa-serial,chardev=cmdout,iobase=0x2f8,irq=3",
+        "-drive",
+        f"file={disk},if=virtio,format=qcow2",
+        "-drive",
+        f"file={seed},if=virtio,format=raw,readonly=on",
+        "-netdev",
+        "user,id=net0",
+        "-device",
+        "virtio-net-pci,netdev=net0,romfile=",
+        "-device",
+        "virtio-rng-pci",
+    ]
+    for index, share in enumerate(shares):
+        command += [
+            "-chardev",
+            f"socket,id=fs{index},path={socket_path(socket_dir, share)}",
+            "-device",
+            f"vhost-user-fs-pci,chardev=fs{index},tag={share.name}",
+        ]
+    return command
+
+
+def parse_console(text: str, nonce: str) -> Outcome:
+    """Whether the guest script started and the exit status it reported, from the console log. Kernel
+    and service messages share the console, so a marker may follow other text on its line."""
+    started = f"INCUS-VM-START {nonce}" in text
+    found = re.findall(rf"INCUS-VM-EXIT {nonce} ([0-9]+)", text)
+    return Outcome(started, int(found[-1]) if found else None)
+
+
+def tail(text: str, nonce: str, lines: int = 60) -> str:
+    """The last lines of the console log, up to the guest script's exit marker when there is one (what
+    follows is only the shutdown)."""
+    kept = text.splitlines()
+    for index, line in enumerate(kept):
+        if f"INCUS-VM-EXIT {nonce} " in line:
+            kept = kept[: index + 1]
+            break
+    return "\n".join(line for line in kept[-lines:] if line.strip())
+
+
+# --- effects ------------------------------------------------------------------------------------
+
+
+def say(message: str) -> None:
+    print(f"incus-vm: {message}", file=sys.stderr, flush=True)
+
+
+def run_checked(command: Sequence[str]) -> None:
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def fetch(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=60) as response:
+        data: bytes = response.read()
+    return data
+
+
+def ensure_base(cache: Path) -> tuple[Path, str]:
+    """The verified cloud image in the cache and its SHA-512; downloaded and checked on first use."""
+    base_dir = cache / "base"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    image = base_dir / CLOUD_IMAGE
+    marker = base_dir / f"{CLOUD_IMAGE}.sha512"
+    if image.exists() and marker.exists():
+        return image, marker.read_text().strip()
+    expected = parse_sha512sums(fetch(f"{CLOUD_URL}/SHA512SUMS").decode(), CLOUD_IMAGE)
+    say(f"downloading {CLOUD_IMAGE}")
+    partial = base_dir / f"{CLOUD_IMAGE}.part-{os.getpid()}"
+    digest = hashlib.sha512()
+    with urllib.request.urlopen(f"{CLOUD_URL}/{CLOUD_IMAGE}", timeout=60) as response, partial.open("wb") as out:
+        while chunk := response.read(1 << 20):
+            digest.update(chunk)
+            out.write(chunk)
+    if digest.hexdigest() != expected:
+        partial.unlink()
+        raise SystemExit(f"incus-vm: {CLOUD_IMAGE} does not match SHA512SUMS in {CLOUD_URL}")
+    marker.write_text(expected + "\n")
+    partial.rename(image)
+    return image, expected
+
+
+def wait_for_socket(socket: Path, deadline: float) -> None:
+    while not socket.exists():
+        if time.monotonic() > deadline:
+            raise SystemExit(f"incus-vm: virtiofsd never created {socket.name}")
+        time.sleep(0.1)
+
+
+def boot(work: Path, disk: Path, mode: str, options: Options, nonce: str, deadline: float) -> Outcome | None:
+    """Boot the disk once with a seed for `mode`. None when the deadline passed (QEMU was killed)."""
+    seed_dir = work / f"seed-{mode}"
+    seed_dir.mkdir()
+    (seed_dir / "user-data").write_text(user_data(nonce, mode, options.snapshot, options.shares, options.command))
+    (seed_dir / "meta-data").write_text(meta_data(f"{nonce}-{mode}"))
+    iso = work / f"seed-{mode}.iso"
+    run_checked(seed_iso_command(iso, seed_dir))
+    console = work / f"console-{mode}.log"
+    console.write_text("")
+    command = qemu_command(disk, iso, console, options.shares, work, options.memory, options.cpus, options.accel)
+    helpers = [subprocess.Popen(virtiofsd_command(share, socket_path(work, share))) for share in options.shares]
+    try:
+        for share in options.shares:
+            wait_for_socket(socket_path(work, share), deadline)
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL)
+        try:
+            process.wait(timeout=max(deadline - time.monotonic(), 0))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            return None
+    finally:
+        for helper in helpers:
+            helper.terminate()
+        for helper in helpers:
+            helper.wait()
+    text = console.read_text(errors="replace")
+    outcome = parse_console(text, nonce)
+    failed = outcome.status != 0 if mode == "prepare" else outcome.status in (None, EXIT_NOT_RUN)
+    if failed:
+        say(f"the VM did not get through its {mode} step (qemu exit {process.returncode}); end of the console log:")
+        print(tail(text, nonce), file=sys.stderr, flush=True)
+    return outcome
+
+
+def inside(options: Options, cache: Path) -> int:
+    deadline = time.monotonic() + options.timeout_minutes * 60
+    base, sha512 = ensure_base(cache)
+    prepared = cache / f"prepared-{cache_key(sha512, options.snapshot)}.qcow2"
+    nonce = hashlib.sha256(os.urandom(16)).hexdigest()[:16]
+    with tempfile.TemporaryDirectory(prefix="incus-vm-") as scratch:
+        work = Path(scratch)
+        if not prepared.exists():
+            say(f"first run for this snapshot ({options.snapshot or 'current'}): installing incus, cached afterwards")
+            overlay = work / "prepare.qcow2"
+            create = ["qemu-img", "create", "-q", "-f", "qcow2", "-b", str(base), "-F", "qcow2", str(overlay)]
+            run_checked([*create, DISK_SIZE])
+            outcome = boot(work, overlay, "prepare", replace(options, shares=()), nonce, deadline)
+            if outcome is None:
+                say(f"timed out after {options.timeout_minutes:g} minutes while preparing the disk")
+                return EXIT_TIMEOUT
+            if outcome.status != 0:
+                say("preparing the disk failed: the VM never installed incus")
+                return EXIT_NOT_RUN
+            partial = cache / f"{prepared.name}.part-{os.getpid()}"
+            run_checked(["qemu-img", "convert", "-O", "qcow2", str(overlay), str(partial)])
+            partial.rename(prepared)
+        overlay = work / "run.qcow2"
+        run_checked(["qemu-img", "create", "-q", "-f", "qcow2", "-b", str(prepared), "-F", "qcow2", str(overlay)])
+        outcome = boot(work, overlay, "run", options, nonce, deadline)
+    if outcome is None:
+        say(f"timed out after {options.timeout_minutes:g} minutes; QEMU was killed")
+        return EXIT_TIMEOUT
+    if outcome.status is None:
+        say("the VM never got to run the command" if not outcome.started else "the VM stopped before the command ended")
+        return EXIT_NOT_RUN
+    return outcome.status
+
+
+def cache_dir() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "debian-image-factory" / "incus-vm"
+
+
+def docker_is_rootless() -> bool:
+    result = subprocess.run(
+        ["docker", "info", "--format", "{{.SecurityOptions}}"], capture_output=True, text=True, check=True
+    )
+    return "rootless" in result.stdout
+
+
+def ensure_harness_image() -> str:
+    dockerfile = harness_dockerfile()
+    tag = harness_tag(dockerfile)
+    if subprocess.run(["docker", "image", "inspect", tag], capture_output=True).returncode != 0:
+        say(f"building the harness image {tag}")
+        build = ["docker", "build", "--quiet", "--tag", tag, "-"]
+        subprocess.run(build, input=dockerfile, text=True, check=True, stdout=subprocess.DEVNULL)
+    return tag
+
+
+def kvm_usable() -> bool:
+    return os.access("/dev/kvm", os.R_OK | os.W_OK)
+
+
+def outside(options: Options) -> int:
+    shares = []
+    for share in options.shares:
+        path = Path(share.path).resolve()
+        if not path.is_dir():
+            raise UsageError(f"share {share.name}: {share.path} is not a directory")
+        shares.append(Share(str(path), share.name))
+    options = replace(options, shares=tuple(shares))
+    accel = "kvm" if kvm_usable() else "tcg"
+    if accel == "tcg":
+        say("/dev/kvm is not usable here: running under QEMU TCG, which is slow")
+    cache = cache_dir()
+    cache.mkdir(parents=True, exist_ok=True)
+    kvm_gid = os.stat("/dev/kvm").st_gid if accel == "kvm" else None
+    user_args = docker_user_args(docker_is_rootless(), os.getuid(), os.getgid(), kvm_gid)
+    tag = ensure_harness_image()
+    command = docker_run_command(options, tag, Path(__file__).resolve(), cache, accel, user_args)
+    return subprocess.run(command, stdin=subprocess.DEVNULL).returncode
+
+
+def main(argv: Sequence[str]) -> int:
+    try:
+        options = parse_args(argv, os.cpu_count() or 1)
+        if options.inner:
+            return inside(options, Path(CACHE_IN_CONTAINER))
+        return outside(options)
+    except UsageError as error:
+        print(f"incus-vm: {error}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

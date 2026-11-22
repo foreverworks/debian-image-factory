@@ -1,0 +1,36 @@
+# The Incus checks (DESIGN 11, 12): started by hand, on a runner with /dev/kvm. scripts/incus-vm boots a
+# Debian 13 VM that has Incus and runs a command in it; here with KVM, locally under QEMU TCG.
+#
+# Where jobs run: see ci.yml. The kvm capability label is the one for jobs that boot a VM.
+name: incus
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  incus:
+    name: Incus checks in a VM
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ github.event.repository.private && 'debian-image-factory-kvm' || 'ubuntu-26.04' }}
+    timeout-minutes: 60
+    steps:
+      - name: Docker, installed when the runner has none
+        run: |
+          command -v docker >/dev/null || sudo apt-get install -y -q --no-install-recommends docker.io
+          docker info >/dev/null 2>&1 || sudo systemctl start docker >/dev/null 2>&1 || true
+          docker info >/dev/null 2>&1 || sudo chmod 666 /var/run/docker.sock
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: "3.15"
+          activate-environment: true
+
+      - name: Incus in the VM (placeholder for the Incus checks)
+        run: scripts/incus-vm --share "$PWD:repo" -- sh -c 'incus version'

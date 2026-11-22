@@ -48,6 +48,8 @@ static() {
     tool ruff format --check . "${python_scripts[@]}"
     echo "== mypy"
     tool mypy
+    # a script is module __main__ to mypy: one run each, or two of them clash
+    tool mypy scripts/incus-vm
     echo "== check-ignores"
     python3 scripts/check-ignores
     echo "== shellcheck"
