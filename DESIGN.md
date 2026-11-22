@@ -937,6 +937,30 @@ release builds it, the definition check refuses it rather than build gzip in its
 OS image's own initramfs keeps whatever its Debian packages configure, since the installed system
 regenerates it.
 
+*Why zstd waits (decided in M6).* The OS root tarball is the first candidate, and building it is the small
+part: `zstd -19 -T1 --no-check` of the uncompressed tar from the builder gives the same bytes for the same
+tar, because the output depends on the zstd version (pinned by the builder's package list) and the level and
+thread count (fixed). The rest is every reader, and none of it is free:
+
+- the builder gains the `zstd` package, so `tools.json` and the builder identity move, and with them every
+  recipe digest and every image's identity: that is one planned flag day, to be taken with a release that
+  needs it, not alongside other work;
+- Debian 13's python3 is 3.13, whose standard library has no zstd (`compression.zstd` arrives in 3.14, and
+  the floor is 3.13), so every Python reader of an OS tarball shells out to `zstd -dc`: the builder's
+  `layer.py unpack` of an OS parent, `checks/tarball.py`'s scan on the host that runs `test`, and
+  the boot check's `tar -xpzf` in the VM image (which then needs `zstd` and `tar --zstd`). Consumers' own
+  tools carry the same dependency, which is the point of making it opt-in;
+- a `.tar.zst` is a new file extension: `parents.py` finds parents by extension, `checks` tells kinds by it,
+  and `fetch`, `publish`, `verify` and the Action name artifacts by it, so each needs one more case and its
+  tests;
+- the squashfs reader already reads zstd, so an Incus rootfs is the cheap second case (`mksquashfs -comp
+  zstd` with a fixed block size), but its fingerprint then covers a different file and the Incus images'
+  `incus-boot` needs a host whose Incus reads it.
+
+Until a consumer asks for zstd on one image, this cost buys nothing the gzip artifacts do not already give
+(DESIGN 15.11: only shapes with a consumer). When one does, the order is: builder and VM image packages, the
+shell-out reader, the extension, the OS build, then its byte-equal test beside the gzip one.
+
 An OCI image carries standard annotations: `org.opencontainers.image.base.digest` and
 `org.opencontainers.image.base.name` (its parent), `org.opencontainers.image.source` and
 `org.opencontainers.image.revision` (the definition's repository and commit, when its checkout is
