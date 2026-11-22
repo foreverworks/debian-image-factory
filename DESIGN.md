@@ -1414,6 +1414,7 @@ jobs:
   images:
     runs-on: ubuntu-latest
     permissions: {contents: write, packages: write, id-token: write}
+    concurrency: {group: "images-${{ github.ref }}", cancel-in-progress: false}
     steps:
       - uses: actions/checkout@<commit> # v7.0.1
       - id: factory
@@ -1449,6 +1450,14 @@ tier):
 
 Outputs: `changed` (`true` when the plan builds at least one image), `plan` (the path of `plan.json`)
 and `artifacts` (JSON: image to digest, of what the plan reuses or waits for and what the run built).
+
+**One run per image and target at a time.** Two runs that publish the same image to the same target
+race: both see `build`, both push, and on a registry without the referrers API both rewrite the tag
+schema index, so one run's records can be lost. Give every job that publishes a concurrency group
+that is never cancelled: one group for the whole definition, as above, or, when a consumer splits its
+images over several jobs, one per image and target (`images-<image>-<target>`), so a slow OS build
+never holds back an OCI one. A queued run plans again when it starts and reuses what the run before
+it published. The nightly workflow in this repository does the same with one group.
 
 **A quiet night costs a few index downloads.** After `plan`, when no image builds, `changed` is `false`
 and fetch, build, test and publish do not run: no builder image is built, no package downloaded.

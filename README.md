@@ -277,6 +277,9 @@ permissions:
 jobs:
   images:
     runs-on: ubuntu-latest
+    concurrency:                # one publishing run at a time, never cancelled (DESIGN 9.2)
+      group: images
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@<commit> # v7.0.1
       - id: factory
