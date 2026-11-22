@@ -343,7 +343,7 @@ class ActionFileTest(unittest.TestCase):
         self.assertNotRegex(text, r"oci://|github-release://|packages: write|contents: write")
         self.assertIn("group: nightly", text)
         self.assertIn("cancel-in-progress: false", text)
-        self.assertIn("github.event.repository.private && 'debian-image-factory' || 'ubuntu-26.04'", text)
+        self.assertIn("runs-on: ubuntu-26.04\n", text)
 
     def test_the_nightly_definition_needs_no_registry(self) -> None:
         from debian_image_factory import definition
