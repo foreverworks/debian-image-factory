@@ -136,10 +136,11 @@ of their SSH host public keys. The tests are `both-instances-reported`, `machine
 `ssh-host-keys-differ`. A boot that never reports fails the first.
 
 For an Incus image the two instances are two containers launched from the imported image on an Incus
-host, each read after its first boot finished. The tests are `machine-ids-made` and `ssh-host-keys-made`
-(the first boot made them: an image that ships none and never makes any proves nothing), then
-`machine-ids-differ`, `dbus-machine-ids-differ`, `hostnames-differ` and `ssh-host-keys-differ`. The check
-is not run when no Incus host answers (`scripts/incus-vm` gives one in a VM).
+host, each read after its first boot finished. The tests are `machine-ids-made` and, when the image has
+openssh-server, `ssh-host-keys-made` (the first boot made them: an image that ships none and never makes
+any proves nothing, so it FAILS), then `machine-ids-differ`, `dbus-machine-ids-differ`, `hostnames-differ`
+and `ssh-host-keys-differ`. The check is not run when no Incus host answers (`scripts/incus-vm` gives one
+in a VM).
 
 ## sbom-complete
 
@@ -248,13 +249,13 @@ user, runs the given commands, and an IPv4 address is reported; all of it is sti
 restart.
 
 PASSED when every step succeeds. FAILED when one does not, and when cloud-init never finishes (an
-image fault). Not run when no Incus host answers or the image cannot be launched.
+image fault). Not run when no Incus host answers or the image cannot be imported or launched.
 
 The image is imported once and launched as two containers, one per user-data key, each read at its
 first boot and again after `incus restart`. Each test name starts with the key (`cloud-init` or `user`)
 and the stage (`first-boot`, `after-restart`): `<key>-<stage>-cloud-init-done`, `-nocloud` (the
 datasource was NoCloud), `-user-created`, `-commands-ran` (a token written by `runcmd` is there) and
-`-ipv4-reported`. cloud-init finishing with recoverable errors is a warning, not a failure.
+`-ipv4-reported`; a restart that fails is `<key>-after-restart-restart`. cloud-init finishing with recoverable errors is a warning, not a failure.
 
 ## installer-boot
 

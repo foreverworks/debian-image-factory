@@ -1339,8 +1339,8 @@ identities of the images that install it, and nothing else.
   kit with mmdebstrap and boots both; under TCG each pair of boots takes under a minute.
 - An Incus host for `incus-boot` and `two-clones` on Incus images: `scripts/incus-vm` boots Debian 13's
   genericcloud image (pinned by build directory and SHA512SUMS) under QEMU in a privileged docker
-  container, KVM when `/dev/kvm` opens and TCG otherwise, installs Incus 6.0.4 from the lock's
-  snapshot, shares directories over virtiofs and runs one command as root. `scripts/test incus` builds
+  container, KVM when `/dev/kvm` opens and TCG otherwise, installs Incus (6.0.4 in Debian 13) from
+  the lock's snapshot, shares directories over virtiofs and runs one command as root. `scripts/test incus` builds
   core, `incus-base` and an Incus child of it from the example definition, runs every check on all
   three (the Incus checks inside the VM), then requires each image's checks to pass with
   `verify --require-checks`: the boot contract for the base and for a child. The `incus` workflow

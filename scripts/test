@@ -127,23 +127,25 @@ TOML
     return "$status"
 }
 
+# Called as `incus_steps ... || status=$?`, where bash ignores set -e: every step returns on failure itself.
 incus_steps() {
-    local work=$1 snapshot artifact
+    local work=$1 snapshot artifact status=0
     local defs=(--lock "$work/examples/lock.json" --definition "$work/examples/factory.toml")
-    snapshot=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["debian_snapshot"])' "$work/examples/lock.json")
+    snapshot=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["debian_snapshot"])' "$work/examples/lock.json") || return
     dif() { PYTHONPATH=src:.vendor python3 -m debian_image_factory "$@"; }
-    dif plan "${defs[@]}" --out "$work/plan.json"
-    dif fetch "$work/plan.json"
-    dif build "$work/plan.json" --out "$work/out" --image core --image incus-base --image incus-tools "${defs[@]}"
-    echo "== every check, on this host"
+    dif plan "${defs[@]}" --out "$work/plan.json" || return
+    dif fetch "$work/plan.json" || return
+    dif build "$work/plan.json" --out "$work/out" --image core --image incus-base --image incus-tools "${defs[@]}" || return
+    echo "== every check, on this host (the Incus ones are not run here: no Incus host)"
     dif test "$work/out" --definition "$work/examples/factory.toml" || true
     echo "== incus-boot and two-clones, on an Incus host in a VM"
     scripts/incus-vm --snapshot "$snapshot" --share "$root:repo" -- sh -ec \
-        "cd /mnt/repo && PYTHONPATH=src:.vendor python3 -m debian_image_factory test $work/out --check incus-boot --check two-clones"
+        "cd /mnt/repo && PYTHONPATH=src:.vendor python3 -m debian_image_factory test $work/out --check incus-boot --check two-clones" || return
     echo "== every required check passed"
     for artifact in "$work"/out/core-*.tar.gz "$work"/out/*.incus.tar.gz; do
-        dif verify "$artifact" --require-checks "${defs[@]}"
+        dif verify "$artifact" --require-checks "${defs[@]}" || status=1
     done
+    return "$status"
 }
 
 tier=${1:-}
