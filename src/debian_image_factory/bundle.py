@@ -7,7 +7,8 @@ names the image, its identity and the snapshot, and lists every other member wit
 
 Two fetches of one plan write byte-identical bundles: members are sorted, and every header carries the same
 time, owner and mode. `unpack` is the reverse and trusts nothing: the manifest must be the first member, every
-member must be a regular file the manifest lists, and its bytes must match the manifest's size and sha256.
+member must be a regular file the manifest lists, and its bytes must match the manifest's size and sha256 (it
+stops writing a member as soon as it passes the listed size).
 Pure apart from `write` and `unpack`, which read and write files.
 """
 
@@ -54,8 +55,8 @@ class Manifest(TypedDict):
     """Every member but the manifest itself, sorted by path."""
     verified_at: NotRequired[str]
     """When `fetch` verified the image's vendor repositories (RFC 3339 UTC), if it installs a vendor .deb: a
-    replay judges their Releases' Valid-Until at this time, not at the present. Signatures and hashes are
-    checked in full all the same."""
+    replay judges their Releases' Valid-Until at this time, not at the present, but never at a time later than
+    the replay's own (the manifest is unsigned). Signatures and hashes are checked in full all the same."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,9 +219,11 @@ def parse_manifest(data: object) -> Manifest:
     if "verified_at" in document:
         moment = _text(document["verified_at"], "the manifest's verified_at")
         try:
-            datetime.datetime.fromisoformat(moment)
+            at = datetime.datetime.fromisoformat(moment)
         except ValueError:
             raise ValueError("the manifest's verified_at is not an RFC 3339 time") from None
+        if at.tzinfo is None:
+            raise ValueError("the manifest's verified_at has no time zone offset")
         parsed["verified_at"] = moment
     return parsed
 
@@ -266,9 +269,12 @@ def _unpack(archive: tarfile.TarFile, bundle: Path, into: Path) -> Unpacked:
         digest = hashlib.sha256()
         size = 0
         with target.open("wb") as written:
-            while chunk := stream.read(1 << 20):
-                digest.update(chunk)
+            # a member never writes more than the manifest lists, whatever its header says
+            while chunk := stream.read(min(1 << 20, listed["size"] - size + 1)):
                 size += len(chunk)
+                if size > listed["size"]:
+                    raise Failed(f"{bundle}: {member.name} is larger than the manifest's {listed['size']} bytes")
+                digest.update(chunk)
                 written.write(chunk)
         if size != listed["size"] or digest.hexdigest() != listed["sha256"]:
             raise Failed(f"{bundle}: {member.name} does not match the manifest's size and sha256")

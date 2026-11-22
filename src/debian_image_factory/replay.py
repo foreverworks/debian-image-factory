@@ -25,8 +25,8 @@ class Replay:
     cache: Path
     """The cache the bundle was unpacked into."""
     verified_at: datetime.datetime | None
-    """When `fetch` verified the image's vendor repositories, if it has any: their Releases' Valid-Until is judged
-    at this time (DESIGN 7.7)."""
+    """When `fetch` verified the image's vendor repositories, if it has any, and never later than the replay's own
+    time: their Releases' Valid-Until is judged at this time (DESIGN 7.7)."""
 
 
 def check(unpacked: bundle.Unpacked, plan: planfile.Plan, source: Path) -> None:
@@ -67,9 +67,13 @@ def check(unpacked: bundle.Unpacked, plan: planfile.Plan, source: Path) -> None:
         raise Failed(f"{source}: the bundle lacks {len(lacking)} files its image's build reads, such as {lacking[0]}")
 
 
-def open_replay(bundle_path: Path, scratch: Path, plan_path: Path | None) -> Replay:
+def open_replay(
+    bundle_path: Path, scratch: Path, plan_path: Path | None, now: datetime.datetime | None = None
+) -> Replay:
     """Unpack `bundle_path` into the new directory `scratch` and check it; `plan_path`, when given, must be the
-    very plan the bundle carries (a replay builds what was fetched, never a plan that moved since)."""
+    very plan the bundle carries (a replay builds what was fetched, never a plan that moved since). The
+    bundle's `verified_at` is only ever as late as `now` (default: the present): a manifest claiming a later
+    time cannot make an expired Release look valid (DESIGN 7.7)."""
     unpacked = bundle.unpack(bundle_path, scratch)
     try:
         plan = planfile.parse_plan(json.loads(unpacked.plan.decode("utf-8")))
@@ -84,5 +88,5 @@ def open_replay(bundle_path: Path, scratch: Path, plan_path: Path | None) -> Rep
         if given != unpacked.plan:
             raise Failed(f"{plan_path} is not the plan {bundle_path} was fetched from: build it from the bundle's own")
     text = unpacked.manifest.get("verified_at")
-    verified = datetime.datetime.fromisoformat(text) if text is not None else None
+    verified = min(datetime.datetime.fromisoformat(text), now or datetime.datetime.now(datetime.UTC)) if text else None
     return Replay(unpacked.manifest["image"], unpacked.plan, unpacked.cache, verified)

@@ -905,8 +905,17 @@ the rare case inputs cannot see (an archive key rotation, say).
   carries (the image's identity, the snapshot, the suite) and the cache against what the build reads (every
   suite's `InRelease`, every locked input of the image), and the ordinary build then runs with that cache. A
   vendor repository's Release expires (`Valid-Until`), and a replay is for later: the build's re-verification
-  of the signed lists (15.8) judges that Release at the manifest's `verified_at`, not at the present.
-  Signatures, keyrings and hashes are checked in full all the same; only the clock is the fetch's. The
+  of the signed lists (15.8) judges that Release at the manifest's `verified_at`, not at the present,
+  and never at a time later than the replay's own: a manifest whose `verified_at` is in the future is
+  judged at the present, and one without a time zone offset is refused. Signatures, keyrings and hashes
+  are checked in full all the same; only the clock is the fetch's. The manifest of a bundle is unsigned,
+  so the freshness check of a replay rests on the bundle's integrity, as does the manifest's every other
+  field: someone who can rewrite a bundle can backdate `verified_at` (up to now) and replay a vendor
+  Release that has expired since. That is accepted (15.8): the `.deb` the replay installs is pinned by
+  its sha256 in the lock and every signature is still verified, so the clock is the only thing that can
+  be bent, and it cannot be bent forward. Unpacking writes a member only up to the size the manifest
+  lists and fails as soon as a member goes past it, so a bundle cannot fill a disk with a member that
+  claims more than it lists.  The
   plan comes from the bundle; a plan given beside it must be the same bytes. `--offline` also makes any
   network access of the factory process itself a hard error: no download, no registry pull (`--parents
   oci://` is refused, a parent is given as `dir://`), so nothing can fall back to a mirror. A bundle holds one
@@ -1797,7 +1806,10 @@ M3, M4 and M5 are independent once M2 lands and can run side by side.
    against the keyring entry the plan's `trust` names, itself checked against its locked checksum, and
    against the locked sha256 of the input. A build whose lists do not verify fails before anything is
    built, naming each file. A vendor Release's Valid-Until is judged at the time of the build, so a
-   cache older than that needs `fetch` again.
+   cache older than that needs `fetch` again. A replay from a bundle judges it at the bundle's
+   `verified_at` instead, capped at the present (7.7): the freshness check then rests on the bundle's
+   integrity, which an unsigned bundle does not give, and that is accepted because the `.deb` is
+   pinned by sha256 in the lock and every signature is still checked.
 9. **Children build in a chroot from their parent's exact filesystem.** Shared ancestry is real and
    provable, and nothing needs a running instance or root on the host.
 10. **A pinned builder from the first milestone**, so identities computed in M1 already include the

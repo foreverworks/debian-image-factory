@@ -2,6 +2,7 @@
 `build --offline` refuses the network. No docker: the build itself is the integration test's."""
 
 import contextlib
+import datetime
 import hashlib
 import io
 import json
@@ -261,6 +262,21 @@ class UnpackTest(PackedCase):
         with self.assertRaisesRegex(commands.Failed, "not a member name this bundle may hold"):
             bundle.unpack(rewritten(self.bundle_path, escape), self.scratch())
 
+    def test_a_member_is_never_written_past_the_size_the_manifest_lists(self) -> None:
+        name = next(name for name in members(self.bundle_path) if name.endswith("tool-a_1.0_amd64.deb"))
+
+        def shrink(found: dict[str, bytes]) -> None:
+            manifest = json.loads(found["manifest.json"])
+            for one in manifest["files"]:
+                if one["path"] == name:
+                    one["size"] = 10
+            found["manifest.json"] = json.dumps(manifest).encode()
+
+        into = self.scratch()
+        with self.assertRaisesRegex(commands.Failed, rf"{name} is larger than the manifest's 10 bytes"):
+            bundle.unpack(rewritten(self.bundle_path, shrink), into)
+        self.assertLessEqual((into / name).stat().st_size, 10)
+
     def test_a_link_in_place_of_a_file_is_refused(self) -> None:
         target = self.bundle_path.with_name("link.tar")
         with tarfile.open(target, "w") as archive_:
@@ -294,7 +310,31 @@ class UnpackTest(PackedCase):
             bundle.unpack(self.bundle_path.with_name("no-such-bundle.tar"), self.scratch())
 
 
+def with_verified_at(source: Path, moment: str) -> Path:
+    def add(found: dict[str, bytes]) -> None:
+        manifest = json.loads(found["manifest.json"])
+        manifest["verified_at"] = moment
+        found["manifest.json"] = json.dumps(manifest).encode()
+
+    return rewritten(source, add)
+
+
 class ReplayTest(PackedCase):
+    def test_a_verified_at_without_a_time_zone_is_refused_as_a_bad_manifest(self) -> None:
+        with self.assertRaisesRegex(commands.Failed, "verified_at has no time zone offset"):
+            replay.open_replay(with_verified_at(self.bundle_path, "2026-11-01T02:00:00"), self.scratch(), None)
+
+    def test_a_verified_at_later_than_now_is_judged_at_now(self) -> None:
+        now = datetime.datetime(2026, 11, 22, 12, 0, tzinfo=datetime.UTC)
+        future = replay.open_replay(
+            with_verified_at(self.bundle_path, "2099-01-01T00:00:00Z"), self.scratch(), None, now
+        )
+        self.assertEqual(future.verified_at, now)
+        past = replay.open_replay(
+            with_verified_at(self.bundle_path, "2026-11-01T02:00:00+02:00"), self.scratch(), None, now
+        )
+        self.assertEqual(past.verified_at, datetime.datetime(2026, 11, 1, 0, 0, tzinfo=datetime.UTC))
+
     def test_a_bundle_and_its_own_plan_open(self) -> None:
         opened = replay.open_replay(self.bundle_path, self.scratch(), None)
         self.assertEqual((opened.image, opened.plan), ("app-a", self.plan_path.read_bytes()))
