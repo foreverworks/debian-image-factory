@@ -133,7 +133,7 @@ def records_text(
         in_releases=[],
         builder_image="ghcr.io/example/builder",
         builder_digest=BUILDER,
-        parent=None,
+        ancestors=(),
         builder_id="https://example.com/builder",
         invocation_id=None,
         version=__version__,
