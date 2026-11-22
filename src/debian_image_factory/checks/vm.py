@@ -295,9 +295,7 @@ rm -f {SCRATCH}/esp.img {SCRATCH}/root.img
         for n in range(1, count + 1)
     )
     commands = [
-        os_args(
-            machine, f"{SCRATCH}/disk-{n}.img", f"{SCRATCH}/vars-{n}.fd", serial_log(n), report_log(n), credentials
-        )
+        os_args(machine, f"{SCRATCH}/disk-{n}.img", f"{SCRATCH}/vars-{n}.fd", serial_log(n), report_log(n), credentials)
         for n in range(1, count + 1)
     ]
     return prepare + copies + f"rm -f {SCRATCH}/disk.img\n" + boots_script(commands, timeout_s)
