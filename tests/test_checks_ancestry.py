@@ -71,58 +71,52 @@ class AncestryTest(unittest.TestCase):
         self.assertIsInstance(found, NotRun)
 
 
-PARENT = ancestry.ParentRoot(
-    A,
-    tuple(
-        Member(p.rstrip("/") or "/", "dir" if p.endswith("/") else "file")
-        for p in (
-            "/",
-            "/usr/",
-            "/usr/bin/",
-            "/usr/bin/vim",
-            "/usr/bin/sh",
-            "/var/lib/dpkg/info/vim.list",
-            "/var/lib/dpkg/info/vim.md5sums",
-            "/var/lib/dpkg/info/libc6:amd64.list",
-            "/var/log/apt/history.log",
-            "/etc/ssh/ssh_host_ed25519_key",
-            "/dev/null",
-        )
-    ),
-    {
-        "/var/lib/dpkg/info/vim.list": b"/.\n/usr\n/usr/bin\n/usr/bin/vim\n",
-        "/var/lib/dpkg/info/libc6:amd64.list": b"/.\n/usr\n/usr/bin/sh\n",
-    },
+PARENT = tuple(
+    Member(p.rstrip("/") or "/", "dir" if p.endswith("/") else "file")
+    for p in ("/", "/usr/", "/usr/bin/", "/usr/bin/vim", "/usr/bin/sh", "/usr/share/doc/vim/copyright", "/dev/null")
 )
 
 
 class RootAncestryTest(unittest.TestCase):
-    def test_a_child_with_every_parent_file_passes(self) -> None:
-        child = [*PARENT.members, Member("/usr/bin/extra", "file")]
-        found = ancestry.root_ancestry(child, {"vim", "libc6"}, PARENT)
+    def check(self, child: list[Member], recorded: list[str] | str, named: str | None = A) -> Result:
+        found = ancestry.root_ancestry(child, PARENT, A, named, recorded)
         assert isinstance(found, Result)
-        self.assertEqual(found.outcome, "PASSED")
+        return found
 
-    def test_a_file_gone_without_its_package_going_fails(self) -> None:
-        child = [m for m in PARENT.members if m.path != "/usr/bin/sh"]
-        found = ancestry.root_ancestry(child, {"vim", "libc6"}, PARENT)
-        assert isinstance(found, Result)
+    def test_a_child_with_every_parent_file_passes(self) -> None:
+        found = self.check([*PARENT, Member("/usr/bin/extra", "file")], [])
+        self.assertEqual(found.outcome, "PASSED")
+        self.assertEqual(found.passed, ("parent-files-present", "provenance-names-parent"))
+
+    def test_what_the_build_recorded_as_removed_may_go(self) -> None:
+        child = [m for m in PARENT if not m.path.startswith(("/usr/share", "/dev"))]
+        removed = ancestry.removed_from_parent(child, PARENT)
+        self.assertEqual(removed, ["/dev/null", "/usr/share/doc/vim/copyright"])
+        self.assertEqual(self.check(child, removed).outcome, "PASSED")
+
+    def test_a_file_gone_and_not_recorded_fails(self) -> None:
+        child = [m for m in PARENT if m.path != "/usr/bin/sh"]
         self.assertEqual(
-            found.failed, (f"parent-files-present: /usr/bin/sh is in the parent sha256:{A[:12]} and not here",)
+            self.check(child, []).failed,
+            (
+                f"parent-files-present: /usr/bin/sh is in the parent sha256:{A[:12]}, "
+                "not here and not recorded as removed",
+            ),
         )
 
-    def test_files_of_a_removed_package_and_cleaned_trees_may_go(self) -> None:
-        kept = {"/", "/usr", "/usr/bin", "/usr/bin/sh", "/var/lib/dpkg/info/libc6:amd64.list"}
-        child = [m for m in PARENT.members if m.path in kept]
-        found = ancestry.root_ancestry(child, {"libc6"}, PARENT)
-        assert isinstance(found, Result)
-        self.assertEqual(found.outcome, "PASSED")
+    def test_the_root_directory_need_not_be_a_member(self) -> None:
+        child = [m for m in PARENT if m.path != "/"]
+        self.assertEqual(ancestry.removed_from_parent(child, PARENT), [])
+        self.assertEqual(self.check(child, []).outcome, "PASSED")
 
-    def test_an_absent_parent_is_not_run_and_an_unreadable_status_fails(self) -> None:
-        self.assertIsInstance(ancestry.root_ancestry([], {"vim"}, "the parent core is not here"), NotRun)
-        found = ancestry.root_ancestry([], "no status", PARENT)
-        assert isinstance(found, Result)
-        self.assertEqual(found.outcome, "FAILED")
+    def test_a_provenance_naming_another_parent_fails(self) -> None:
+        found = self.check(list(PARENT), [], named=B)
+        self.assertEqual(found.failed, (f"provenance-names-parent: the provenance names {B}, the parent is {A}",))
+
+    def test_an_absent_parent_is_not_run_and_unreadable_records_fail(self) -> None:
+        self.assertIsInstance(ancestry.root_ancestry([], "the parent core is not here", "", None, []), NotRun)
+        found = self.check([], "there is no records file for this artifact")
+        self.assertEqual(found.failed, ("parent-files-present: there is no records file for this artifact",))
 
 
 if __name__ == "__main__":
