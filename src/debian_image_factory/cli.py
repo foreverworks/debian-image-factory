@@ -10,7 +10,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, commands, fetch, publish, resolve
+from . import __version__, checks, commands, fetch, publish, resolve
 from . import tools as builder
 from .build import run as build_run
 
@@ -104,6 +104,14 @@ def parser() -> argparse.ArgumentParser:
         help=f"the builder container image (default {builder.BUILDER_IMAGE}, from scripts/builder build)",
     )
 
+    test = commands_.add_parser("test", help="run the built-in checks on the artifacts in OUT and attest each result")
+    test.add_argument("out", type=Path, metavar="OUT", help="a build's output directory (plan.json and the artifacts)")
+    sources_options(test)
+    test.add_argument(
+        "--check", action="append", default=[], metavar="NAME", help="run only this check (repeat); default: the plan's"
+    )
+    test.add_argument("--url", default="", help="the URL of this run, recorded in each test result")
+
     publish_ = commands_.add_parser("publish", help="copy artifacts and their records to targets")
     publish_.add_argument("out_dir", type=Path, metavar="OUT", help="the directory build wrote")
     publish_.add_argument("--to", action="append", default=[], metavar="TARGET", help="dir://PATH (repeat)")
@@ -170,6 +178,8 @@ def dispatch(arguments: argparse.Namespace) -> int:
             builder_image=arguments.builder_image,
             out=sys.stdout,
         )
+    if arguments.command == "test":
+        return checks.test_command(arguments.out, arguments.check, sources_of(arguments), sys.stdout, url=arguments.url)
     if arguments.command == "publish":
         return publish.publish_command(arguments.out_dir, arguments.to, arguments.sign, sys.stdout)
     raise commands.Usage("a command is needed: lock, plan, fetch, build, test or publish")
