@@ -9,6 +9,8 @@ network access to snapshot.debian.org.
 
 The installer and the os are then built a second time from the same plan, and their digests must be equal:
 the engine revision guard below records them (DESIGN 12), and `test --check byte-equal --twin` compares them.
+The contents (BootingBuildTest) and the twin builds (BootingReproducibleTest) are two classes that each build
+what they check, so a parallel run puts them on two workers.
 
 What it checks: the os tarball holds the kernel and the initrd its postinst made in /boot; the kit's layout,
 kit.json and its initrd (newc, /init, sorted, inodes in order); a booting root's machine ID waits for the
@@ -88,44 +90,26 @@ def kit_initrd(kit: Path, scratch: Path) -> Path:
     return target
 
 
-@unittest.skipUnless(os.environ.get("DIF_INTEGRATION") == "1", "set DIF_INTEGRATION=1 to run integration tests")
-class BootingBuildTest(unittest.TestCase):
+def build_first(work: Path, tag: str) -> dict[str, object]:
+    """Plan, fetch and build core, the installer and the os into work/out1; the plan."""
+    plan = work / "plan.json"
+    factory("plan", *files(), "--out", str(plan))
+    factory("fetch", str(plan))
+    images = ["--image", "core", "--image", "installer", "--image", "os"]
+    factory("build", str(plan), "--out", str(work / "out1"), *images, "--builder-image", tag, *files())
+    found: dict[str, object] = json.loads(plan.read_text())
+    return found
+
+
+class BootingBase(unittest.TestCase):
+    """The fixture's paths and the readers every class of this module shares. It holds no tests: the two classes
+    below build what they check, apart from each other, so a test run schedules them on two workers (each class's
+    builds are minutes of mmdebstrap, and its tests share them)."""
+
     work: Path
     scratch: tempfile.TemporaryDirectory[str]
     plan: dict[str, object]
     children_plan: dict[str, object]
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        tag = builder_images.image()
-        (ROOT / "dist").mkdir(exist_ok=True)
-        cls.scratch = tempfile.TemporaryDirectory(prefix="integration-booting-", dir=ROOT / "dist")
-        cls.work = Path(cls.scratch.name)
-        plan = cls.work / "plan.json"
-        factory("plan", *files(), "--out", str(plan))
-        factory("fetch", str(plan))
-        cls.plan = json.loads(plan.read_text())
-        images = ["--image", "core", "--image", "installer", "--image", "os"]
-        factory("build", str(plan), "--out", str(cls.work / "out1"), *images, "--builder-image", tag, *files())
-        # The same plan again, for the installer and the os only: their parent core is out1's.
-        factory(
-            "build", str(plan), "--out", str(cls.work / "out3"), "--image", "installer", "--image", "os",
-            "--parents", f"dir://{cls.work / 'out1'}", "--builder-image", tag, *files(),
-        )  # fmt: skip
-        children = cls.work / "children"
-        shutil.copytree(EXAMPLES, children)
-        with (children / "factory.toml").open("a") as handle:
-            handle.write(CHILDREN)
-        child_files = ["--lock", str(children / "lock.json"), "--definition", str(children / "factory.toml")]
-        children_plan = cls.work / "children-plan.json"
-        factory("plan", *child_files, "--out", str(children_plan))
-        factory("fetch", str(children_plan))
-        cls.children_plan = json.loads(children_plan.read_text())
-        factory(
-            "build", str(children_plan), "--out", str(cls.work / "out2"),
-            "--image", "os-tools", "--image", "installer-tools",
-            "--parents", f"dir://{cls.work / 'out1'}", "--builder-image", tag, *child_files,
-        )  # fmt: skip
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -165,6 +149,33 @@ class BootingBuildTest(unittest.TestCase):
 
     def initrd_members(self, kit: Path, contents: tuple[str, ...] = ()) -> list[initrd.Member]:
         return initrd.members(str(kit_initrd(kit, self.work)), contents=contents)
+
+
+@unittest.skipUnless(os.environ.get("DIF_INTEGRATION") == "1", "set DIF_INTEGRATION=1 to run integration tests")
+class BootingBuildTest(BootingBase):
+    """The contents of what core, the installer, the os and a child of each build to."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        tag = builder_images.image()
+        (ROOT / "dist").mkdir(exist_ok=True)
+        cls.scratch = tempfile.TemporaryDirectory(prefix="integration-booting-", dir=ROOT / "dist")
+        cls.work = Path(cls.scratch.name)
+        cls.plan = build_first(cls.work, tag)
+        children = cls.work / "children"
+        shutil.copytree(EXAMPLES, children)
+        with (children / "factory.toml").open("a") as handle:
+            handle.write(CHILDREN)
+        child_files = ["--lock", str(children / "lock.json"), "--definition", str(children / "factory.toml")]
+        children_plan = cls.work / "children-plan.json"
+        factory("plan", *child_files, "--out", str(children_plan))
+        factory("fetch", str(children_plan))
+        cls.children_plan = json.loads(children_plan.read_text())
+        factory(
+            "build", str(children_plan), "--out", str(cls.work / "out2"),
+            "--image", "os-tools", "--image", "installer-tools",
+            "--parents", f"dir://{cls.work / 'out1'}", "--builder-image", tag, *child_files,
+        )  # fmt: skip
 
     # ---- the os tarball ---------------------------------------------------------------------------
 
@@ -209,33 +220,6 @@ class BootingBuildTest(unittest.TestCase):
                 while block := handle.read(1 << 22):
                     self.assertNotIn(snapshot, tail + block, f"{path.name} holds the build snapshot ID")
                     tail = block[-len(snapshot) :]
-
-    # ---- byte for byte ----------------------------------------------------------------------------
-
-    def test_two_builds_of_the_os_and_the_installer_from_one_plan_give_the_same_bytes(self) -> None:
-        for first, second in (
-            (self.os_tarball(), self.os_tarball("out3")),
-            (self.kit(), self.kit("out3")),
-        ):
-            self.assertEqual(first.name, second.name)
-            self.assertEqual(sha256_of(first), sha256_of(second), f"two builds of {first.name} differ")
-
-    def test_the_byte_equal_check_passes_on_the_second_build(self) -> None:
-        printed = factory("test", str(self.work / "out3"), "--check", "byte-equal", "--twin", str(self.work / "out1"))
-        self.assertIn("os: byte-equal PASSED", printed)
-        self.assertIn("installer: byte-equal PASSED", printed)
-
-    def test_engine_revision_guard(self) -> None:
-        for label, path, expected in (
-            ("os", self.os_tarball(), EXPECTED_OS),
-            ("installer", self.kit(), EXPECTED_INSTALLER),
-        ):
-            self.assertIn(ENGINE, expected, f"record the example {label}'s digest for engine revision {ENGINE}")
-            self.assertEqual(
-                sha256_of(path),
-                expected[ENGINE],
-                f"the example {label}'s bytes changed without a raised engine revision",
-            )
 
     # ---- the installer kit ------------------------------------------------------------------------
 
@@ -361,6 +345,51 @@ class BootingBuildTest(unittest.TestCase):
     def test_a_build_leaves_no_scratch_directory_behind(self) -> None:
         for out in ("out1", "out2"):
             self.assertEqual(sorted(path.name for path in (self.work / out).iterdir() if path.name.startswith(".")), [])
+
+
+@unittest.skipUnless(os.environ.get("DIF_INTEGRATION") == "1", "set DIF_INTEGRATION=1 to run integration tests")
+class BootingReproducibleTest(BootingBase):
+    """The installer and the os built twice from one plan give the same bytes."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        tag = builder_images.image()
+        (ROOT / "dist").mkdir(exist_ok=True)
+        cls.scratch = tempfile.TemporaryDirectory(prefix="integration-booting-twin-", dir=ROOT / "dist")
+        cls.work = Path(cls.scratch.name)
+        cls.plan = build_first(cls.work, tag)
+        # The same plan again, for the installer and the os only: their parent core is out1's.
+        factory(
+            "build", str(cls.work / "plan.json"), "--out", str(cls.work / "out3"), "--image", "installer",
+            "--image", "os", "--parents", f"dir://{cls.work / 'out1'}", "--builder-image", tag, *files(),
+        )  # fmt: skip
+
+    # ---- byte for byte ----------------------------------------------------------------------------
+
+    def test_two_builds_of_the_os_and_the_installer_from_one_plan_give_the_same_bytes(self) -> None:
+        for first, second in (
+            (self.os_tarball(), self.os_tarball("out3")),
+            (self.kit(), self.kit("out3")),
+        ):
+            self.assertEqual(first.name, second.name)
+            self.assertEqual(sha256_of(first), sha256_of(second), f"two builds of {first.name} differ")
+
+    def test_the_byte_equal_check_passes_on_the_second_build(self) -> None:
+        printed = factory("test", str(self.work / "out3"), "--check", "byte-equal", "--twin", str(self.work / "out1"))
+        self.assertIn("os: byte-equal PASSED", printed)
+        self.assertIn("installer: byte-equal PASSED", printed)
+
+    def test_engine_revision_guard(self) -> None:
+        for label, path, expected in (
+            ("os", self.os_tarball(), EXPECTED_OS),
+            ("installer", self.kit(), EXPECTED_INSTALLER),
+        ):
+            self.assertIn(ENGINE, expected, f"record the example {label}'s digest for engine revision {ENGINE}")
+            self.assertEqual(
+                sha256_of(path),
+                expected[ENGINE],
+                f"the example {label}'s bytes changed without a raised engine revision",
+            )
 
 
 if __name__ == "__main__":

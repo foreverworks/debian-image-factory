@@ -14,6 +14,9 @@ checksums` fills its sha256 from that index after checking the repository's sign
 Needs docker, network access to snapshot.debian.org and cli.github.com, and about 3 GiB of memory per boot.
 Builds the builder and boot images (`scripts/builder build`, `scripts/builder vm`). Takes about 20 minutes
 under TCG.
+
+Two classes, each building the flag-on images for itself: M5BootTest boots them, M5AcceptanceTest publishes
+them and plans and builds the flag-off and moved-baseline cases. A parallel run puts them on two workers.
 """
 
 import contextlib
@@ -26,7 +29,7 @@ import tempfile
 import unittest
 import urllib.request
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import input_lock
 
@@ -120,43 +123,92 @@ def tested(out: Path, *argv: str) -> str:
     return printed.getvalue()
 
 
+class Prepared(NamedTuple):
+    """What both classes below start from: the definition with its lock, and the flag-on build of the three images."""
+
+    work: Path
+    definition: Path
+    lock: Path
+    files: list[str]
+    plan: Path
+    out: Path
+
+
+def prepare(work: Path, builder: str) -> Prepared:
+    """Copy the examples, add the vendor package's checksums, then plan, fetch and build core, the installer and
+    the OS with the vendor flag on."""
+    definition = work / "def"
+    shutil.copytree(EXAMPLES, definition)
+    lock = definition / "lock.json"
+    vendor_lock(EXAMPLES / "lock.json", lock)
+    files = ["--lock", str(lock), "--definition", str(definition / "factory.toml")]
+    factory("lock", "checksums", *files, "--entry", "gh")
+    on = work / "plan-on.json"
+    factory("plan", *files, "--param", "vendor_tools=true", "--out", str(on))
+    factory("fetch", str(on))
+    out_on = work / "out-on"
+    built = ["--image", "core", "--image", "installer", "--image", "os"]
+    factory("build", str(on), "--out", str(out_on), *built, "--builder-image", builder, *files)
+    return Prepared(work, definition, lock, files, on, out_on)
+
+
+def scratch_of(prefix: str) -> tempfile.TemporaryDirectory[str]:
+    # Under dist/, not /tmp: the docker daemon mounts these paths from its own view of the host.
+    (ROOT / "dist").mkdir(exist_ok=True)
+    # DIF_KEEP=1 keeps the artifacts, the plans and any boot's serial log for a look after a failure.
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=ROOT / "dist", delete=os.environ.get("DIF_KEEP") != "1")
+
+
 @unittest.skipUnless(os.environ.get("DIF_INTEGRATION") == "1", "set DIF_INTEGRATION=1 to run integration tests")
-class M5AcceptanceTest(unittest.TestCase):
+class M5BootTest(unittest.TestCase):
+    """The installer and the OS built with the flag on pass every check, their boots in QEMU included."""
+
     scratch: ClassVar[tempfile.TemporaryDirectory[str]]
-    work: ClassVar[Path]
-    plans: ClassVar[dict[str, dict[str, dict[str, object]]]]
     tested: ClassVar[str]
 
     @classmethod
     def setUpClass(cls) -> None:
         builder, vm_image = builder_images.image(), builder_images.image("vm")
-        # Under dist/, not /tmp: the docker daemon mounts these paths from its own view of the host.
-        (ROOT / "dist").mkdir(exist_ok=True)
-        # DIF_KEEP=1 keeps the artifacts, the plans and any boot's serial log for a look after a failure.
-        keep = os.environ.get("DIF_KEEP") == "1"
-        cls.scratch = tempfile.TemporaryDirectory(prefix="integration-m5-", dir=ROOT / "dist", delete=not keep)
+        cls.scratch = scratch_of("integration-m5-boot-")
+        prepared = prepare(Path(cls.scratch.name), builder)
+        definition = prepared.definition / "factory.toml"
+        cls.tested = tested(prepared.out, "--definition", str(definition), "--vm-image", vm_image)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.scratch.cleanup()
+
+    def test_every_check_of_the_installer_and_the_os_passed_boots_included(self) -> None:
+        for image, boot in (("installer", "installer-boot"), ("os", "os-boot")):
+            lines = {line.split(" ")[1]: line for line in self.tested.splitlines() if line.startswith(f"{image}: ")}
+            for check in (boot, "two-clones"):
+                self.assertTrue(lines.get(check, "").startswith(f"{image}: {check} PASSED"), self.tested)
+            failed = [line for line in lines.values() if " FAILED" in line]
+            self.assertEqual(failed, [], self.tested)
+
+
+@unittest.skipUnless(os.environ.get("DIF_INTEGRATION") == "1", "set DIF_INTEGRATION=1 to run integration tests")
+class M5AcceptanceTest(unittest.TestCase):
+    """A flag off removes its module from both images and changes both identities; moving the baseline rebuilds
+    the OS and nothing else. Built and published apart from the boots, so a parallel run spreads the two."""
+
+    scratch: ClassVar[tempfile.TemporaryDirectory[str]]
+    work: ClassVar[Path]
+    plans: ClassVar[dict[str, dict[str, dict[str, object]]]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        builder = builder_images.image()
+        cls.scratch = scratch_of("integration-m5-")
         work = cls.work = Path(cls.scratch.name)
-        definition = work / "def"
-        shutil.copytree(EXAMPLES, definition)
-        lock = definition / "lock.json"
-        vendor_lock(EXAMPLES / "lock.json", lock)
-        files = ["--lock", str(lock), "--definition", str(definition / "factory.toml")]
-        factory("lock", "checksums", *files, "--entry", "gh")
+        prepared = prepare(work, builder)
+        files, definition, lock = prepared.files, prepared.definition, prepared.lock
         moved = definition / "lock-moved.json"
         shutil.copy(lock, moved)
         factory("lock", "baseline", "--lock", str(moved), "--definition", str(definition / "factory.toml"),
                 "--id", MOVED_BASELINE)  # fmt: skip
         published = f"dir://{work / 'published'}"
-
-        # The flag on: build, test (boots included) and publish core, the installer and the OS.
-        on = work / "plan-on.json"
-        factory("plan", *files, "--param", "vendor_tools=true", "--out", str(on))
-        factory("fetch", str(on))
-        out_on = work / "out-on"
-        built = ["--image", "core", "--image", "installer", "--image", "os"]
-        factory("build", str(on), "--out", str(out_on), *built, "--builder-image", builder, *files)
-        cls.tested = tested(out_on, "--definition", str(definition / "factory.toml"), "--vm-image", vm_image)
-        factory("publish", str(out_on), "--to", published)
+        factory("publish", str(prepared.out), "--to", published)
 
         # The flag off and the moved baseline, each planned against what was published.
         off = work / "plan-off.json"
@@ -179,16 +231,6 @@ class M5AcceptanceTest(unittest.TestCase):
 
     def state(self, plan: str, image: str) -> str:
         return str(self.plans[plan][image]["state"])
-
-    # ---- both boot in QEMU ------------------------------------------------------------------------
-
-    def test_every_check_of_the_installer_and_the_os_passed_boots_included(self) -> None:
-        for image, boot in (("installer", "installer-boot"), ("os", "os-boot")):
-            lines = {line.split(" ")[1]: line for line in self.tested.splitlines() if line.startswith(f"{image}: ")}
-            for check in (boot, "two-clones"):
-                self.assertTrue(lines.get(check, "").startswith(f"{image}: {check} PASSED"), self.tested)
-            failed = [line for line in lines.values() if " FAILED" in line]
-            self.assertEqual(failed, [], self.tested)
 
     # ---- a flag off removes its module from both and changes both identities --------------------
 
