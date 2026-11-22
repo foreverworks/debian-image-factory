@@ -98,14 +98,14 @@ def artifacts_in(out_dir: Path) -> list[fileartifacts.FileArtifact]:
     return found
 
 
-def report_additions(found: sign.Additions, where: str, require: bool, out: TextIO) -> None:
+def report_additions(found: sign.Additions, where: str, require: bool, out: TextIO, held: str = "there") -> None:
     """Say what a signed publish left alone: held lines that are no record (a warning each), records the target
     already holds (said), and records it holds unsigned, which stay unsigned: a warning with their count, or a
     failure when `require` (`--require-signed-target`)."""
     for warning in found.ignored:
         print(f"{where}: warning: {warning}", file=out)
     if found.skipped:
-        print(f"{where}: {found.skipped} records are already there and are not signed again", file=out)
+        print(f"{where}: {found.skipped} records are already {held} and are not signed again", file=out)
     if found.unsigned_held:
         why = (
             f"{found.unsigned_held} of them are not signed in the target and stay unsigned: a record the target "
@@ -452,7 +452,7 @@ def signed_for_registry(
         found = sign.to_add(signer, [one.decode("utf-8") for one in lines], held, labels)
     except sign.SignError as error:
         raise commands.Failed(f"{client.name}: {error}") from None
-    report_additions(found, client.name, require_signed, out)
+    report_additions(found, client.name, require_signed, out, "attached")
     return [one.encode("utf-8") for one in found.lines]
 
 
