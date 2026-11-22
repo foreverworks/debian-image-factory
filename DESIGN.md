@@ -1682,6 +1682,22 @@ pre-release (3.16.0a2 today), so a coming break is seen weeks before it matters.
 **On a release tag, gating the publish:** the full matrix, and the slow integration tests below
 (real image builds and VM boots). A tag whose integration tests fail publishes nothing.
 
+**Tiers run in parallel.** `scripts/test unit`, `integration` and `boot` run through `scripts/run-tests`,
+which schedules test classes (a class's tests share its `setUpClass` fixture, so a class is the smallest
+unit that is not split) across worker processes, longest first, from the timings in
+`tests/durations.json`. The default number of workers is the smaller of the CPUs and the available memory
+divided by a per-tier budget (0.5 GiB for unit, 3 GiB for integration, 6 GiB for boot, where a QEMU guest and
+mmdebstrap run), the available memory being the tighter of `MemAvailable` and the cgroup's `memory.max`
+less `memory.current`; a shared or limited machine is never run into its ceiling. `-j` overrides it. A worker keeps its own log, and the failures of every worker are printed
+together; the status is non-zero if any test failed. `--shard I/N` takes the I-th of N slices of a tier,
+balanced by those timings, and each shard is parallel inside its runner, so in CI the integration tier
+(`integration.yml`, called by the release) is a matrix of shards and its wall clock is the longest shard.
+`--measure` rewrites the timings. Tests that run side by side must not share state: each makes its scratch
+directory with a unique name, registries bind port 0, boot containers have unique names, the download
+cache is content addressed and written atomically, the builder image is built once per run under a file
+lock (`tests/support/builder_images.py`), and a test that checks a container or an image is left behind
+looks for its own, never for a change in the whole daemon.
+
 **Unit, seconds, no network, no root**
 
 - Definition: tree validation, kind compatibility, `used_by` against images, parameters.

@@ -11,6 +11,16 @@
 #   scripts/test matrix        the unit tier in docker on the Python floor and on the newest stable
 #   scripts/test all           static, unit and matrix (add integration by naming it)
 #
+# The unit, integration and boot tiers run their test classes in parallel (scripts/run-tests): longest class first,
+# each worker's log in dist/test-<tier>/ and the failures of all of them printed together at the end. Options after the tier go to it:
+#
+#   -j N (or DIF_JOBS=N)   N workers instead of the default, the smaller of the CPUs and the free memory over
+#                          a per-tier budget (unit 0.5 GiB, integration 3, boot 6); -j 1 runs serially
+#   --shard I/N            only the I-th of N shards of the tier, balanced by the measured time of each class
+#                          (CI runs the integration tier as a matrix of shards)
+#   --measure              rewrite tests/durations.json, the class timings the schedule is built from
+#   --list                 print the schedule and run nothing
+#
 # Tools come from PATH (what CI installs from requirements-dev.txt) or, when missing, from uvx at the
 # version requirements-dev.in pins. Test output goes to dist/test-<tier>.log, then is printed.
 set -euo pipefail
@@ -54,6 +64,7 @@ static() {
     # a script is module __main__ to mypy: one run each, or two of them clash
     tool mypy scripts/incus-vm
     tool mypy scripts/action-support
+    tool mypy scripts/run-tests
     echo "== check-ignores"
     python3 scripts/check-ignores
     echo "== shellcheck"
@@ -66,20 +77,13 @@ static() {
     tool shellcheck dist/action-shell/*.sh
 }
 
-# unit_like <name> [VAR=value...]: unittest discover, output to a file, printed, exit with its status.
-unit_like() {
-    local name=$1
+# parallel <tier> [run-tests options...]: the tier's test classes across processes (scripts/run-tests), whose
+# logs are in dist/test-<tier>/ and all together in dist/test-<tier>.log.
+parallel() {
+    local tier=$1
     shift
     mkdir -p dist
-    local log=dist/test-$name.log status=0
-    if [ -n "${UNITTEST_MODULES:-}" ]; then
-        # shellcheck disable=SC2086 # a list of module names
-        env "$@" PYTHONPATH=src:.vendor python3 -m unittest -v $UNITTEST_MODULES >"$log" 2>&1 || status=$?
-    else
-        env "$@" PYTHONPATH=src:.vendor python3 -m unittest discover -s tests -t . >"$log" 2>&1 || status=$?
-    fi
-    cat "$log"
-    return "$status"
+    PYTHONPATH=src:.vendor python3 scripts/run-tests "$tier" "$@"
 }
 
 # The unit tier on the floor (3.13, Debian 13's python3) and the newest stable, in docker. The worktree
@@ -154,17 +158,16 @@ incus_steps() {
 }
 
 tier=${1:-}
+shift || true
 python3 scripts/vendor-input-lock
 case "$tier" in
 static) static ;;
-unit) unit_like unit ;;
-integration) unit_like integration DIF_INTEGRATION=1 ;;
-boot) UNITTEST_MODULES="tests.integration.test_boot_checks tests.integration.test_m5_acceptance" unit_like boot DIF_INTEGRATION=1 ;;
+unit | integration | boot) parallel "$tier" "$@" ;;
 matrix) matrix ;;
 incus) incus_tier ;;
 all)
     static
-    unit_like unit
+    parallel unit
     matrix
     ;;
 *)

@@ -413,8 +413,15 @@ release is v0.6.3. Version 1.0, with optional signing and docs for strangers, co
 
 `scripts/test static`, `scripts/test unit` and `scripts/test integration` run the same checks CI
 does (the last needs Docker and network access to snapshot.debian.org); `scripts/test boot` runs only
-the tests that boot images, and `scripts/test matrix` the unit tier on the oldest and newest Python. Issues and questions are
-welcome.
+the tests that boot images, and `scripts/test matrix` the unit tier on the oldest and newest Python.
+The unit, integration and boot tiers run their test classes in parallel, one worker per CPU,
+longest class first, never more workers than the free memory allows (0.5 GiB a worker for unit, 3 GiB for
+integration, 6 GiB for boot; the count and the reason are printed). `-j N` or `DIF_JOBS=N` sets the number
+of workers and `-j 1` runs serially. Each worker's
+log is in `dist/test-<tier>/`, and the failures of all of them are printed together at the end.
+`--shard I/N` runs one slice of a tier, which is how CI spreads the integration tier over several
+runners, and `--measure` refreshes `tests/durations.json`, the timings the schedule is built from.
+Issues and questions are welcome.
 
 ## License
 
