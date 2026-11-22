@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Final
 
 from input_lock.identity import HEX64
-from input_lock.records import PROVENANCE_PREDICATE
 
 from .. import commands, fileartifacts, incus, oci, ocilayout, planfile, published, records
 
@@ -150,30 +149,13 @@ def incus_rootfs(parent: ParentArtifact) -> Path:
 
 
 def incus_lineage(parent: ParentArtifact) -> list[records.Parent]:
-    """The images an Incus image descends from, nearest first: its parent, then every ancestor the
-    parent's own provenance names (`parent: <image>`, `ancestor: <image>`), up to core."""
-    chain = [records.Parent(parent.image, parent.digest)]
-    if parent.kind == "core":
-        return chain
-    if parent.path is None:
-        raise commands.Failed(f"{parent.name}: its records are needed to list the images below it")
-    path = parent.path.parent / published.records_name_for(parent.digest)
-    try:
-        statements = published.parse_envelopes(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, published.RecordsError) as error:
-        raise commands.Failed(f"{path.name}: the records of {parent.name} cannot be read ({error})") from None
-    lines = {
-        one.build.ancestors
-        for one in statements
-        if one.build is not None and any(s.sha256 == parent.digest for s in one.subjects)
-    }
-    if len(lines) != 1:
-        # a rebuild of the same bytes adds a provenance record; all of them must name the same ancestors
-        raise commands.Failed(
-            f"{path.name}: the provenance records of {parent.name} name {len(lines)} ancestries, not one"
-        )
-    chain.extend(records.Parent(name, digest) for name, digest in next(iter(lines)))
-    return chain
+    """The images an Incus image descends from, nearest first: `ancestry` over the records beside its
+    metadata tarball."""
+
+    def beside(name: str) -> Path | None:
+        return None if parent.path is None else parent.path.parent / name
+
+    return list(ancestry(parent, beside))
 
 
 def base_of(parent: ParentArtifact) -> Base:
@@ -351,11 +333,12 @@ def lineage(parent: ParentArtifact, find: Finder) -> tuple[ParentArtifact, ...]:
     return tuple(chain)
 
 
-def file_ancestors(parent: ParentArtifact, find: Finder) -> tuple[records.Parent, ...]:
-    """`parent` and every image above it up to core, nearest first, for a parent whose artifact is one file
-    (core, os, installer). Such an artifact names nothing of its own ancestry, so it is read from the
-    provenance beside it (`<digest>.intoto.jsonl`, found by `find`): its own `parent:` and `ancestor:`
-    dependencies. Core has no ancestors, so its records are not needed."""
+def ancestry(parent: ParentArtifact, find: Finder) -> tuple[records.Parent, ...]:
+    """`parent` and every image above it up to core, nearest first, for a parent whose artifact names nothing
+    of its own ancestry (core, os, installer, Incus): it is read from the provenance beside it
+    (`<digest>.intoto.jsonl`, found by `find`), its `parent:` and `ancestor:` dependencies. Core has no
+    ancestors, so its records are not needed. A rebuild of the same bytes adds a provenance record: they
+    must all name the same ancestors."""
     chain = [records.Parent(parent.image, parent.digest)]
     if parent.kind == "core":
         return tuple(chain)
@@ -363,44 +346,20 @@ def file_ancestors(parent: ParentArtifact, find: Finder) -> tuple[records.Parent
     path = find(name)
     if path is None:
         raise commands.Failed(
-            f"{parent.name}: its records ({name}) are not in the build's output or in --parents: "
+            f"{parent.name}: its records are needed ({name} is not in the build's output or in --parents): "
             "they name the images below it"
         )
     try:
-        statements = records.decode_statements(path.read_text(encoding="utf-8"))
-    except (records.RecordsError, OSError, UnicodeDecodeError) as error:
-        raise commands.Failed(f"{path}: {error}") from None
-    provenance = next((one for one in statements if one.get("predicateType") == PROVENANCE_PREDICATE), None)
-    found = provenance_ancestors(provenance, parent.digest)
-    if found is None:
-        raise commands.Failed(f"{path}: no provenance of {parent.name} naming what it is built on")
-    return (*chain, *found)
-
-
-def provenance_ancestors(provenance: dict[str, object] | None, digest: str) -> list[records.Parent] | None:
-    """The `parent:` and `ancestor:` dependencies of a provenance statement whose first subject is `digest`,
-    in order; None when the statement is not one or describes another artifact."""
-    if provenance is None:
-        return None
-    subjects = provenance.get("subject")
-    predicate = provenance.get("predicate")
-    if not isinstance(subjects, list) or not subjects or not isinstance(subjects[0], dict):
-        return None
-    if subjects[0].get("digest") != {"sha256": digest} or not isinstance(predicate, dict):
-        return None
-    definition = predicate.get("buildDefinition")
-    dependencies = definition.get("resolvedDependencies") if isinstance(definition, dict) else None
-    if not isinstance(dependencies, list):
-        return None
-    found: list[records.Parent] = []
-    for one in dependencies:
-        if not isinstance(one, dict):
-            continue
-        label, digests = one.get("name"), one.get("digest")
-        if not isinstance(label, str) or not isinstance(digests, dict):
-            continue
-        for prefix in ("parent: ", "ancestor: "):
-            sha256 = digests.get("sha256")
-            if label.startswith(prefix) and isinstance(sha256, str) and HEX64.fullmatch(sha256):
-                found.append(records.Parent(label.removeprefix(prefix), sha256))
-    return found
+        statements = published.parse_envelopes(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, published.RecordsError) as error:
+        raise commands.Failed(f"{path.name}: the records of {parent.name} cannot be read ({error})") from None
+    lines = {
+        one.build.ancestors
+        for one in statements
+        if one.build is not None and any(s.sha256 == parent.digest for s in one.subjects)
+    }
+    if len(lines) != 1:
+        raise commands.Failed(
+            f"{path.name}: the provenance records of {parent.name} name {len(lines)} ancestries, not one"
+        )
+    return (*chain, *(records.Parent(name, digest) for name, digest in next(iter(lines))))

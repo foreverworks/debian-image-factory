@@ -3,6 +3,7 @@ kind is found and its ancestors read from its records, and `build_booting` end t
 container replaced by a function that writes what the real one would (an os tarball, or a kit written by
 initrd.py itself, and dpkg's status)."""
 
+import base64
 import json
 import re
 import shutil
@@ -377,33 +378,53 @@ class AncestryTest(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.dir = Path(scratch.name)
 
-    def provenance(self, digest: str, *dependencies: tuple[str, str]) -> dict[str, object]:
-        return {
+    def write_records(self, digest: str, *dependencies: tuple[str, str]) -> Path:
+        """A records file beside the parent: one provenance statement about `digest` naming `dependencies`."""
+        statement = {
+            "_type": "https://in-toto.io/Statement/v1",
             "predicateType": "https://slsa.dev/provenance/v1",
             "subject": [{"name": "x", "digest": {"sha256": digest}}],
             "predicate": {
                 "buildDefinition": {
+                    "externalParameters": {"image": "kit"},
+                    "internalParameters": {"identity": "ab" * 32},
                     "resolvedDependencies": [
                         {"uri": "oci://builder", "digest": {"sha256": "5" * 64}},
                         *({"name": name, "digest": {"sha256": value}} for name, value in dependencies),
-                    ]
+                    ],
                 }
             },
         }
+        envelope = {
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": base64.b64encode(json.dumps(statement).encode()).decode(),
+        }
+        path = self.dir / published.records_name_for(digest)
+        path.write_text(json.dumps(envelope) + "\n")
+        return path
 
     def test_core_needs_no_records(self) -> None:
         core_ = parents.ParentArtifact("core", "core", "core.tar.gz", "a" * 64, None)
-        self.assertEqual(parents.file_ancestors(core_, lambda name: None), (records.Parent("core", "a" * 64),))
+        self.assertEqual(parents.ancestry(core_, lambda name: None), (records.Parent("core", "a" * 64),))
 
     def test_the_parents_own_parent_and_ancestors_follow_it(self) -> None:
-        found = parents.provenance_ancestors(
-            self.provenance("b" * 64, ("parent: os", "c" * 64), ("ancestor: core", "a" * 64)), "b" * 64
+        path = self.write_records("b" * 64, ("parent: os", "c" * 64), ("ancestor: core", "a" * 64))
+        kit = parents.ParentArtifact("kit", "installer", "kit.tar", "b" * 64, None)
+        self.assertEqual(
+            parents.ancestry(kit, lambda name: path),
+            (records.Parent("kit", "b" * 64), records.Parent("os", "c" * 64), records.Parent("core", "a" * 64)),
         )
-        self.assertEqual(found, [records.Parent("os", "c" * 64), records.Parent("core", "a" * 64)])
 
     def test_records_of_another_artifact_are_not_read_as_the_parents(self) -> None:
-        self.assertIsNone(parents.provenance_ancestors(self.provenance("b" * 64, ("parent: core", "a" * 64)), "d" * 64))
-        self.assertIsNone(parents.provenance_ancestors(None, "d" * 64))
+        path = self.write_records("b" * 64, ("parent: core", "a" * 64))
+        other = parents.ParentArtifact("kit", "installer", "kit.tar", "d" * 64, None)
+        with self.assertRaisesRegex(commands.Failed, "name 0 ancestries, not one"):
+            parents.ancestry(other, lambda name: path)
+
+    def test_records_that_are_not_found_are_needed(self) -> None:
+        kit = parents.ParentArtifact("kit", "installer", "kit.tar", "b" * 64, None)
+        with self.assertRaisesRegex(commands.Failed, "its records are needed"):
+            parents.ancestry(kit, lambda name: None)
 
     def test_a_parent_found_by_extension_in_a_directory(self) -> None:
         identity = "ab" * 32

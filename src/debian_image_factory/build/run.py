@@ -955,7 +955,7 @@ def build_booting(run: Run, image: str, scratch: Path, built: Mapping[str, paren
     kind = entry["kind"]
     debian_ = run.plan["debian"]
     parent = find_parent(run, image, scratch, built)
-    ancestors = parents.file_ancestors(parent, find_by_name(run, built))
+    ancestors = parents.ancestry(parent, find_by_name(run, built))
     work = scratch / "factory"
     prepare_work(
         work,
