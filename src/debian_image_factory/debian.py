@@ -5,6 +5,7 @@ verified.
 """
 
 import re
+from dataclasses import dataclass
 from typing import Final
 
 _SHA256: Final = re.compile(r"[0-9a-f]{64}")
@@ -138,3 +139,15 @@ def installed_packages(status_text: str) -> list[tuple[str, str, str]]:
             raise ValueError(f"a status paragraph lacks Package, Version or Architecture: {paragraph!r}")
         found.add((name, version, arch))
     return sorted(found)
+
+
+@dataclass(frozen=True, slots=True)
+class Suite:
+    archive: str
+    """The snapshot.debian.org archive: `debian` or `debian-security`."""
+    dist: str
+
+
+def suites(suite: str) -> tuple[Suite, ...]:
+    """The suites a build snapshot covers: main, updates and security (DESIGN section 2, goal 1)."""
+    return (Suite("debian", suite), Suite("debian", f"{suite}-updates"), Suite("debian-security", f"{suite}-security"))

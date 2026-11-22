@@ -21,6 +21,8 @@ from typing import Final
 from input_lock import Package
 
 from . import archive, debian, remote
+from .debian import Suite as Suite
+from .debian import suites as suites
 
 SNAPSHOT_SERVICE: Final = "https://snapshot.debian.org"
 DEFAULT_KEYRING: Final = Path("/usr/share/keyrings/debian-archive-keyring.pgp")
@@ -31,13 +33,6 @@ STATUS_DROP: Final = frozenset(("Filename", "Size", "MD5sum", "SHA1", "SHA256", 
 
 class ResolveError(Exception):
     """apt could not resolve a request, or resolved it in a way the factory refuses."""
-
-
-@dataclass(frozen=True, slots=True)
-class Suite:
-    archive: str
-    """The snapshot.debian.org archive: `debian` or `debian-security`."""
-    dist: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,11 +54,6 @@ class Inst:
     version: str
     arch: str
     old: str | None
-
-
-def suites(suite: str) -> tuple[Suite, ...]:
-    """The suites a build snapshot covers: main, updates and security (DESIGN section 2, goal 1)."""
-    return (Suite("debian", suite), Suite("debian", f"{suite}-updates"), Suite("debian-security", f"{suite}-security"))
 
 
 def snapshot_base(service: str, archive_name: str, snapshot_id: str) -> str:

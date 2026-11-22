@@ -136,7 +136,11 @@ own requirements.
 - **Core** is `mmdebstrap --variant=apt` with the definition's packages, files and hooks, reading
   the snapshot through the local partial mirror the fetch stage built (7.7). It then removes every
   machine identity: `/etc/machine-id` emptied, `/var/lib/dbus/machine-id`, SSH host keys, systemd's
-  random seed, apt lists and caches and logs removed. Kernel packages are refused in core.
+  random seed, apt lists and caches and logs removed, and the `/etc/hostname` and `/etc/resolv.conf`
+  mmdebstrap copies from the build container, with the apt options only the build needed. The
+  sources it read the mirror with are replaced by the image's own (`apt_sources`). The root is packed
+  by mmdebstrap as a tar and compressed with `gzip -n`, so the same inputs give the same bytes; the
+  M2 integration test builds the example core twice and compares. Kernel packages are refused in core.
 - **Children** unpack their parent's exact rootfs, enter it in a user-namespace chroot (the same
   mechanism mmdebstrap's unshare mode uses), install their packages with apt from the same local
   mirror, run their modules and hooks, and clean up identity again. A child never upgrades a package
@@ -638,8 +642,11 @@ the rare case inputs cannot see (an archive key rotation, say).
 - **Fetch, then build offline.** `fetch` downloads every index, `.deb` and external file the plan
   names into a content-addressed cache (`~/.cache/debian-image-factory/sha256/...`), checking each
   against its signed index or lock checksum. It then lays out a partial Debian mirror (signed
-  `InRelease`, the indices, the pool files needed) that the build reads through `file://`. apt
-  verifies the archive signature, index hashes and file hashes as it always does.
+  `InRelease`, the indices, the pool files needed) at `<cache>/mirror/<snapshot>/<archive>/`,
+  pool files hard-linked from the cache. The builder mounts it read-only at `/mirror`, a path with
+  no snapshot ID in it, and apt reads it with its `copy:` method (mmdebstrap refuses a `file:` mirror
+  outside the chroot). apt verifies the archive signature, index hashes and file hashes as it
+  always does.
 - **A cache is never an authority.** `--mirror https://cache.example.com/snapshot/` sends reads
   through any HTTP cache that serves snapshot.debian.org paths; what it returns is accepted only by
   checksum. This also keeps a nightly build within snapshot.debian.org's rate limits.
@@ -895,7 +902,7 @@ debian-image-factory lock checksums [--entry NAME]       fill checksums of entri
 debian-image-factory plan [--against TARGET]... [--snapshot lock|latest|ID] [--param K=V]... [--params FILE]
                           [--rebuild IMAGE --reason TEXT] [--previous PLAN] [--out FILE] > plan.json
 debian-image-factory fetch plan.json [--mirror URL] [--bundle]
-debian-image-factory build plan.json --out out/ [--image NAME]... [--offline] [--builder container|host]
+debian-image-factory build plan.json --out out/ [--image NAME]... [--builder-image REF] [--offline] [--builder container|host]
 debian-image-factory test out/ [--check NAME]...
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
 debian-image-factory publish out/ --to TARGET... [--sign none|keyless|key:REF]
@@ -905,9 +912,18 @@ debian-image-factory prune --against TARGET... --pin DIGEST... [--keep-good 5] [
 
 `lock`, `plan` and `fetch` read snapshots from snapshot.debian.org, or through `--mirror URL`, any
 server that serves its paths (`/archive/...` and `/mr/timestamp/`); `--keyring` and `--cache` say
-where the archive keyring and the download cache are. M1 ships `lock check`, `lock snapshot`,
-`lock baseline` and `plan`; each later command arrives with its milestone, and `lock checksums`
-with M5 (it is input-lock's `refresh` run against the definition).
+where the archive keyring and the download cache are. M1 shipped `lock check`, `lock snapshot`,
+`lock baseline` and `plan`; M2 adds `fetch`, `build` for core, `test` with the core checks and
+`publish` to `dir://` targets. Each later command arrives with its milestone, `fetch --bundle`
+with M6, and `lock checksums` with M5 (it is input-lock's `refresh` run against the definition).
+
+`build` reads the plan, and also the lock and the definition (`--lock`, `--definition`, as `plan`
+does): hooks and file trees live beside the definition, and provenance names the lock. Before it
+builds an image it recomputes the identity from them with the plan's package set and refuses a
+plan they no longer match, so records always describe what was built. `--builder-image REF` names
+the builder; the default is the tag `scripts/builder build` gives, until a release pins the
+published builder by digest. Images of kinds a release cannot build yet are listed as not built. `--offline` (a replay from an inputs bundle) arrives with M6 and `--builder host` later;
+every build already runs with no network.
 
 Targets are `oci://<registry>/<repository>`, `github-release://<owner>/<repo>@<tag>` and
 `dir://<path>`. `plan --against` looks identities up live in those targets (7.4); nothing about
@@ -996,7 +1012,7 @@ Each runs on the exact artifact and emits one test result.
 |---|---|---|
 | `package-set` | all | the image's dpkg status equals the plan's resolved set |
 | `locked-inputs` | all with lock entries | every entry the image uses is installed at its locked version (dpkg for `apt` entries, the module's own version probe otherwise) |
-| `no-machine-identity` | all | `/etc/machine-id` absent, empty or `uninitialized`; no `/var/lib/dbus/machine-id`, no SSH host keys, no private keys or tokens by pattern, no random seed, no cloud-init instance state |
+| `no-machine-identity` | all | `/etc/machine-id` absent, empty or `uninitialized`; no `/var/lib/dbus/machine-id`, no SSH host keys, no private keys or tokens by pattern, no random seed, no cloud-init instance state, no `/etc/hostname` content, no `/etc/resolv.conf` file (a symlink, as systemd-resolved makes, is fine) |
 | `two-clones` | all | two instances of the artifact share no identity: machine IDs and SSH host keys, where present, differ. Core and OCI run as two rootless containers, Incus as two instances, the installer and OS as two VMs |
 | `sbom-complete` | all | the SBOM lists every installed package and locked input |
 | `ancestry` | children | the parent's filesystem is the base: for OCI, the parent's layers are the first layers by digest; elsewhere, the parent's files are present unless the child's own records say it removed them |

@@ -169,14 +169,21 @@ Planning needs only python3 3.13 or newer, apt and gpgv, so any Debian or Ubuntu
 Until the first release is tagged, run the source directly: `scripts/vendor-input-lock` once, then
 `PYTHONPATH=src:.vendor python3 -m debian_image_factory`.
 
-The next milestones add the rest:
+Then build the core image and check it:
 
 ```sh
-debian-image-factory fetch plan.json
-debian-image-factory build plan.json --out out/
-debian-image-factory test out/
-debian-image-factory publish out/ --to oci://ghcr.io/example/debian
+scripts/builder build                      # the pinned builder image, from the factory's own snapshot
+debian-image-factory fetch plan.json       # every index and package the plan names, verified, in the cache
+debian-image-factory build plan.json --out out/    # core, offline, in the builder container
+debian-image-factory test out/             # the core checks, recorded beside the artifact
+debian-image-factory publish out/ --to dir:///srv/images
 ```
+
+`build` needs Docker and nothing from the network: it reads the partial mirror
+`fetch` laid out. Each artifact lands in `out/` with its records in `<digest>.intoto.jsonl`: SLSA
+provenance, an SPDX SBOM and one test result per check. Plan again with `--against
+dir:///srv/images` and the core you just published reads `reuse`. The later milestones add OCI,
+Incus, installer and OS images and the `oci://` and `github-release://` targets.
 
 In GitHub Actions, one step runs the same thing nightly, and reports `changed=false` on the nights
 when there is nothing to do. The planned interface is in [DESIGN.md, section 9](DESIGN.md#9-running-it).
@@ -235,10 +242,11 @@ it runs on the python3 Debian already ships. It is distributed as a single `.pyz
 
 ## Status and roadmap
 
-The first milestone is in: the lock and definition checks, identities, `lock check`, `lock
-snapshot`, `lock baseline` and `plan`, and a minimal pinned builder image. No image is built yet.
-Next come core builds with records, then OCI, Incus, installer and OS images, then the nightly
-"rebuild only what changed" loop. The milestones are in
+Two milestones are in. The first: the lock and definition checks, identities, `lock check`, `lock
+snapshot`, `lock baseline`, `plan` and a pinned builder image. The second builds core: `fetch` and
+its partial mirror, an offline core build that gives the same bytes from the same inputs, its SBOM
+and provenance, the core checks behind `test`, and the `dir://` target. Next come OCI, Incus,
+installer and OS images, then the nightly "rebuild only what changed" loop. The milestones are in
 [DESIGN.md, section 14](DESIGN.md#14-milestones).
 
 `scripts/test static`, `scripts/test unit` and `scripts/test integration` run the same checks CI

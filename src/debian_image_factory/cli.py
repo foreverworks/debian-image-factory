@@ -1,7 +1,7 @@
 """The command line (DESIGN 9.1). Exit codes: 0 done, 1 a check or validation failed, 2 usage.
 
-This release has `lock check`, `lock snapshot`, `lock baseline` and `plan`; the build stages
-arrive in later releases.
+This release has `lock check`, `lock snapshot`, `lock baseline`, `plan`, `fetch`, `build` (core),
+`test` and `publish` (to `dir://`); the other kinds and targets arrive in later releases.
 """
 
 import argparse
@@ -10,7 +10,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, commands, resolve
+from . import __version__, commands, publish, resolve
+from . import tools as builder
+from .build import run as build_run
 
 
 def sources_options(command: argparse.ArgumentParser) -> None:
@@ -79,6 +81,30 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--reason", help="why --rebuild is needed (required with it)")
     plan.add_argument("--previous", type=Path, metavar="PLAN", help="an earlier plan.json, to say what moved")
     plan.add_argument("--out", type=Path, metavar="FILE", help="write plan.json here instead of standard output")
+
+    build = commands_.add_parser(
+        "build", help="build the images a plan says to build, offline, from what fetch laid out"
+    )
+    build.add_argument("plan_file", type=Path, metavar="PLAN", help="the plan.json to build")
+    build.add_argument("--out", type=Path, required=True, metavar="DIR", help="where artifacts and records go")
+    files_options(build)
+    sources_options(build)
+    build.add_argument(
+        "--image", action="append", default=[], metavar="NAME", help="build this image whatever its state (repeat)"
+    )
+    build.add_argument(
+        "--builder-image",
+        default=builder.BUILDER_IMAGE,
+        metavar="REF",
+        help=f"the builder container image (default {builder.BUILDER_IMAGE}, from scripts/builder build)",
+    )
+
+    publish_ = commands_.add_parser("publish", help="copy artifacts and their records to targets")
+    publish_.add_argument("out_dir", type=Path, metavar="OUT", help="the directory build wrote")
+    publish_.add_argument("--to", action="append", default=[], metavar="TARGET", help="dir://PATH (repeat)")
+    publish_.add_argument(
+        "--sign", default="none", metavar="none", help="signing arrives in a later release; only none for now"
+    )
     return top
 
 
@@ -126,7 +152,20 @@ def dispatch(arguments: argparse.Namespace) -> int:
             except OSError as error:
                 raise commands.Failed(f"{arguments.out}: {error.strerror or error}") from None
         return status
-    raise commands.Usage("a command is needed: lock or plan")
+    if arguments.command == "build":
+        return build_run.build_command(
+            arguments.plan_file,
+            arguments.lock,
+            arguments.definition,
+            sources_of(arguments),
+            out_dir=arguments.out,
+            images=arguments.image,
+            builder_image=arguments.builder_image,
+            out=sys.stdout,
+        )
+    if arguments.command == "publish":
+        return publish.publish_command(arguments.out_dir, arguments.to, arguments.sign, sys.stdout)
+    raise commands.Usage("a command is needed: lock, plan, fetch, build, test or publish")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

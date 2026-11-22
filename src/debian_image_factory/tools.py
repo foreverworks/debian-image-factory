@@ -27,6 +27,14 @@ TOOL_PACKAGES: Final = (
 )
 """The binary packages whose versions decide the bytes the factory writes."""
 
+BUILDER_SNAPSHOT: Final = "20261121T004329Z"
+"""The archive snapshot the builder image is built from: the `debian_snapshot` of the factory's own
+lock.json (a unit test keeps them equal)."""
+
+BUILDER_IMAGE: Final = f"debian-image-factory-builder:{BUILDER_SNAPSHOT}"
+"""The builder image a build runs in unless `--builder-image` names another: the tag `scripts/builder
+build` gives the image it builds at that snapshot."""
+
 type Tool = tuple[str, str, str]
 """One installed package: name, version, architecture."""
 
