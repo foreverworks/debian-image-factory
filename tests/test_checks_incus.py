@@ -634,6 +634,17 @@ class IncusBootTest(Scratch):
         self.assertEqual(got.check, INCUS_BOOT)
         self.assertTrue(got.reason.startswith("incus failed: "))
 
+    def test_a_boot_that_never_ends_fails_at_once_without_reading_it_and_the_instances_are_deleted(self) -> None:
+        self.host.raises = ("systemctl is-system-running", subprocess.TimeoutExpired("incus", 1200))
+        got = ran(self.boot())
+        self.assertEqual(got.outcome, "FAILED")
+        self.assertEqual(got.passed, ())
+        self.assertEqual(
+            [line.split(":")[0] for line in got.failed],
+            ["cloud-init-first-boot-boot-finished"],
+        )
+        self.assertEqual(self.host.instances, {})
+
     def test_a_cloud_init_that_never_finishes_fails_and_the_instances_are_deleted(self) -> None:
         self.host.raises = ("cloud-init status", subprocess.TimeoutExpired("incus", 1200))
         got = ran(self.boot())

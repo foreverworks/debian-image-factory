@@ -242,25 +242,26 @@ def in_instance(
     return run(["exec", name, "--", "sh", "-c", script], timeout)
 
 
-SYSTEMD_WAIT_SCRIPT: Final = (
-    "systemctl is-system-running --wait >/dev/null 2>&1; "
+WAIT_FOR_SYSTEMD: Final = (
+    "if command -v systemctl >/dev/null; then systemctl is-system-running --wait >/dev/null 2>&1; "
     "until systemctl is-system-running 2>/dev/null | grep -Eqx 'running|degraded|maintenance|stopping'; "
-    "do sleep 1; done; true"
+    "do sleep 1; done; fi; "
 )
 """Until systemd says the boot ended, whatever it says (a degraded system has booted too). An exec that
 comes before systemd answers on its bus gets "offline" at once, so the state is asked again until it is
 a finished one."""
 
+SYSTEMD_WAIT_SCRIPT: Final = WAIT_FOR_SYSTEMD + "true"
+"""incus-boot's wait: read_boot then awaits cloud-init itself and judges it."""
+
 CLONE_WAIT_SCRIPT: Final = (
-    SYSTEMD_WAIT_SCRIPT.removesuffix("true")
-    + "if command -v cloud-init >/dev/null; then cloud-init status --wait >/dev/null 2>&1; fi; true"
+    WAIT_FOR_SYSTEMD + "if command -v cloud-init >/dev/null; then cloud-init status --wait >/dev/null 2>&1; fi; true"
 )
-"""The same, then until cloud-init is done: its ssh module may delete and regenerate the host keys at
-first boot, so a clone is read only after it."""
+"""two-clones' wait, then until cloud-init is done: its ssh module may delete and regenerate the host
+keys at first boot, so a clone is read only after it."""
 
 
 def wait_for_boot(name: str, run: Runner, *, cloud_init: bool) -> None:
-    """incus-boot waits for systemd only: read_boot then awaits cloud-init and judges a hang itself."""
     in_instance(name, CLONE_WAIT_SCRIPT if cloud_init else SYSTEMD_WAIT_SCRIPT, run, BOOT_TIMEOUT)
 
 
@@ -317,7 +318,13 @@ def incus_boot(imported: Imported, run: Runner = run_incus, sleep: Sleep = time.
                     if restarted.returncode != 0:
                         failed.append(f"{prefix}-{stage}-restart: {restarted.stderr.strip()}")
                         continue
-                wait_for_boot(name, run, cloud_init=False)
+                try:
+                    wait_for_boot(name, run, cloud_init=False)
+                except subprocess.TimeoutExpired:
+                    # a boot that never ends is the image's fault, like a cloud-init that never finishes; the
+                    # other boots would each wait as long again, so the check ends here
+                    failed.append(f"{prefix}-{stage}-boot-finished: the boot did not end within {BOOT_TIMEOUT:.0f} s")
+                    return result(INCUS_BOOT, passed, warned, failed)
                 ok, warn, bad = boot_tests(f"{prefix}-{stage}", token, read_boot(name, run, sleep))
                 passed += ok
                 warned += warn

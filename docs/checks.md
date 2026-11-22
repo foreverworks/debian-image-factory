@@ -248,8 +248,9 @@ finishes through NoCloud from both `cloud-init.user-data` and the older `user.us
 user, runs the given commands, and an IPv4 address is reported; all of it is still true after a
 restart.
 
-PASSED when every step succeeds. FAILED when one does not, and when cloud-init never finishes (an
-image fault). Not run when no Incus host answers or the image cannot be imported or launched.
+PASSED when every step succeeds. FAILED when one does not, and when the boot or cloud-init never
+finishes (an image fault: a boot that does not end within 20 minutes fails as
+`<key>-<stage>-boot-finished` and ends the check). Not run when no Incus host answers or the image cannot be imported or launched.
 
 The image is imported once and launched as two containers, one per user-data key, each read at its
 first boot and again after `incus restart`. Each test name starts with the key (`cloud-init` or `user`)
