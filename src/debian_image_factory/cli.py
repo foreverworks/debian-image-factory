@@ -7,10 +7,10 @@ This release has `lock check`, `lock snapshot`, `lock baseline`, `plan`, `fetch`
 import argparse
 import io
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from . import __version__, checks, commands, fetch, publish, resolve, verify
+from . import __version__, checks, commands, definition, fetch, publish, resolve, verify
 from . import tools as builder
 from .build import run as build_run
 
@@ -119,6 +119,12 @@ def parser() -> argparse.ArgumentParser:
         "--check", action="append", default=[], metavar="NAME", help="run only this check (repeat); default: the plan's"
     )
     test.add_argument("--url", default="", help="the URL of this run, recorded in each test result")
+    test.add_argument(
+        "--definition",
+        type=Path,
+        default=Path("factory.toml"),
+        help="the build definition, read for module tables (locked-inputs); default factory.toml when present",
+    )
 
     publish_ = commands_.add_parser("publish", help="copy artifacts and their records to targets")
     publish_.add_argument("out_dir", type=Path, metavar="OUT", help="the directory build wrote")
@@ -148,6 +154,16 @@ def parser() -> argparse.ArgumentParser:
         help="the definition --require-checks reads (default factory.toml)",
     )
     return top
+
+
+def test_modules(path: Path) -> Mapping[str, definition.Module] | None:
+    """The modules of the definition at `path`, for `test`; None when there is no such file."""
+    if not path.is_file():
+        return None
+    try:
+        return definition.parse(path.read_text(encoding="utf-8")).modules
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise commands.Failed(f"{path}: {error}") from None
 
 
 def sources_of(arguments: argparse.Namespace) -> commands.Sources:
@@ -209,7 +225,10 @@ def dispatch(arguments: argparse.Namespace) -> int:
             parent_targets=arguments.parents,
         )
     if arguments.command == "test":
-        return checks.test_command(arguments.out, arguments.check, sources_of(arguments), sys.stdout, url=arguments.url)
+        effects = checks.Effects(modules=test_modules(arguments.definition))
+        return checks.test_command(
+            arguments.out, arguments.check, sources_of(arguments), sys.stdout, effects=effects, url=arguments.url
+        )
     if arguments.command == "publish":
         return publish.publish_command(arguments.out_dir, arguments.to, arguments.sign, sys.stdout)
     if arguments.command == "verify":

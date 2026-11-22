@@ -19,9 +19,10 @@ import input_lock.records as rec
 
 from .. import oci, ocilayout, records
 from ..commands import Failed, Sources, Usage
+from ..definition import Module
 from ..planfile import ImageEntry, Plan, read_plan
 from ..published import ArtifactName, parse_artifact_name, records_name_for
-from . import ancestry, clones, container, layers, machine_identity, packages, resolution, snapshot, tarball
+from . import ancestry, clones, container, inputs, layers, machine_identity, packages, resolution, snapshot, tarball
 from .container import ProbeRunner
 from .dockerio import DOCKER, Docker
 from .model import (
@@ -46,15 +47,23 @@ ARTIFACT_KINDS = {"tar.gz": "core", oci.LAYOUT_EXT: "oci"}
 """The artifact name extensions `test` reads, and the kind of image each one is."""
 
 type TwoClones = Callable[[Path], CheckOutcome]
-type LockedInputs = Callable[[ImageEntry, bytes | None, ProbeRunner], CheckOutcome]
-"""The `locked-inputs` check: the plan entry, the image's dpkg status (None when it has none) and a runner
-that runs a `modules.Probe` in the image and gives (exit status, standard output)."""
+type LockedInputs = Callable[[ImageEntry, bytes | None, ProbeRunner, Mapping[str, Module] | None], CheckOutcome]
+"""The `locked-inputs` check: the plan entry, the image's dpkg status (None when it has none), a runner
+that runs a `modules.Probe` in the image and gives (exit status, standard output), and the definition's
+modules (None when `test` was given no definition)."""
 
 
-def locked_inputs_result(entry: ImageEntry, status: bytes | None, run: ProbeRunner) -> CheckOutcome:
-    """The seam the node module fills: `locked-inputs` for `entry` (DESIGN 11). Until its logic arrives
-    the check is not run, which writes no record."""
-    return NotRun(LOCKED_INPUTS, "locked-inputs logic arrives with the node module")
+def locked_inputs_result(
+    entry: ImageEntry, status: bytes | None, run: ProbeRunner, modules: Mapping[str, Module] | None
+) -> CheckOutcome:
+    """`locked-inputs` for `entry` (DESIGN 11): apt entries by the dpkg status, module entries by their
+    module's probes, keyrings named by the plan's `trust` as trust roots. A module's probe needs its table
+    (a node prefix, say), which only the definition has: without one the check is not run."""
+    used = {str(fields.get("module")) for fields in entry["inputs"].values() if fields.get("module")}
+    if modules is None and used:
+        return NotRun(LOCKED_INPUTS, "the image's modules are probed with their tables: pass --definition")
+    trust_roots = {signer["signed_by"] for signer in entry["trust"].values() if "signed_by" in signer}
+    return inputs.locked_inputs(entry["inputs"], modules or {}, status, run, trust_roots)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +73,8 @@ class Effects:
     clones_check: TwoClones = clones.two_clones
     docker: Docker = DOCKER
     locked_inputs: LockedInputs = locked_inputs_result
+    modules: Mapping[str, Module] | None = None
+    """The definition's modules, for the probes of `locked-inputs`; None when `test` has no definition."""
 
 
 # ---- finding artifacts -----------------------------------------------------------------------------
@@ -360,7 +371,7 @@ def run_in_container(
             return container.oci_run(layout.config, image, effects.docker)
         if name == TWO_CLONES:
             return container.two_clones(image, effects.docker)
-        return effects.locked_inputs(entry, status, container.run_probe(image.image, effects.docker))
+        return effects.locked_inputs(entry, status, container.run_probe(image.image, effects.docker), effects.modules)
     except (OSError, subprocess.SubprocessError) as error:
         return NotRun(name, f"docker failed: {error}")
 

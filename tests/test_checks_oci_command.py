@@ -12,8 +12,9 @@ from pathlib import Path
 from debian_image_factory import oci, records
 from debian_image_factory.checks import command
 from debian_image_factory.checks.container import ProbeRunner
-from debian_image_factory.checks.model import LOCKED_INPUTS, CheckOutcome, NotRun, result
+from debian_image_factory.checks.model import LOCKED_INPUTS, CheckOutcome, NotRun, Result, result
 from debian_image_factory.commands import Sources, Usage
+from debian_image_factory.definition import Module
 from debian_image_factory.modules import Probe
 from debian_image_factory.planfile import ImageEntry, parse_plan
 from tests.support import ocimage
@@ -425,18 +426,20 @@ class AncestryCommandTest(Base):
 
 
 class LockedInputsTest(Base):
-    def test_until_the_node_module_arrives_the_check_is_not_run(self) -> None:
+    def test_an_image_without_entries_passes_with_nothing_to_probe(self) -> None:
         built = self.out.image(checks=("locked-inputs",))
         status, printed = self.out.run(FakeDocker())
-        self.assertEqual(status, 0)
-        self.assertIn("app: locked-inputs not run: locked-inputs logic arrives with the node module", printed)
-        self.assertEqual(self.out.statements(built), [])
+        self.assertEqual(status, 0, printed)
+        self.assertIn("app: locked-inputs PASSED", printed)
+        self.assertEqual(checks_recorded(self.out.statements(built)), {"locked-inputs": "PASSED"})
 
     def test_the_seam_gets_the_entry_the_status_and_a_runner_into_the_loaded_image(self) -> None:
         built = self.out.image(checks=("locked-inputs",))
         seen: list[tuple[ImageEntry, bytes | None, str, tuple[int, str]]] = []
 
-        def locked(entry: ImageEntry, status: bytes | None, run: ProbeRunner) -> CheckOutcome:
+        def locked(
+            entry: ImageEntry, status: bytes | None, run: ProbeRunner, modules: Mapping[str, Module] | None
+        ) -> CheckOutcome:
             seen.append((entry, status, "", run(Probe("node", ("/usr/bin/node", "-v"), "v1"))))
             return result(LOCKED_INPUTS, ["locked-inputs"])
 
@@ -453,7 +456,9 @@ class LockedInputsTest(Base):
     def test_docker_failing_inside_the_seam_is_not_run(self) -> None:
         self.out.image(checks=("locked-inputs",))
 
-        def locked(entry: ImageEntry, status: bytes | None, run: ProbeRunner) -> CheckOutcome:
+        def locked(
+            entry: ImageEntry, status: bytes | None, run: ProbeRunner, modules: Mapping[str, Module] | None
+        ) -> CheckOutcome:
             raise FileNotFoundError("docker")
 
         status, printed = self.out.run(FakeDocker(), locked=locked)
@@ -463,3 +468,37 @@ class LockedInputsTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LockedInputsSeamTest(unittest.TestCase):
+    """The default `locked-inputs` seam: module probes need the definition's tables."""
+
+    def entry(self) -> ImageEntry:
+        plan = json.loads(ocimage.plan_json({"node": ocimage.entry(kind="oci", parent="core")}))
+        entry: ImageEntry = plan["images"]["node"]
+        entry["inputs"] = {
+            "node-26": {"module": "node", "version": "26.13.1", "sha256": "0" * 64, "url": "https://x/n.tar.xz"},
+            "node-release-keys": {"module": "node", "version": "1", "sha256": "1" * 64, "url": "https://x/k.kbx"},
+        }
+        entry["trust"] = {"node-26": {"signed_by": "node-release-keys", "sums_url": "https://x/SHASUMS256.txt.asc"}}
+        return entry
+
+    def test_without_a_definition_module_entries_are_not_run(self) -> None:
+        outcome = command.locked_inputs_result(self.entry(), None, lambda probe: (0, ""), None)
+        self.assertIsInstance(outcome, NotRun)
+
+    def test_the_node_probe_runs_and_the_keyring_is_a_trust_root(self) -> None:
+        modules = {"node": Module("node", "builtin:node-tarball", None, {"prefix": "/usr/local"})}
+        ran: list[tuple[str, ...]] = []
+
+        def run(probe: Probe) -> tuple[int, str]:
+            ran.append(probe.argv)
+            return 0, "v26.13.1\n"
+
+        outcome = command.locked_inputs_result(self.entry(), None, run, modules)
+        assert isinstance(outcome, Result)
+        self.assertEqual(outcome.outcome, "PASSED", outcome.failed)
+        self.assertEqual(ran, [("/usr/local/bin/node", "--version")])
+        wrong = command.locked_inputs_result(self.entry(), None, lambda probe: (0, "v26.12.0\n"), modules)
+        assert isinstance(wrong, Result)
+        self.assertEqual(wrong.outcome, "FAILED")

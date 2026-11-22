@@ -5,7 +5,7 @@ filesystem tarball and over an image's layers), `resolution` (apt, offline), and
 `dockerio` (rootless docker) are the edges.
 """
 
-from .command import test_command
+from .command import Effects, test_command
 from .model import CORE_CHECKS, OCI_CHECKS, CheckOutcome, NotRun, Result
 
-__all__ = ["CORE_CHECKS", "OCI_CHECKS", "CheckOutcome", "NotRun", "Result", "test_command"]
+__all__ = ["CORE_CHECKS", "OCI_CHECKS", "CheckOutcome", "Effects", "NotRun", "Result", "test_command"]

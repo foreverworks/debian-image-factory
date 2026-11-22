@@ -23,11 +23,9 @@ from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 from typing import Final, TextIO
-from urllib.parse import unquote, urlparse
 
 import input_lock
 from input_lock import Lock, Package
-from input_lock.lock import entry_env
 from input_lock.records import Statement, statement, subject
 
 from .. import (
@@ -44,6 +42,7 @@ from .. import (
     planfile,
     published,
     records,
+    registry,
     resolve,
 )
 from .. import plan as plan_module
@@ -161,10 +160,7 @@ def files_tar(root: Path, tree: str, facts: Mapping[str, FileFact], source_date_
 
 def input_file_name(fields: Mapping[str, input_lock.Value]) -> str:
     """The file name a hook finds a locked input under: the last segment of its rendered URL."""
-    url = fields.get("url")
-    name = unquote(urlparse(url).path.rsplit("/", 1)[-1]) if isinstance(url, str) else ""
-    unsafe = name in ("", ".", "..") or any(character in name for character in "/\\\0")
-    return "file" if unsafe else name
+    return modules.input_file_name(fields)
 
 
 def stage_run(
@@ -190,7 +186,7 @@ def stage_run(
         target.chmod(0o755)
     pairs: list[tuple[str, str]] = [("LOCK_ENTRIES", " ".join(sorted(entry["inputs"])))]
     for name in sorted(entry["inputs"]):
-        pairs.extend(entry_env(name, lock["inputs"][name]))
+        pairs.extend(input_lock.entry_env(name, lock["inputs"][name]))
         source = fetch.input_path(cache, entry["inputs"][name])
         if not source.is_file():
             raise commands.Failed(f"images.{image}: input {name} is not in the cache: run fetch first")
@@ -240,6 +236,9 @@ def prepare_work(
     )
     scripts = identity.script_paths(loaded.definition, image, entry["modules"])
     stage_run(work, loaded=loaded, lock=lock, image=image, entry=entry, cache=cache, scripts=scripts)
+    for name in entry["modules"]:
+        for helper, text in modules.helper_files(loaded.definition.modules[name]).items():
+            (work / helper).write_text(text)
     (work / LAYER_PROGRAM).write_text(
         resources.files("debian_image_factory.build").joinpath(LAYER_PROGRAM).read_text(encoding="utf-8")
     )
@@ -257,6 +256,17 @@ def prepare_work(
             hooks=scripts,
         )
     )
+
+
+def vouched(cache: Path, entry: planfile.ImageEntry) -> list[records.Remote]:
+    """The vendor's signed checksum lists (and detached signatures) `fetch` verified the image's inputs
+    against, as provenance names them beside the archive's InRelease files (DESIGN 8.2)."""
+    found: list[records.Remote] = []
+    for name in sorted(entry["inputs"]):
+        sha256 = entry["inputs"][name].get("sha256")
+        if isinstance(sha256, str):
+            found.extend(fetch.vouched_by(cache, sha256))
+    return found
 
 
 def place(source: Path, target: Path) -> None:
@@ -515,8 +525,11 @@ def verify_identity(
 
 def pull_parent(target: published.OciTarget, digest: str, dest: Path) -> Path:
     """Pull the image with manifest digest `digest` (hex) from `target` into `dest` as an OCI image layout
-    and return the layout's directory, named as a build names it. The registry publisher provides this."""
-    raise commands.Failed("oci:// parents arrive with the registry publisher")
+    (every byte checked against its digest) and return the layout's directory."""
+    try:
+        return registry.pull_layout(registry.connect(target), digest, dest)
+    except (OSError, oci.OciError) as error:
+        raise commands.Failed(f"oci://{target.registry}/{target.repository}@sha256:{digest}: {error}") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,7 +592,7 @@ def build_core(run: Run, image: str, scratch: Path) -> Result:
         digest=digest,
         packages=packages,
         source=run.source,
-        releases=run.releases,
+        releases=[*run.releases, *vouched(run.sources.cache, entry)],
         builder_=run.builder_,
         started=started,
         finished=finished,
@@ -695,7 +708,7 @@ def build_oci(run: Run, image: str, scratch: Path, built: Mapping[str, parents.P
         digest=digest,
         packages=packages,
         source=run.source,
-        releases=run.releases,
+        releases=[*run.releases, *vouched(run.sources.cache, entry)],
         builder_=run.builder_,
         started=started,
         finished=finished,

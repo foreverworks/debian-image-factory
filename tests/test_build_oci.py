@@ -303,12 +303,12 @@ class LocateTest(unittest.TestCase):
         self.assertEqual(self.locate(entry=entry, out=empty, registries=[registry], pull=pull), self.base)
         self.assertEqual(calls, [("registry.example", self.base.digest)])
 
-    def test_the_default_pull_says_the_registry_publisher_has_not_arrived(self) -> None:
+    def test_the_default_pull_names_the_registry_it_could_not_read(self) -> None:
         empty = self.dir / "empty"
         empty.mkdir()
         entry = entry_for(self.base, "cd" * 32, artifact=self.base.digest)
-        registry = published.OciTarget("registry.example", "images/oci-base")
-        with self.assertRaisesRegex(commands.Failed, "arrive with the registry publisher"):
+        registry = published.OciTarget("127.0.0.1:9", "images/oci-base")  # nothing listens on port 9
+        with self.assertRaisesRegex(commands.Failed, r"oci://127\.0\.0\.1:9/images/oci-base@sha256:"):
             self.locate(entry=entry, out=empty, registries=[registry], pull=run.pull_parent)
 
     def test_a_parent_that_is_not_core_or_oci_is_refused(self) -> None:
