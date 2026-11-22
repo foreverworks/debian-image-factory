@@ -5,6 +5,8 @@
 #   scripts/test unit          the unit tests (seconds, no network, no root)
 #   scripts/test integration   the slow tests, DIF_INTEGRATION=1 (network, docker)
 #   scripts/test boot          only the boot checks' integration tests (QEMU; KVM when /dev/kvm opens)
+#   scripts/test incus         builds core, incus-base and an Incus child, runs every check on them (the
+#                              Incus ones in scripts/incus-vm), and requires them all to pass
 #   scripts/test matrix        the unit tier in docker on the Python floor and on the newest stable
 #   scripts/test all           static, unit and matrix (add integration by naming it)
 #
@@ -97,6 +99,52 @@ matrix() {
     done
 }
 
+# The Incus boot contract (DESIGN 14's M4): core, incus-base and an Incus child of it are built from a copy
+# of the example definition with the default builder image (scripts/builder build), every check runs on
+# the host, then incus-boot and two-clones run again on an Incus host in scripts/incus-vm (the last
+# result of a check wins), and verify --require-checks must pass for all three. The build is in
+# dist/incus, the log in dist/test-incus.log.
+incus_tier() {
+    local work=dist/incus log=dist/test-incus.log status=0
+    mkdir -p dist
+    # a docker build can leave files this user cannot delete
+    if [ -e "$work" ]; then docker run --rm -v "$root/dist:/w" debian:trixie rm -rf /w/incus; fi
+    mkdir -p "$work"
+    cp -a examples "$work/examples"
+    cat >>"$work/examples/factory.toml" <<'TOML'
+
+[images.incus-tools]
+kind = "incus"
+parent = "incus-base"
+packages = ["jq"]
+hooks = ["hooks/incus-tools.sh"]
+TOML
+    printf '#!/bin/sh\nset -eu\njq --version > /usr/local/share/incus-tools-hook\n' >"$work/examples/hooks/incus-tools.sh"
+    chmod 755 "$work/examples/hooks/incus-tools.sh"
+    incus_steps "$work" >"$log" 2>&1 || status=$?
+    cat "$log"
+    return "$status"
+}
+
+incus_steps() {
+    local work=$1 snapshot artifact
+    local defs=(--lock "$work/examples/lock.json" --definition "$work/examples/factory.toml")
+    snapshot=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["debian_snapshot"])' "$work/examples/lock.json")
+    dif() { PYTHONPATH=src:.vendor python3 -m debian_image_factory "$@"; }
+    dif plan "${defs[@]}" --out "$work/plan.json"
+    dif fetch "$work/plan.json"
+    dif build "$work/plan.json" --out "$work/out" --image core --image incus-base --image incus-tools "${defs[@]}"
+    echo "== every check, on this host"
+    dif test "$work/out" --definition "$work/examples/factory.toml" || true
+    echo "== incus-boot and two-clones, on an Incus host in a VM"
+    scripts/incus-vm --snapshot "$snapshot" --share "$root:repo" -- sh -ec \
+        "cd /mnt/repo && PYTHONPATH=src:.vendor python3 -m debian_image_factory test $work/out --check incus-boot --check two-clones"
+    echo "== every required check passed"
+    for artifact in "$work"/out/core-*.tar.gz "$work"/out/*.incus.tar.gz; do
+        dif verify "$artifact" --require-checks "${defs[@]}"
+    done
+}
+
 tier=${1:-}
 python3 scripts/vendor-input-lock
 case "$tier" in
@@ -105,6 +153,7 @@ unit) unit_like unit ;;
 integration) unit_like integration DIF_INTEGRATION=1 ;;
 boot) UNITTEST_MODULES=tests.integration.test_boot_checks unit_like boot DIF_INTEGRATION=1 ;;
 matrix) matrix ;;
+incus) incus_tier ;;
 all)
     static
     unit_like unit
