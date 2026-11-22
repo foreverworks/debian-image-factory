@@ -313,6 +313,24 @@ python3 -c "import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])"
 settle $s
 sq "$out/scan.sqsh" $s -all-time "$stamp" -pf /work/devices.pseudo
 python3 /work/expect.py $s "$out/scan.json" --mtime "$stamp" --pseudo /work/devices.pseudo
+
+# 8. A tiny Incus image root, as an Incus image's rootfs holds it: dpkg's status of three packages, an
+# uninitialized machine-id, empty /run and /tmp, and the devices. The Incus checks and the build's device
+# listing read it.
+i=/work/incus-root
+mkdir -p $i/etc $i/var/lib/dpkg $i/usr/bin $i/run $i/tmp $i/dev
+printf 'uninitialized\n' >$i/etc/machine-id
+printf 'ID=debian\n' >$i/etc/os-release
+printf '#!/bin/sh\nexit 0\n' >$i/usr/bin/tool
+chmod 0755 $i/usr/bin/tool
+{
+    printf 'Package: apt\nStatus: install ok installed\nVersion: 1.0\nArchitecture: amd64\n\n'
+    printf 'Package: base-files\nStatus: install ok installed\nVersion: 1.0\nArchitecture: amd64\n\n'
+    printf 'Package: lib-a\nStatus: install ok installed\nVersion: 1.0\nArchitecture: all\n'
+} >$i/var/lib/dpkg/status
+settle $i
+sq "$out/incus-root.sqsh" $i -all-time "$stamp" -pf /work/devices.pseudo
+python3 /work/expect.py $i "$out/incus-root.json" --mtime "$stamp" --pseudo /work/devices.pseudo
 INNER
 
 docker run --rm -v "$work:/work-in:ro" -v "$out:/out" debian:trixie bash -c 'mkdir /work && cp /work-in/inner.sh /work/ && cd /work && bash /work/inner.sh'

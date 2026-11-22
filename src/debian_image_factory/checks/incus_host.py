@@ -209,6 +209,7 @@ def import_image(metadata: Path, rootfs: Path, fingerprint: str, run: Runner) ->
         return f"incus image import failed: {done.stderr.strip() or done.stdout.strip()}"
     found = imported_fingerprint(done.stdout + done.stderr)
     if found is not None and found != fingerprint:
+        forget_image(Imported(alias, found), run)  # Incus did import it: it is not left in its store
         return f"Incus computed the fingerprint {found}, the artifact's is {fingerprint}"
     return Imported(alias, fingerprint)
 
