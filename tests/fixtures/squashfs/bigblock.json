@@ -1,0 +1,7 @@
+[
+{"gid":0,"group":null,"kind":"dir","major":0,"minor":0,"mode":493,"mtime":1700000000,"nlink":2,"path":"/","sha256":null,"size":0,"target":"","uid":0,"xattrs":[]},
+{"gid":0,"group":null,"kind":"file","major":0,"minor":0,"mode":420,"mtime":1700000000,"nlink":1,"path":"/one-block.bin","sha256":"0ee3973697141af6afae5780f62dd09b447e483e32f3e3e7fe849c0939ed865e","size":131072,"target":"","uid":0,"xattrs":[]},
+{"gid":0,"group":null,"kind":"file","major":0,"minor":0,"mode":420,"mtime":1700000000,"nlink":1,"path":"/small","sha256":"4c47b3e816fbe7d40cef9f665ba8f0be1ae68b5e8e7ed70f5b6bab7f70528e8f","size":6,"target":"","uid":0,"xattrs":[]},
+{"gid":0,"group":null,"kind":"file","major":0,"minor":0,"mode":420,"mtime":1700000000,"nlink":1,"path":"/with-tail.bin","sha256":"8ffc0ad04f7a4b27cd2256b551dce7b41c39a57e3125b099cd6f2148e22ffa51","size":150000,"target":"","uid":0,"xattrs":[]},
+{"gid":0,"group":null,"kind":"file","major":0,"minor":0,"mode":420,"mtime":1700000000,"nlink":1,"path":"/zeros.bin","sha256":"c2150c7960dce0bdac72522c4ca20fac6d6fdf544c9b89079239bed9bc85b79c","size":393221,"target":"","uid":0,"xattrs":[]}
+]
