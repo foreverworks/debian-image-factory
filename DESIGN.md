@@ -141,11 +141,25 @@ own requirements.
   sources it read the mirror with are replaced by the image's own (`apt_sources`). The root is packed
   by mmdebstrap as a tar and compressed with `gzip -n`, so the same inputs give the same bytes; the
   M2 integration test builds the example core twice and compares. Kernel packages are refused in core.
-- **Children** unpack their parent's exact rootfs, enter it in a user-namespace chroot (the same
-  mechanism mmdebstrap's unshare mode uses), install their packages with apt from the same local
-  mirror, run their modules and hooks, and clean up identity again. A child never upgrades a package
-  its parent installed: the plan refuses such a resolution, because it means the parent must be
-  rebuilt first.
+- **Children** unpack their parent's exact filesystem, enter it in a chroot inside the builder
+  container (proc, a minimal `/dev` and the mirror mounted in it), install their packages with the
+  image's own apt from the same local mirror, run their modules and hooks, and clean up identity
+  again. A child never upgrades a package its parent installed: the plan refuses such a resolution,
+  because it means the parent must be rebuilt first.
+- **An OCI child's filesystem is its parent's layers, applied in order** with whiteouts honoured and
+  numeric owners, modes, times and xattrs kept. The image's own apt sources are set aside while the
+  build reads the mirror, a `policy-rc.d` refuses service starts and `start-stop-daemon` does
+  nothing, as under mmdebstrap; afterwards apt's lists, caches and logs are emptied, ldconfig's cache
+  and the build's own apt options removed, the image's sources put back, and then every machine
+  identity removed exactly as for core. The image then adds one layer holding every path that
+  differs from what was unpacked (type, mode, owner, time, content, link target, device, xattrs) and
+  a whiteout for every path that is gone (one for a removed directory); a directory whose own state
+  did not change is left out, and hard links inside the layer stay hard links. The layer is a PAX tar
+  with numeric owners, no owner names and whole-second times clamped to `SOURCE_DATE_EPOCH`, sorted by
+  path with parents first, compressed with gzip level 9 with no name and a zero time stamp. The
+  writer is a standard-library Python program run by the builder's own python3. An image that only
+  sets `oci` config adds no layer and runs no container; when its parent is core, the base layer is
+  core's tarball itself, so an image's first layer digest is the tarball's sha256.
 - **Hooks and modules run with no network.** Everything they may use was fetched and verified
   before the build started and is handed to them as files plus `LOCK_*` environment variables
   (6.5). A hook that tries to download fails.
@@ -667,7 +681,7 @@ the rare case inputs cannot see (an archive key rotation, say).
 | Kind | Files | Digest that names it | Default compression |
 |---|---|---|---|
 | core | `core-trixie-amd64-<identity16>-<digest12>.tar.gz` | sha256 of the file | gzip |
-| oci | OCI image layout, pushed to a registry | image manifest digest | layers `application/vnd.oci.image.layer.v1.tar+gzip` |
+| oci | `oci-base-trixie-amd64-<identity16>-<digest12>.oci/`, an OCI image layout directory, pushed to a registry | image manifest digest | layers `application/vnd.oci.image.layer.v1.tar+gzip` |
 | incus | `<name>.incus.tar.gz` (metadata.yaml, templates) and `<name>.rootfs.squashfs` | Incus fingerprint: sha256 of the metadata file followed by the rootfs file | gzip tarball, squashfs with its gzip compressor |
 | installer | `installer-trixie-amd64-<identity16>-<digest12>.tar`, a kit holding `vmlinuz`, `initrd.img`, `kit.json` | sha256 of the kit tarball; kernel and initrd are listed as subjects too | initrd gzip, kit tarball uncompressed |
 | os | `os-trixie-amd64-<identity16>-<digest12>.tar.gz` | sha256 of the file | gzip |
@@ -682,6 +696,12 @@ An OCI image carries standard annotations: `org.opencontainers.image.base.digest
 `org.opencontainers.image.revision` (the definition's repository and commit), and
 `io.github.foreverworks.debian-image-factory.identity` (its input identity). The image config
 carries no build time.
+
+An OCI image is its parent's layers and, when it changes the filesystem, exactly one added layer. A
+core parent's base layer is core's tarball byte for byte: its digest is the tarball's sha256 and its
+diff_id the sha256 of the decompressed tar. `build` writes the layout into a temporary name in the
+output directory and renames it into place after its records (`<manifest digest>.intoto.jsonl`)
+are written.
 
 An Incus image's `metadata.yaml`:
 
@@ -775,7 +795,10 @@ Provenance for a core build:
 The build snapshot is recorded here, in the record, because it explains the choice of versions; it
 is not in the artifact. A child adds `{"name": "parent: core", "digest": {"sha256": "<core tarball
 sha256>"}}` and its locked downloads (`{"uri": "<rendered url>", "digest": {"sha256": "..."}}`), so
-ancestry and every input are provable from the record alone.
+ancestry and every input are provable from the record alone. An OCI image further down the tree
+also adds `{"name": "ancestor: <image>", "digest": {"sha256": "..."}}` for every further ancestor up
+to core, nearest first, read from each parent's manifest annotations, so a Node image's provenance
+names core's tarball digest as well as its parent's.
 
 SBOM, abridged:
 
@@ -904,7 +927,7 @@ debian-image-factory lock checksums [--entry NAME]       fill checksums of entri
 debian-image-factory plan [--against TARGET]... [--snapshot lock|latest|ID] [--param K=V]... [--params FILE]
                           [--rebuild IMAGE --reason TEXT] [--previous PLAN] [--out FILE] > plan.json
 debian-image-factory fetch plan.json [--mirror URL] [--bundle]
-debian-image-factory build plan.json --out out/ [--image NAME]... [--builder-image REF] [--offline] [--builder container|host]
+debian-image-factory build plan.json --out out/ [--image NAME]... [--parents TARGET]... [--builder-image REF] [--offline] [--builder container|host]
 debian-image-factory test out/ [--check NAME]...
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
 debian-image-factory publish out/ --to TARGET... [--sign none|keyless|key:REF]
@@ -924,7 +947,10 @@ does): hooks and file trees live beside the definition, and provenance names the
 builds an image it recomputes the identity from them with the plan's package set and refuses a
 plan they no longer match, so records always describe what was built. `--builder-image REF` names
 the builder; the default is the tag `scripts/builder build` gives, until a release pins the
-published builder by digest. Images of kinds a release cannot build yet are listed as not built. `--offline` (a replay from an inputs bundle) arrives with M6 and `--builder host` later;
+published builder by digest. A child whose parent this run does not build reads it from `out/` (by
+artifact name: the identity prefix and the digest the plan names), then from each `--parents TARGET`
+(`dir://` holding the core tarball or an `.oci` layout, or `oci://`, pulled by digest); a parent found
+nowhere fails the build naming the image, the digest and the places looked in. Images of kinds a release cannot build yet are listed as not built. `--offline` (a replay from an inputs bundle) arrives with M6 and `--builder host` later;
 every build already runs with no network.
 
 Targets are `oci://<registry>/<repository>`, `github-release://<owner>/<repo>@<tag>` and

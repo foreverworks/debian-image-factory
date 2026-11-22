@@ -124,7 +124,8 @@ class Remote:
 
 @dataclass(frozen=True, slots=True)
 class Parent:
-    """The artifact a child image was built on: the image's name and the artifact's sha256."""
+    """An artifact a child image descends from: the image's name and the artifact's sha256 (a core
+    tarball's, or an OCI image's manifest digest)."""
 
     name: str
     sha256: str
@@ -290,7 +291,7 @@ def provenance_statement(
     in_releases: Sequence[Remote],
     builder_image: str,
     builder_digest: str,
-    parent: Parent | None,
+    ancestors: Sequence[Parent],
     builder_id: str,
     invocation_id: str | None,
     version: str,
@@ -300,8 +301,9 @@ def provenance_statement(
     """The SLSA v1 provenance of one artifact, as an in-toto Statement (DESIGN 8.2, docs/build-type-v1.md).
 
     resolvedDependencies come in this order: the definition's commit (when known), `lock.json` and each locked
-    download of `entries`, `recipe of <image>`, each InRelease, the builder image, then `parent: <name>`
-    (when given). `reason` is recorded only when there is one. Every value is the caller's: nothing here
+    download of `entries`, `recipe of <image>`, each InRelease, the builder image, then the ancestors,
+    nearest first: `parent: <name>` for the first, `ancestor: <name>` for each further one up to core (none
+    for core itself). `reason` is recorded only when there is one. Every value is the caller's: nothing here
     reads a clock, an environment or a file."""
     external: dict[str, JsonValue] = {"image": image}
     dependencies: list[ResourceDescriptor] = []
@@ -323,9 +325,11 @@ def provenance_statement(
     dependencies.append({"name": f"recipe of {image}", "digest": _sha256_of(recipe_digest, "the recipe digest")})
     dependencies.extend({"uri": one.uri, "digest": _sha256_of(one.sha256, one.uri)} for one in in_releases)
     dependencies.append({"uri": f"oci://{builder_image}", "digest": _sha256_of(builder_digest, "the builder digest")})
-    if parent is not None:
-        digest = _sha256_of(parent.sha256, "the parent digest")
-        dependencies.append({"name": f"parent: {parent.name}", "digest": digest})
+    for position, ancestor in enumerate(ancestors):
+        label = "parent" if position == 0 else "ancestor"
+        dependencies.append(
+            {"name": f"{label}: {ancestor.name}", "digest": _sha256_of(ancestor.sha256, f"the {label} digest")}
+        )
     metadata: BuildMetadata = {}
     if invocation_id:
         metadata["invocationId"] = invocation_id
