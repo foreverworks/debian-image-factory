@@ -1356,12 +1356,30 @@ the exit status is 1; it is never silent.
 
 ### 9.2 The GitHub Action
 
-A composite action at the repository root, `foreverworks/debian-image-factory@<commit>`. It reads
-the factory version from the consumer's lock (`debian-image-factory` entry), downloads that `.pyz`,
-checks its sha256 against the lock, and runs the requested steps in a builder container: the local
-tag the repository builds while it is private; from the first public release, the release's builder
-by digest, read from the `.pyz` and verified with cosign before it runs (5.4). The Action's own ref changes only when its bootstrap logic does; the factory version has
-one home, the lock.
+A composite action at the repository root, `foreverworks/debian-image-factory@<commit>` (`action.yml`).
+It reads the factory version from the consumer's lock, downloads that release's `.pyz`, checks its
+sha256 against the lock, and runs the requested steps with it. The Action's own ref changes only when
+its bootstrap logic does; the factory version has one home, the lock.
+
+The lock entry is the reserved `debian-image-factory` one (6.1), which `lock checksums --entry
+debian-image-factory` fills once the release exists. The Action reads three of its fields and renders
+`{version}` in the url:
+
+```json
+"debian-image-factory": {
+  "datasource": "github-releases",
+  "depName": "foreverworks/debian-image-factory",
+  "extractVersion": "^v(?<version>.+)$",
+  "sha256": "<sha256 of the .pyz>",
+  "url": "https://github.com/foreverworks/debian-image-factory/releases/download/v{version}/debian-image-factory-{version}.pyz",
+  "version": "0.6.0"
+}
+```
+
+It refuses the placeholder checksum of an unreleased lock, a url that is not https, a download whose
+sha256 is not the lock's, and a `.pyz` that does not report the lock's version. `scripts/action-support`
+(standard library only) reads the entry and the plan, so the Action holds no logic the factory does not:
+`changed` is the factory's own `plan.changed`.
 
 ```yaml
 name: images
@@ -1389,19 +1407,60 @@ jobs:
       plan: ${{ steps.factory.outputs.plan }}
 ```
 
-Inputs: `definition`, `lock`, `params`, `snapshot`, `against`, `steps` (default
-`plan,fetch,build,test`), `publish`, `sign`, `mirror`. Outputs: `changed`, `plan` (path),
-`artifacts` (JSON: image to digest). VM checks run where `/dev/kvm` exists; elsewhere they are
-reported as not run, never as passed, and the build stays a candidate until they run.
+Inputs, every one passed to a script through `env:` (a `${{ }}` inside a `run:` script fails the static
+tier):
+
+| Input | Default | Meaning |
+|---|---|---|
+| `definition` | `factory.toml` | the build definition |
+| `lock` | `lock.json` | the lock, whose `debian-image-factory` entry names the release |
+| `params` | none | a JSON file of parameter values, `plan --params` |
+| `snapshot` | `lock` | `plan --snapshot`: `lock`, `latest` or an ID |
+| `against` | none | targets, one per line: `plan --against` each, and where `publish` writes |
+| `steps` | `plan,fetch,build,test` | the steps to run; `plan` is required and `build` needs `fetch`, `test` needs `build` |
+| `publish` | `false` | `true` publishes what was built to the `against` targets (needs `build`) |
+| `sign` | `none` | `publish --sign` |
+| `mirror` | none | `--mirror`, a server that serves snapshot.debian.org's paths |
+| `pyz` | none | a local `.pyz` to run instead of the lock's release, unchecked: for testing the factory itself |
+
+Outputs: `changed` (`true` when the plan builds at least one image), `plan` (the path of `plan.json`)
+and `artifacts` (JSON: image to digest, of what the plan reuses or waits for and what the run built).
+
+**A quiet night costs a few index downloads.** After `plan`, when no image builds, `changed` is `false`
+and fetch, build, test and publish do not run: no builder image is built, no package downloaded.
+
+**Python and the runner.** The factory needs python3 3.13 or newer; when the runner has none the
+Action installs one with `astral-sh/setup-uv` (setup-python has no Debian builds). Planning needs
+apt, gpgv and Debian's archive keyring, which the Action installs with `sudo apt-get` when they are
+missing; building needs Docker. Every action it uses is pinned by commit, with its version as a comment.
+
+**The builder.** The steps run in the builder container (5.4). Today a release's `.pyz` carries no
+builder reference, so the Action builds the image itself, with `scripts/builder build`, from the recipe at
+the Action's own ref (`github.action_path`), at the snapshot of that ref's `lock.json`, and passes it with
+`--builder-image`. `build` refuses a builder whose byte-writing tools are not the ones the release pins
+(5.4), so an Action ref that does not match the release fails naming the tools that differ, and never
+writes bytes under a wrong identity. Until the builder is published, pin the Action at the commit of the
+release tag your lock names. From the first public release the `.pyz` names the builder by digest (5.4):
+the Action then verifies that image's signature with cosign and runs `build` with its default, pulling it
+by digest, and the `scripts/builder` step goes; the Action's ref then stops mattering to the bytes.
+
+**Boot checks.** A built installer or OS image runs `test` with the boot checks' image
+(`scripts/builder vm`), which QEMU runs with `/dev/kvm` when it opens and emulated otherwise, slower
+with the same result (12). The Incus checks run only where an Incus host answers; elsewhere they are
+reported as not run, never as passed, and the image stays a candidate.
 
 ### 9.3 Pinning the factory in your own pipeline
 
-1. **Pin.** Add the `debian-image-factory` entry to your lock; Renovate's github-releases datasource
-   opens the bump and `lock checksums` fills the sha256. Pin the Action by commit, with its version
-   as a comment, and let Renovate bump that too.
+1. **Pin.** Add the `debian-image-factory` entry to your lock (the one in 9.2); Renovate's
+   github-releases datasource opens the bump and `lock checksums --entry debian-image-factory` fills
+   the sha256. Pin the Action by commit, with its version as a comment, and let Renovate bump that
+   too; until the builder is published, keep the Action's commit and the lock's release the same
+   version (9.2).
 2. **Define** your images in `factory.toml`; pass the flags you decide elsewhere with `--params`.
-3. **Plan on a schedule** with `--snapshot latest` against where you publish. A night with no
-   relevant upload builds nothing and costs a few index downloads.
+3. **Plan on a schedule** with `--snapshot latest` against where you publish (the Action's `snapshot:
+   latest` and `against`). A night with no relevant upload builds nothing and costs a few index
+   downloads: `changed` is `false`. This repository's own nightly workflow is the working example
+   (12).
 4. **Build, test and publish candidates** on whatever runners you use.
 5. **Run your own checks** (a boot in your environment, a full install of the OS image onto a test
    VM, your workloads) and attach each result with `attest`.
@@ -1478,7 +1537,9 @@ Python and checks the floor statically in the same job:
   `warn_unused_ignores = true` and `enable_error_code = ["ignore-without-code"]`, over the package
   and the tests. A repository check fails any `# type: ignore[...]` whose line does not also carry a
   reason.
-- `shellcheck` on the example hooks and the Action's shell steps.
+- `shellcheck` on the example hooks and the Action's shell steps: `scripts/action-support shell` writes
+  each `run:` step of `action.yml` and the nightly workflow to a file, and fails a step that puts a
+  `${{ }}` expression into its script (inputs reach a script through `env:`).
 - The unit tests and the fixture-archive tests below (`python3 -m unittest`), seconds in total.
 - `pre-commit` 4.7.0 runs the same static checks locally before each commit.
 
@@ -1536,6 +1597,20 @@ serves it, with a recorded `/mr/timestamp/` listing. It exercises resolution, id
 plan without the network: a new version of one package at the second timestamp changes exactly the
 identities of the images that install it, and nothing else.
 
+**M6's nightly claims, on the fixture archive, seconds** (`tests/test_nightly.py`). The Action's own
+plan and summary steps (`action.yml`, run for real by `tests/support/action.py`) call `plan --snapshot
+latest --against dir://...` on a definition of every file kind (a core, an installer, an OS, an Incus
+base and its child), against the fixture archive served over HTTP and a target holding each image as a
+published artifact with a passing result for every required check. At the later snapshot with no new
+version of a package any image installs, every image reads `reuse`, the plan carries the new snapshot
+and the same identities, `changed` is `false` and fetch, build, test and publish do not run (the plan's
+`changed` function has unit tests of its own). With one new upload of a package that only the Incus base
+installs, exactly the base and its child read `build` and the other three read `reuse`. A required check
+that failed on the published artifact builds it again. The Action's input checks (`steps`, `publish`)
+and `scripts/action-support` (the release read from the lock, the summary, the artifacts, the YAML subset
+and the shell extraction) have unit tests too, and a static one fails any `uses:` that is not pinned by
+commit with its version.
+
 **Integration, minutes (release tag, and locally while developing)**
 
 - Rootless Docker: core, OCI, Incus rootfs, installer and OS builds from the fixture archive and from
@@ -1585,6 +1660,11 @@ identities of the images that install it, and nothing else.
   `verify --require-checks`: the boot contract for the base and for a child. The `incus` workflow
   runs that tier by hand on a runner with KVM, and a release tag runs the same workflow beside the
   integration tier, gating the publish.
+- **The nightly path for real** (`tests/integration/test_action.py`): the Action's shell steps on the
+  nightly workflow's definition, with the `.pyz` built from the checkout, against snapshot.debian.org
+  and rootless Docker. The first night plans at the newest completed snapshot, fetches, builds the core
+  and the Incus base in the builder the Action builds, tests, publishes to a `dir://` target and names
+  both artifacts; the second night, a moment later, reads `changed=false` and runs nothing else.
 
 **Where it runs.** While the repository is private, its jobs run on the project's own self-hosted
 runners, picked by capability label (`debian-image-factory`, and `debian-image-factory-kvm` for jobs
@@ -1592,6 +1672,18 @@ that boot a VM); they start bare, so each job installs what it needs. Once it is
 jobs run on GitHub's hosted runners, free for public repositories. Either way a pull request from a
 fork skips every job, so it never reaches anyone's own machines. Consumers run their own checks in
 their own CI.
+
+**The nightly** (`.github/workflows/nightly.yml`) runs the Action as `uses: ./` every night and on demand,
+on the plain runner label (it boots nothing), one at a time (a concurrency group, never cancelled, so two
+nights never race on the cache). It plans `.github/nightly/factory.toml` with `snapshot: latest` against a
+`dir://` target kept in the Actions cache: the newest `nightly-` entry is restored, and a night that built
+something saves a new one, so a quiet night saves nothing. It publishes nowhere public (16.2). The
+definition is the example's file kinds, a core and an Incus base: a `dir://` target holds files only, so
+the example's OCI images, which need a registry, would read `build` every night and a quiet night would
+not exist. Its Incus checks need an Incus host, which the runner lacks, so the base stays a candidate
+(`wait`, never `build`). It runs the factory built from the checkout through the Action's `pyz` input,
+until this repository's own lock names a release. `prune` is called there once it has landed and has a
+test in this workflow.
 
 ## 13. Code: language and style
 

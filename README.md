@@ -247,8 +247,60 @@ follows a flag of `[params]`: switched off, its entries leave every image and ev
 vendor's version moves, `debian-image-factory lock checksums --entry <name>` fills its checksum from the
 vendor's signed index.
 
-In GitHub Actions, one step runs the same thing nightly, and reports `changed=false` on the nights
-when there is nothing to do. The planned interface is in [DESIGN.md, section 9](DESIGN.md#9-running-it).
+### In GitHub Actions
+
+One step plans, fetches, builds, tests and publishes, and reports `changed=false` on the nights when
+there is nothing to do: then it downloads a few package indexes and stops. It runs the factory release
+your lock pins, so add the `debian-image-factory` entry to your `lock.json` (Renovate bumps it, and
+`debian-image-factory lock checksums --entry debian-image-factory` fills the sha256 of the release's `.pyz`):
+
+```json
+"debian-image-factory": {
+  "datasource": "github-releases",
+  "depName": "foreverworks/debian-image-factory",
+  "extractVersion": "^v(?<version>.+)$",
+  "sha256": "<sha256 of the .pyz>",
+  "url": "https://github.com/foreverworks/debian-image-factory/releases/download/v{version}/debian-image-factory-{version}.pyz",
+  "version": "0.6.0"
+}
+```
+
+Then a nightly workflow, with every action pinned by commit and its version in a comment:
+
+```yaml
+name: images
+on:
+  schedule: [{cron: "17 2 * * *"}]
+permissions:
+  contents: read
+  packages: write           # publishing to ghcr.io
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<commit> # v7.0.1
+      - id: factory
+        uses: foreverworks/debian-image-factory@<commit> # v0.6.0
+        with:
+          definition: images/factory.toml
+          lock: images/lock.json
+          snapshot: latest                      # the newest completed snapshot, without editing the lock
+          against: |                            # where identities are looked up, and where publish writes
+            oci://ghcr.io/example/debian
+          publish: true
+      - run: echo "changed=$CHANGED"
+        env:
+          CHANGED: ${{ steps.factory.outputs.changed }}
+```
+
+The inputs are `definition`, `lock`, `params`, `snapshot`, `against`, `steps` (default
+`plan,fetch,build,test`), `publish`, `sign` and `mirror`; the outputs are `changed`, `plan` (the path of
+`plan.json`) and `artifacts` (JSON of image to digest). The runner needs Docker to build, and `apt`
+and `gpgv` to plan (the Action installs the last two when they are missing). Until the first public
+release publishes the builder image, the Action builds it from its own checkout: pin the Action at the
+commit of the release your lock names. `.github/workflows/nightly.yml` is a working example, run on this
+repository's own definition; the inputs, the steps and what happens when nothing changed are in
+[DESIGN.md, section 9.2](DESIGN.md#92-the-github-action).
 
 ## What it is not
 
