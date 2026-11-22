@@ -1,6 +1,9 @@
 """Publishing built artifacts and their records to targets (DESIGN 7.4, 8.2). This release writes `dir://`,
 `oci://` and `github-release://`.
 
+With `--sign` each record is signed (sign.py, DESIGN 8.3) as it is merged into a target, unless the target
+already holds that record's payload.
+
 A `dir://` target is a plain directory: each artifact keeps its name, and its records live beside it
 in `<digest>.intoto.jsonl`. Publishing the same artifact again adds only the record lines the target
 does not hold yet, so test results attached later (or by someone else) are never lost, and nothing
@@ -23,6 +26,7 @@ a leftover `.partial-` asset from an earlier run is deleted first.
 """
 
 import hashlib
+import io
 import os
 import secrets
 import shutil
@@ -36,7 +40,7 @@ from typing import Literal, TextIO
 
 from input_lock.identity import HEX64
 
-from . import commands, fileartifacts, github, oci, ocilayout, published, registry
+from . import commands, fileartifacts, github, oci, ocilayout, published, registry, sign
 
 
 def sha256_of(path: Path) -> str:
@@ -94,8 +98,27 @@ def artifacts_in(out_dir: Path) -> list[fileartifacts.FileArtifact]:
     return found
 
 
-def publish_dir(out_dir: Path, artifacts: Sequence[fileartifacts.FileArtifact], target: Path, out: TextIO) -> None:
-    """Copy `artifacts` of `out_dir` (each of its files) and merge their records into the directory `target`."""
+def signed_additions(signer: sign.Signer | None, new: str, present: str, where: str, out: TextIO) -> str:
+    """The records `new` holds, signed when there is a signer and left out when `present` holds their payload
+    already (`sign.to_add`); the text to merge into `present`. A record left out is said so."""
+    try:
+        lines, skipped = sign.to_add(signer, [one for one in new.splitlines() if one.strip()], present.splitlines())
+    except sign.SignError as error:
+        raise commands.Failed(f"{where}: {error}") from None
+    if skipped:
+        print(f"{where}: {skipped} records are already there and are not signed again", file=out)
+    return "".join(one + "\n" for one in lines)
+
+
+def publish_dir(
+    out_dir: Path,
+    artifacts: Sequence[fileartifacts.FileArtifact],
+    target: Path,
+    out: TextIO,
+    signer: sign.Signer | None = None,
+) -> None:
+    """Copy `artifacts` of `out_dir` (each of its files) and merge their records into the directory `target`,
+    signed when there is a `signer`."""
     target.mkdir(parents=True, exist_ok=True)
     for artifact in artifacts:
         states: list[str] = []
@@ -108,9 +131,9 @@ def publish_dir(out_dir: Path, artifacts: Sequence[fileartifacts.FileArtifact], 
                 states.append("copied")
         state = "already there" if set(states) == {"already there"} else "copied"
         records_name = published.records_name_for(artifact.digest)
-        new = (out_dir / records_name).read_text(encoding="utf-8")
         held = target / records_name
         present = held.read_text(encoding="utf-8") if held.is_file() else ""
+        new = signed_additions(signer, (out_dir / records_name).read_text(encoding="utf-8"), present, str(target), out)
         merged = merged_lines(present, new)
         added = len(merged.splitlines()) - len([line for line in present.splitlines() if line.strip()])
         if merged != present:
@@ -143,7 +166,11 @@ def release_conflicts(
 
 
 def publish_release(
-    out_dir: Path, artifacts: Sequence[fileartifacts.FileArtifact], target: published.ReleaseTarget, out: TextIO
+    out_dir: Path,
+    artifacts: Sequence[fileartifacts.FileArtifact],
+    target: published.ReleaseTarget,
+    out: TextIO,
+    signer: sign.Signer | None = None,
 ) -> None:
     """Upload `artifacts` of `out_dir` (each of its files) to the release `target`, create the release
     when the tag has none, and merge each artifact's records into its records asset.
@@ -172,7 +199,7 @@ def publish_release(
                     held[path.name] = github.store_asset(client, release, path.name, path, secrets.token_hex(8))
                     states.append("uploaded")
             state = "already there" if set(states) == {"already there"} else "uploaded"
-            added = merge_records(client, release, held, artifact.digest, out_dir)
+            added = merge_records(client, release, held, artifact.digest, out_dir, signer, out)
             print(f"{client.name}: {artifact.name} {state}, {added} record lines added", file=out)
     except github.AlreadyExistsError as error:
         raise commands.Failed(f"{error}; nothing was overwritten") from None
@@ -192,7 +219,13 @@ def remove_partials(client: github.Client, held: dict[str, github.Asset], out: T
 
 
 def merge_records(
-    client: github.Client, release: github.Release, held: dict[str, github.Asset], digest: str, out_dir: Path
+    client: github.Client,
+    release: github.Release,
+    held: dict[str, github.Asset],
+    digest: str,
+    out_dir: Path,
+    signer: sign.Signer | None = None,
+    out: TextIO | None = None,
 ) -> int:
     """Merge the records file of `out_dir` for `digest` into the release's records asset; the number of
     lines added. `held` follows the release's assets."""
@@ -204,6 +237,7 @@ def merge_records(
             present = github.read_asset(client, held[name]).decode("utf-8")
         except UnicodeDecodeError:
             raise commands.Failed(f"{client.name}: the records asset {name} is not UTF-8") from None
+    new = signed_additions(signer, new, present, client.name, out or io.StringIO())
     merged = merged_lines(present, new)
     if merged == present:
         return 0
@@ -371,18 +405,37 @@ def describe(error: OSError) -> str:
     return error.strerror or str(error)
 
 
+def signed_for_registry(
+    client: registry.Client, digest: str, lines: Sequence[bytes], signer: sign.Signer, out: TextIO
+) -> list[bytes]:
+    """`lines` signed, minus the records the image `digest` already has attached in the repository."""
+    envelopes, _ = registry.fetch_envelopes(client, registry.referrers_of(client, digest).attached)
+    held = [one.decode("utf-8", errors="replace") for one in envelopes]
+    try:
+        added, skipped = sign.to_add(signer, [one.decode("utf-8") for one in lines], held)
+    except sign.SignError as error:
+        raise commands.Failed(f"{client.name}: {error}") from None
+    if skipped:
+        print(f"{client.name}: {skipped} records are already attached and are not signed again", file=out)
+    return [one.encode("utf-8") for one in added]
+
+
 def publish_oci(
     out_dir: Path,
     target: published.OciTarget,
     layouts: Sequence[Path],
     out: TextIO,
     connect: Callable[[published.OciTarget], registry.Client],
+    signer: sign.Signer | None = None,
 ) -> None:
-    """Push every layout of `out_dir` to the repository `target`, tagging each `identity-<identity>`."""
+    """Push every layout of `out_dir` to the repository `target`, tagging each `identity-<identity>`. With a
+    `signer` each record is signed first, unless the repository already holds that record."""
     client = connect(target)
     for path in layouts:
         layout, identity, lines = checked_layout(out_dir, path)
         try:
+            if signer is not None:
+                lines = signed_for_registry(client, layout.descriptor.digest, lines, signer, out)
             report = push_layout(client, layout, [oci.identity_tag(identity)], lines)
         except oci.OciError as error:
             raise commands.Failed(f"{path}: {error}") from None
@@ -437,13 +490,19 @@ def oci_targets_for(
 def publish_command(
     out_dir: Path,
     targets: Sequence[str],
-    sign: str,
+    sign_mode: str,
     out: TextIO,
     connect: Callable[[published.OciTarget], registry.Client] = registry.connect,
     images: Sequence[str] = (),
+    env: Mapping[str, str] | None = None,
+    run: sign.Run = sign.run_process,
 ) -> int:
-    if sign != "none":
-        raise commands.Usage("signing arrives in a later release; this release publishes unsigned records")
+    try:
+        signer = sign.prepare(sign.parse_mode(sign_mode), os.environ if env is None else env, run)
+    except sign.UsageError as error:
+        raise commands.Usage(str(error)) from None
+    except sign.SignError as error:
+        raise commands.Failed(str(error)) from None
     if not targets:
         raise commands.Usage("publish needs at least one --to TARGET")
     destinations = commands.parse_targets(targets)
@@ -471,7 +530,7 @@ def publish_command(
         if isinstance(one, published.DirTarget):
             for path in layouts:
                 print(f"{one.path}: {path.name} not published here, OCI images publish to oci:// targets", file=out)
-            publish_dir(out_dir, files, Path(one.path), out)
+            publish_dir(out_dir, files, Path(one.path), out, signer)
         elif isinstance(one, published.OciTarget):
             for artifact in files:
                 print(
@@ -480,7 +539,7 @@ def publish_command(
                     file=out,
                 )
             for repository, group in repositories:
-                publish_oci(out_dir, repository, group, out, connect)
+                publish_oci(out_dir, repository, group, out, connect, signer)
         else:
             for path in layouts:
                 print(
@@ -488,5 +547,5 @@ def publish_command(
                     "OCI images publish to oci:// targets",
                     file=out,
                 )
-            publish_release(out_dir, files, one, out)
+            publish_release(out_dir, files, one, out, signer)
     return 0

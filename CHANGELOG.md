@@ -5,6 +5,13 @@
 - The boot checks' guest writes its `FACTORY-REPORT` line to its own serial port (`ttyS1`) instead of the console, where a
   kernel message printed at the same moment could split the line and fail a boot that had worked. A boot with no
   report now names QEMU's exit status and any half-written report line.
+- `publish --sign keyless` and `--sign key:<path or KMS URI>` sign each record with cosign 3.1.4 (DESIGN 8.3): the
+  statement is signed as a DSSE payload with `cosign attest-blob --statement`, and the envelope keeps the payload
+  and fills `signatures` with the signature and its Sigstore bundle's verification material. Keyless uses the CI's
+  OIDC identity and the public Rekor log; a key's signature goes to no log. A record a target already holds is
+  not signed again. `verify` checks signatures with `--key`, or `--certificate-identity` and
+  `--certificate-oidc-issuer` (and their `-regexp` forms), and `--require-signature` refuses an unsigned record.
+  The Action installs cosign (`sigstore/cosign-installer`, pinned) when `sign` is not `none`.
 - A workflow rewrites the checksum of the input-lock entry on Renovate's branches, so its pull requests no longer
   carry a stale `sha256`.
 - `publish --image NAME` publishes only the images it names.

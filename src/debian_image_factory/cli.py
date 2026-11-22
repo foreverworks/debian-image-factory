@@ -11,7 +11,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from . import __version__, checks, commands, definition, fetch, prune, publish, published, resolve, verify
+from . import __version__, checks, commands, definition, fetch, prune, publish, published, resolve, sign, verify
 from . import tools as builder
 from .build import run as build_run
 
@@ -207,7 +207,13 @@ def parser() -> argparse.ArgumentParser:
         help="publish only this image of OUT (repeat); default: every image",
     )
     publish_.add_argument(
-        "--sign", default="none", metavar="none", help="signing arrives in a later release; only none for now"
+        "--sign",
+        default="none",
+        metavar="none|keyless|key:REF",
+        help=(
+            "sign each record with cosign: none (the default), keyless (the CI's OIDC identity, Sigstore) or "
+            "key:PATH_OR_KMS_URI (a key you hold; never sent to a transparency log)"
+        ),
     )
 
     verify_ = commands_.add_parser(
@@ -232,6 +238,30 @@ def parser() -> argparse.ArgumentParser:
     )
     verify_.add_argument(
         "--require-checks", action="store_true", help="every check the definition requires must have a passing result"
+    )
+    verify_.add_argument(
+        "--require-signature",
+        action="store_true",
+        help="every record must carry a signature that verifies (needs --key, or the identity and issuer below)",
+    )
+    verify_.add_argument("--key", metavar="PATH_OR_KMS_URI", help="check signatures against this public key")
+    verify_.add_argument(
+        "--certificate-identity", default="", metavar="ID", help="the identity a keyless signature names"
+    )
+    verify_.add_argument(
+        "--certificate-identity-regexp",
+        default="",
+        metavar="RE",
+        help="as --certificate-identity, a Go regular expression",
+    )
+    verify_.add_argument(
+        "--certificate-oidc-issuer", default="", metavar="URL", help="the OIDC issuer a keyless signature names"
+    )
+    verify_.add_argument(
+        "--certificate-oidc-issuer-regexp",
+        default="",
+        metavar="RE",
+        help="as --certificate-oidc-issuer, a Go regular expression",
     )
     verify_.add_argument("--lock", type=Path, metavar="FILE", help="the provenance must name this lock by its sha256")
     verify_.add_argument(
@@ -390,6 +420,14 @@ def dispatch(arguments: argparse.Namespace) -> int:
             sys.stdout,
             pull_wanted=arguments.pull,
             artifact=arguments.artifact,
+            signatures=sign.VerifyOptions(
+                key=arguments.key or "",
+                identity=arguments.certificate_identity,
+                identity_regexp=arguments.certificate_identity_regexp,
+                issuer=arguments.certificate_oidc_issuer,
+                issuer_regexp=arguments.certificate_oidc_issuer_regexp,
+                require=arguments.require_signature,
+            ),
         )
     if arguments.command == "prune":
         return prune.prune_command(

@@ -27,7 +27,11 @@ inputs:
     description: Whether to publish what was built to the against targets (true or false). Needs the build step.
     default: "false"
   sign:
-    description: How publish signs, passed as --sign (none, keyless or key:REF).
+    description: >-
+      How publish signs each record, passed as --sign: none (the default), keyless (Sigstore, with the workflow's OIDC
+      identity: the job needs `permissions: id-token: write`, and the signature goes to the public Rekor log) or
+      key:REF (a key file or KMS URI you hold, never sent to a log). Anything but none installs cosign 3.1.4
+      (sigstore/cosign-installer, which needs envsubst on the runner) before publish.
     default: none
   mirror:
     description: A server that serves snapshot.debian.org's paths, passed as --mirror. Empty for snapshot.debian.org itself.
@@ -65,6 +69,7 @@ runs:
       env:
         STEPS: ${{ inputs.steps }}
         PUBLISH: ${{ inputs.publish }}
+        SIGN: ${{ inputs.sign }}
         AGAINST: ${{ inputs.against }}
         KEEP_WORK: ${{ inputs.keep-work }}
         WORK_BASE: ${{ runner.temp }}
@@ -91,6 +96,10 @@ runs:
           [ -n "${want[build]:-}" ] || { echo "debian-image-factory: publish needs the build step" >&2; exit 1; }
           [ -n "${AGAINST//[[:space:]]/}" ] || { echo "debian-image-factory: publish needs against: the targets to write to" >&2; exit 1; }
         fi
+        case "$SIGN" in
+          none | keyless | key:?*) ;;
+          *) echo "debian-image-factory: sign is none, keyless or key:<key file or KMS URI>, not '$SIGN'" >&2; exit 1 ;;
+        esac
         case "$KEEP_WORK" in
           true | false) ;;
           *) echo "debian-image-factory: keep-work is true or false, not '$KEEP_WORK'" >&2; exit 1 ;;
@@ -279,6 +288,14 @@ runs:
           args+=(--vm-image "$("$ACTION_PATH/scripts/builder" vm)")
         fi
         python3 "$PYZ" "${args[@]}"
+
+    # Signing is cosign's, at the one version this factory release is written for (DESIGN 8.3); an unsigned publish
+    # installs nothing. The installer is pinned by commit, as release.yml pins it.
+    - name: Install cosign to sign the records
+      if: inputs.publish == 'true' && inputs.sign != 'none' && steps.setup.outputs.build == 'true' && steps.summary.outputs.changed == 'true'
+      uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      with:
+        cosign-release: v3.1.4
 
     - name: Publish
       id: publish

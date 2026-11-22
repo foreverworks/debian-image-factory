@@ -93,7 +93,8 @@ class PublishDirTest(unittest.TestCase):
             for targets_, sign in (
                 ([], "none"),
                 (["ftp://example.com/images"], "none"),
-                ([f"dir://{scratch}"], "keyless"),
+                ([f"dir://{scratch}"], "sigstore"),
+                ([f"dir://{scratch}"], "key:"),
             ):
                 with self.subTest(targets=targets_, sign=sign), self.assertRaises(commands.Usage):
                     publish.publish_command(out, targets_, sign, io.StringIO())

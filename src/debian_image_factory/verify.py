@@ -20,6 +20,7 @@ What passes:
 
 import contextlib
 import hashlib
+import os
 import re
 import tempfile
 import urllib.error
@@ -33,7 +34,20 @@ import input_lock
 from input_lock.identity import HEX64
 from input_lock.records import PROVENANCE_PREDICATE, SPDX_PREDICATE, TestOutcome
 
-from . import commands, definition, fileartifacts, github, incus, oci, ocilayout, published, pull, records, registry
+from . import (
+    commands,
+    definition,
+    fileartifacts,
+    github,
+    incus,
+    oci,
+    ocilayout,
+    published,
+    pull,
+    records,
+    registry,
+    sign,
+)
 
 BUILD_TYPE: Final = re.compile(re.escape(records.REPOSITORY) + r"/blob/v[0-9][0-9A-Za-z.+-]*/docs/build-type-v1\.md")
 """The `buildType` of any release of this factory: the document names its release, so a verifier of one
@@ -424,6 +438,35 @@ def summary(subject: Subject, found: Findings, required: Sequence[str] | None) -
     return lines
 
 
+def signature_report(
+    subject: Subject, options: sign.VerifyOptions, env: Mapping[str, str], run: sign.Run
+) -> sign.Report:
+    """The signatures of the subject's records, checked. The statement types come from the records that
+    parse; a line that does not is reported by `inspect` and skipped here."""
+    types: list[str] = []
+    for line in subject.lines:
+        try:
+            types.append(published.parse_envelope(line).predicate_type)
+        except published.RecordsError:
+            types.append("")
+    try:
+        return sign.check_signatures(subject.lines, subject.digest, types, options, env, run)
+    except sign.SignError as error:
+        raise commands.Failed(str(error)) from None
+
+
+def signature_summary(report: sign.Report) -> list[str]:
+    """The line a summary adds about signatures; nothing when no record is signed."""
+    if not report.verified and not report.unchecked:
+        return []
+    parts = [f"{report.verified} verified"] if report.verified else []
+    if report.unchecked:
+        parts.append(f"{report.unchecked} signed but not checked (name the signer: --key or --certificate-identity)")
+    if report.unsigned:
+        parts.append(f"{report.unsigned} unsigned")
+    return [f"  signatures: {', '.join(parts)}"]
+
+
 def verify_command(
     ref: str,
     require_checks: bool,
@@ -435,10 +478,18 @@ def verify_command(
     pull_wanted: bool = False,
     artifact: str | None = None,
     connect_release: Callable[[published.ReleaseTarget], github.Client] = github.connect,
+    signatures: sign.VerifyOptions = sign.NO_OPTIONS,
+    env: Mapping[str, str] | None = None,
+    run: sign.Run = sign.run_process,
 ) -> int:
     """Check `ref` and print a short summary (0), or raise Failed naming every problem (exit 1).
     `pull_wanted` downloads what the ref names (an image's layers; the `artifact` of a release or a
-    directory) and checks the copy."""
+    directory) and checks the copy. Signed records are checked with cosign against `signatures` (DESIGN
+    8.3); an unsigned record passes unless `signatures.require`."""
+    try:
+        sign.check_verify_options(signatures)
+    except sign.UsageError as error:
+        raise commands.Usage(str(error)) from None
     expected = lock_digests(commands.read_text(lock_path)) if lock_path is not None else None
     parsed = commands.read_text(definition_path) if require_checks else None
     with tempfile.TemporaryDirectory(prefix="debian-image-factory-verify-") as scratch:
@@ -456,8 +507,9 @@ def verify_command(
         else:
             required = definition.required_checks(loaded, found.image, found.has_lock_entries)
             problems.extend(f"{subject.label}: {problem}" for problem in required_problems(subject, found, required))
-    problems = [*subject.problems, *problems]
+    report = signature_report(subject, signatures, os.environ if env is None else env, run)
+    problems = [*subject.problems, *problems, *(f"{subject.label}: {problem}" for problem in report.problems)]
     if problems:
         raise commands.Failed("\n".join(problems))
-    print("\n".join(summary(subject, found, required)), file=out)
+    print("\n".join([*summary(subject, found, required), *signature_summary(report)]), file=out)
     return 0

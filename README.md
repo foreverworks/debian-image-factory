@@ -51,7 +51,7 @@ same recipe can differ for reasons nobody wrote down.
 
   OCI images carry them in the registry, linked to the image; files carry them in a
   `<digest>.intoto.jsonl` beside them. Any tool that speaks these standards can read them. They are
-  unsigned unless you switch signing on.
+  unsigned unless you switch signing on (`publish --sign keyless` or `--sign key:<path>`, below).
 - **No root needed.** Rootless Docker, or a Debian machine with user namespaces, is enough to build
   everything. Only the boot tests want KVM.
 
@@ -332,7 +332,7 @@ token to `plan` and `publish` and to no other step, and needs `contents: write` 
 put that token in a step's environment by itself, which is why the input exists.
 
 The inputs are `definition`, `lock`, `params`, `snapshot`, `against`, `steps` (default
-`plan,fetch,build,test`), `publish`, `sign`, `mirror`, `token` (default the workflow's token) and
+`plan,fetch,build,test`), `publish`, `sign` (`none`, `keyless` or `key:REF`; not `none` installs cosign 3.1.4, and `keyless` needs `id-token: write`), `mirror`, `token` (default the workflow's token) and
 `keep-work` (default `true`, so later steps can read the `plan` output; `false` removes the work directory,
 with the build output, when the run ends); the outputs are `changed`, `plan` (the path of
 `plan.json`) and `artifacts` (JSON of image to digest). The runner needs Docker to build, and `apt`
@@ -383,7 +383,21 @@ retained build can be rebuilt with snapshot.debian.org unreachable.
 **Do I need to trust the factory's builds?** You do not have to take its word. Every record names
 the lock digest, the snapshot indices, the recipe, the parent and the builder, so you can check an
 artifact against your own lock. Records are unsigned by default; Sigstore keyless signing in CI, or
-your own key, can be switched on without changing anything else.
+your own key, can be switched on without changing anything else (next question).
+
+**How do I sign records?** `publish --sign keyless` signs each record with Sigstore through the CI's OIDC
+identity (the job needs `permissions: id-token: write`; the signature goes to the public Rekor log), and
+`--sign key:<path or KMS URI>` signs with a key you hold, which is never sent to a log. Both call cosign
+3.1.4, which must be on PATH (the Action installs it when `sign` is not `none`). The factory never holds a
+key, and a signed record has the same payload and shape as an unsigned one; only `signatures` is filled.
+Check them with `verify REF --key cosign.pub`, or for keyless with the identity and issuer you expect:
+
+    debian-image-factory verify oci://ghcr.io/example/app@sha256:... \
+      --certificate-identity https://github.com/example/images/.github/workflows/nightly.yml@refs/heads/main \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com --require-signature
+
+Without `--require-signature` an unsigned record still verifies, and signed ones are only checked when you
+name who must have signed them.
 
 **Does it put secrets or host identity into images?** No, and it checks. Images ship without
 machine IDs, SSH host keys or credentials; each instance creates its own identity on first boot.
@@ -408,7 +422,7 @@ and boots both in QEMU in `test`, with the `deb` and `file` modules, feature fla
 The sixth closes the nightly loop: `plan --snapshot latest --against` every kind of target, the
 GitHub Action, `prune` with its retention rule, inputs bundles and offline replay, `verify --pull`, and
 the optional `byte-equal` check; a night with no relevant upload builds nothing. The first public
-release is v0.6.3. Version 1.0, with optional signing and docs for strangers, comes next. The milestones are in
+release is v0.6.3. Version 1.0, with docs for strangers, comes next. The milestones are in
 [DESIGN.md, section 14](DESIGN.md#14-milestones).
 
 `scripts/test static`, `scripts/test unit` and `scripts/test integration` run the same checks CI

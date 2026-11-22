@@ -818,9 +818,9 @@ default (8.2), so anyone who can write to a target can stamp a result with a lat
 last. Two limits keep that small: a result stamped later than the time the reader runs, plus five
 minutes for clocks that differ, does not count at all, and the lookup lists it under `rejected` with the
 reason "finished in the future" (the artifact itself still counts, by its other results); and signed
-records (`--sign`, 8.3; only `none` works today) will be the way to make the order trustworthy against a
-writer, since a signature names who wrote a result. A result stamped in the past by someone who can
-write records is not detectable and counts. Until then the target's own authentication is the trust
+records (`--sign`, 8.3) are the way to make the order trustworthy against a
+writer, since a signature names who wrote a result, and `verify --require-signature` holds a record to one. A result stamped in the past by someone who can
+write records is not detectable and counts. Where records are unsigned, the target's own authentication is the trust
 boundary. The provenance names the image in
 `externalParameters.image` and the identity in `internalParameters.identity` (8.2), and a records
 file counts only when a statement's subject is the file's real sha256. `dir://`, `oci://` and
@@ -1236,6 +1236,53 @@ through the CI's OIDC identity (cosign 3.1.4); `--sign key:<path or KMS URI>` us
 consumer holds. The factory never holds a key, and nothing in a record changes shape when signing is
 switched on.
 
+*Built (0.6.3).* `publish` signs after the build and the tests, when it merges a record into a target; the
+records in `out/` stay unsigned, so one build can be published signed to one target and unsigned to another.
+cosign is found on PATH and must be exactly 3.1.4 (`GitVersion` of `cosign version`); a missing or another
+cosign fails before anything is written, naming 3.1.4. `keyless` also fails before any write when the
+environment has no OIDC identity (`SIGSTORE_ID_TOKEN`, or GitHub's `ACTIONS_ID_TOKEN_REQUEST_URL` and
+`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, which a job gets with `permissions: id-token: write`), and a `key:` file
+must exist.
+
+Each record is signed with one call, the statement's decoded payload written to a scratch file byte for byte:
+
+    cosign attest-blob --statement statement.json --bundle bundle.json --yes                  # keyless
+    cosign attest-blob --statement statement.json --bundle bundle.json --yes \
+        --key REF --signing-config empty.json                                                  # key:REF
+
+`attest-blob --statement` takes a finished in-toto statement and signs it as a DSSE envelope with the
+payload type `application/vnd.in-toto+json`, which is the factory's own (`sign-blob` would sign raw bytes, not
+a DSSE payload, and `attest-blob` without `--statement` would wrap the file in a statement of its own). The
+signature goes into the envelope's `signatures`; the payload and its type are untouched:
+
+    {"payloadType": "application/vnd.in-toto+json", "payload": "<unchanged>",
+     "signatures": [{"sig": "<DSSE signature>",
+                     "bundle": {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+                                "verificationMaterial": {...}}}]}
+
+`bundle` is the Sigstore bundle's `mediaType` and `verificationMaterial` (for keyless the Fulcio certificate
+and the Rekor entry, for a key its hint), so the envelope and its bundle say the same thing and a reader that
+ignores `bundle` still reads a DSSE envelope with a signature. `empty.json` is a signing config with no
+services: a key's signature goes into no transparency log, while a keyless one goes to the public Rekor log
+(the certificate is short lived, so the log entry is what shows it was valid when used).
+
+A target that already holds a record's payload, signed or not, keeps it: published records are never
+rewritten, so publishing the same build again signs nothing again (a message says how many were left out),
+and records published unsigned stay unsigned. A signed record is a different line from the unsigned one, so
+a record is only ever added once.
+
+`verify` rebuilds the bundle from each signed envelope and runs, per record,
+
+    cosign verify-blob-attestation --bundle bundle.json --digest <artifact sha256> --digestAlg sha256 \
+        --type <the statement's predicate type> \
+        --key K --insecure-ignore-tlog                                                         # --key K
+        --certificate-identity I --certificate-oidc-issuer U                                   # keyless
+
+(`--certificate-identity-regexp` and `--certificate-oidc-issuer-regexp` as well.) Without a signer named, a
+signed record is counted and reported as signed but not checked; an unsigned record passes as before. With
+`--require-signature` every record must carry a signature that verifies, and the signer must be named. A
+signature that does not verify, or a signature with no bundle, is a problem that names cosign's reason.
+
 Either way this is **SLSA Build L1** provenance, signed or not: the factory writes it as part of the
 build itself. Build L2 requires provenance that the build platform generates and signs on its own.
 A consumer whose CI platform offers that can attach the platform's statement beside the factory's;
@@ -1272,6 +1319,7 @@ debian-image-factory test out/ [--check NAME]... [--url URL] [--definition FILE]
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
 debian-image-factory publish out/ --to TARGET... [--image NAME]... [--sign none|keyless|key:REF]
 debian-image-factory verify REF [--pull [--artifact NAME|SHA256]] [--require-checks] [--lock FILE] [--definition FILE]
+                           [--require-signature] [--key K | --certificate-identity I --certificate-oidc-issuer U]
                                                          records match the bits, provenance names the lock, checks complete
 debian-image-factory prune --against TARGET... --pin DIGEST... [--keep-good 5] [--keep-candidates 1] [--dry-run]
                            [--definition FILE]
@@ -1389,6 +1437,7 @@ download what the reference names, and `--artifact` says which artifact of a fil
 
 What it checks:
 
+- every signed record's signature, when the signer is named (8.3); `--require-signature` also refuses an unsigned record;
 - the bits match their digest: an image's manifest digest (a registry's blobs are checked as they
   are read, a layout on disk in full, layers included; from a registry the layers are checked when
   pulled, which `--pull` does), a file's sha256;
@@ -1512,7 +1561,7 @@ tier):
 | `against` | none | targets, one per line: `plan --against` each, and where `publish` writes; `build` gets each `oci://` and `dir://` one as `--parents` and `test` each `oci://` one, so a parent that was reused is found where it is published (a `github-release://` target holds no parents) |
 | `steps` | `plan,fetch,build,test` | the steps to run; `plan` is required and `build` needs `fetch`, `test` needs `build` |
 | `publish` | `false` | `true` publishes what was built to the `against` targets (needs `build`) |
-| `sign` | `none` | `publish --sign` |
+| `sign` | `none` | `publish --sign`: `none`, `keyless` or `key:REF`. Anything but `none` installs cosign 3.1.4 (`sigstore/cosign-installer`, pinned by commit) before `publish`; `keyless` needs `permissions: id-token: write` in the job |
 | `mirror` | none | `--mirror`, a server that serves snapshot.debian.org's paths |
 | `pyz` | none | a local `.pyz` to run instead of the lock's release, unchecked: for testing the factory itself |
 | `token` | `${{ github.token }}` | the GitHub token `plan` and `publish` get as `GITHUB_TOKEN` (through `env:`, never on a command line), for `github-release://` targets; no other step sees it |
