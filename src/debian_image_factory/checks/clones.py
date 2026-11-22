@@ -1,7 +1,8 @@
 """`two-clones` for core (DESIGN 11): two instances of the artifact share no identity.
 
 The tarball is imported into rootless Docker under a throwaway tag, two containers (no network) read the
-identity files, and both are removed afterwards. The comparison is pure; docker is reached through a
+identity files, and both are removed afterwards. `two_instances` is the part that needs only an image the
+daemon holds, so an OCI image loaded from its layout reuses it. The comparison is pure; docker is reached through a
 `Runner`, so a test can stand in for it.
 """
 
@@ -64,29 +65,34 @@ def compare(first: Mapping[str, bytes], second: Mapping[str, bytes]) -> Result:
 
 
 def run_docker(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["docker", *args], capture_output=True, text=True, check=False, timeout=900)
+    return subprocess.run(
+        ["docker", *args], capture_output=True, text=True, check=False, timeout=900, stdin=subprocess.DEVNULL
+    )
 
 
-def two_clones(artifact: Path, run: Runner = run_docker) -> CheckOutcome:
-    """Import `artifact`, run two containers from it, compare what they read, clean up.
-
-    Not run when docker is missing or its daemon unreachable, or the tarball does not import.
-    """
+def docker_problem(run: Runner) -> str | None:
+    """Why docker cannot be used here, or None when its daemon answers."""
     try:
         info = run(["info", "--format", "{{.ServerVersion}}"])
     except (OSError, subprocess.SubprocessError) as error:
-        return NotRun(TWO_CLONES, f"docker is not available: {error}")
+        return f"docker is not available: {error}"
     if info.returncode != 0:
-        return NotRun(TWO_CLONES, f"docker is not usable: {info.stderr.strip() or info.stdout.strip()}")
-    tag = f"dif-two-clones-{uuid.uuid4().hex[:12]}:test"
+        return f"docker is not usable: {info.stderr.strip() or info.stdout.strip()}"
+    return None
+
+
+def two_instances(image: str, run: Runner = run_docker) -> CheckOutcome:
+    """Run two containers (no network) from the image `image` (a tag or an image ID the daemon holds), compare
+    the identity files they read, and remove both containers. The image is not touched.
+
+    The script runs through `/bin/sh` whatever entrypoint the image declares. Not run when an instance does
+    not start (an image without a shell cannot be read this way) or answers something unreadable.
+    """
     names = [f"dif-two-clones-{uuid.uuid4().hex[:12]}-{n}" for n in (1, 2)]
     try:
-        imported = run(["import", str(artifact), tag])
-        if imported.returncode != 0:
-            return NotRun(TWO_CLONES, f"docker could not import the tarball: {imported.stderr.strip()}")
         readings: list[dict[str, bytes]] = []
         for name in names:
-            ran = run(["run", "--name", name, "--network", "none", tag, "/bin/sh", "-c", READ_SCRIPT])
+            ran = run(["run", "--name", name, "--network", "none", "--entrypoint", "/bin/sh", image, "-c", READ_SCRIPT])
             if ran.returncode != 0:
                 return NotRun(TWO_CLONES, f"an instance did not run: {ran.stderr.strip()}")
             try:
@@ -97,6 +103,27 @@ def two_clones(artifact: Path, run: Runner = run_docker) -> CheckOutcome:
     except (OSError, subprocess.SubprocessError) as error:
         return NotRun(TWO_CLONES, f"docker failed: {error}")
     finally:
-        for command in (*(["rm", "--force", name] for name in names), ["rmi", "--force", tag]):
+        for name in names:
             with contextlib.suppress(OSError, subprocess.SubprocessError):  # the check's own answer stands
-                run(command)
+                run(["rm", "--force", name])
+
+
+def two_clones(artifact: Path, run: Runner = run_docker) -> CheckOutcome:
+    """Import the core tarball `artifact`, run two containers from it, compare what they read, clean up.
+
+    Not run when docker is missing or its daemon unreachable, or the tarball does not import.
+    """
+    problem = docker_problem(run)
+    if problem is not None:
+        return NotRun(TWO_CLONES, problem)
+    tag = f"dif-two-clones-{uuid.uuid4().hex[:12]}:test"
+    try:
+        imported = run(["import", str(artifact), tag])
+        if imported.returncode != 0:
+            return NotRun(TWO_CLONES, f"docker could not import the tarball: {imported.stderr.strip()}")
+        return two_instances(tag, run)
+    except (OSError, subprocess.SubprocessError) as error:
+        return NotRun(TWO_CLONES, f"docker failed: {error}")
+    finally:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            run(["rmi", "--force", tag])
