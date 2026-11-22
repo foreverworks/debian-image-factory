@@ -35,7 +35,9 @@ from .. import (
     debian,
     definition,
     fetch,
+    fileartifacts,
     identity,
+    incus,
     modules,
     oci,
     ocilayout,
@@ -44,17 +46,19 @@ from .. import (
     records,
     registry,
     resolve,
+    squashfs,
 )
 from .. import plan as plan_module
 from .. import tools as builder
 from ..identity import FileFact
 from ..published import artifact_name, records_name_for
-from . import core, parents
+from . import boot, core, parents
+from . import incus as incus_build
 from . import oci as oci_build
 
-SUPPORTED_KINDS: Final = ("core", "oci")
+SUPPORTED_KINDS: Final = ("core", "oci", "incus")
 """The kinds this release builds; the others arrive with their milestones."""
-EXTENSIONS: Final[Mapping[str, str]] = {"core": "tar.gz", "oci": oci.LAYOUT_EXT}
+EXTENSIONS: Final[Mapping[str, str]] = {"core": "tar.gz", "oci": oci.LAYOUT_EXT, "incus": incus.METADATA_EXT}
 LAYER_PROGRAM: Final = "layer.py"
 """The layer writer's file name in the package and in the work directory."""
 PLAN_COPY: Final = "plan.json"
@@ -417,12 +421,14 @@ def image_records(
     started: str,
     finished: str,
     ancestors: Sequence[records.Parent] = (),
+    files: Sequence[tuple[str, str]] = (),
 ) -> list[Statement]:
     """Provenance and SBOM of one artifact (DESIGN 8.2). `ancestors` are the images it descends from,
-    nearest first (none for core)."""
+    nearest first (none for core). The artifact is the first subject, under `name` and `digest`; `files`
+    adds the (name, sha256) of each file an artifact of several files is made of (an Incus image's two)."""
     builder_id, invocation = records.run_details(os.environ, __version__)
     entries = sorted(entry["inputs"])
-    subjects = [subject(name, digest)]
+    subjects = [subject(name, digest), *(subject(file_name, sha256) for file_name, sha256 in files)]
     provenance = records.provenance_statement(
         subjects=subjects,
         image=image,
@@ -723,6 +729,155 @@ def build_oci(run: Run, image: str, scratch: Path, built: Mapping[str, parents.P
     return Result(parents.ParentArtifact(image, "oci", name, digest, target), len(packages))
 
 
+def device_lines(parent: parents.ParentArtifact) -> list[str]:
+    """mksquashfs pseudo definitions of every device node in the parent's root: they cannot be made in the
+    builder's user namespace, so the root's packer adds them from this listing (build/incus.py)."""
+    if parent.path is None:
+        raise commands.Failed(f"{parent.name}: its files are needed to build on it")
+    lines: list[str] = []
+    if parent.kind == "core":
+        with tarfile.open(parent.path, mode="r:gz") as archive:
+            for member in archive:
+                if member.ischr() or member.isblk():
+                    path = "/" + member.name.removeprefix("./").strip("/")
+                    kind = "char" if member.ischr() else "block"
+                    lines.append(
+                        incus_build.device_pseudo(
+                            path, kind, member.mode, member.uid, member.gid, member.devmajor, member.devminor
+                        )
+                    )
+        return lines
+    rootfs = parents.incus_rootfs(parent)
+    try:
+        with rootfs.open("rb") as handle:
+            for one in squashfs.entries(handle):
+                if one.kind in ("char", "block"):
+                    lines.append(
+                        incus_build.device_pseudo(one.path, one.kind, one.mode, one.uid, one.gid, one.major, one.minor)
+                    )
+    except squashfs.SquashfsError as error:
+        raise commands.Failed(f"{rootfs.name}: {error}") from None
+    return lines
+
+
+def prepare_incus_work(work: Path, run: Run, image: str, parent: parents.ParentArtifact) -> None:
+    """Everything the builder reads for one Incus image: the parent's root and its device nodes, the
+    layer program, and what every child reads (sources, the file tree, modules, hooks and their inputs)."""
+    entry = run.plan["images"][image]
+    spec = run.loaded.definition.images[image]
+    debian_ = run.plan["debian"]
+    epoch = run.loaded.definition.debian.source_date_epoch
+    if parent.path is None:
+        raise commands.Failed(f"images.{image}: its parent {parent.name} has no files to build on")
+    work.mkdir(parents=True)
+    shutil.copyfile(run.sources.keyring, work / "keyring.pgp")
+    if spec.files is not None:
+        (work / "files.tar").write_bytes(files_tar(run.loaded.root, spec.files, run.loaded.files, epoch))
+    (work / "build.list").write_text(
+        core.build_sources(
+            debian_["suite"], debian_["components"], mirror=oci_build.CHILD_MIRROR, keyring=oci_build.CHILD_KEYRING
+        )
+    )
+    scripts = identity.script_paths(run.loaded.definition, image, entry["modules"])
+    stage_run(
+        work, loaded=run.loaded, lock=run.lock, image=image, entry=entry, cache=run.sources.cache, scripts=scripts
+    )
+    for name in entry["modules"]:
+        for helper, text in modules.helper_files(run.loaded.definition.modules[name]).items():
+            (work / helper).write_text(text)
+    (work / LAYER_PROGRAM).write_text(
+        resources.files("debian_image_factory.build").joinpath(LAYER_PROGRAM).read_text(encoding="utf-8")
+    )
+    devices = device_lines(parent)
+    (work / Path(incus_build.DEVICES_PSEUDO).name).write_text("".join(devices))
+    (work / Path(incus_build.DEVICES_LIST).name).write_text(
+        "".join(line.split(" ", 1)[0].lstrip("/") + "\n" for line in devices)
+    )
+    if parent.kind == "core":
+        place(parent.path, work / Path(incus_build.PARENT_TARBALL).name)
+    else:
+        place(parents.incus_rootfs(parent), work / Path(incus_build.PARENT_SQUASHFS).name)
+    (work / "build.sh").write_text(
+        incus_build.build_script(
+            parent=parent.kind,
+            request=entry["request"],
+            source_date_epoch=epoch,
+            owner=run.builder_.owner,
+            files=spec.files is not None,
+            module_lines=module_lines(run.loaded.definition, entry, epoch),
+            hooks=scripts,
+            boot_lines=boot.boot_lines(),
+        )
+    )
+
+
+def build_incus(run: Run, image: str, scratch: Path, built: Mapping[str, parents.ParentArtifact]) -> Result:
+    """One Incus image: its parent's root with the kind's packages and the image's own, packed as a
+    squashfs, a metadata tarball beside it, both named by their fingerprint, and their records (DESIGN 8.1)."""
+    entry = run.plan["images"][image]
+    debian_ = run.plan["debian"]
+    suite, arch = debian_["suite"], debian_["architecture"]
+    parent_name = entry["parent"]
+    if parent_name is None:
+        raise commands.Failed(f"images.{image}: an Incus image needs a parent")
+    parent = parents.locate_parent(
+        image,
+        parent_name,
+        run.plan["images"][parent_name],
+        suite=suite,
+        arch=arch,
+        built=built,
+        out_dir=run.out_dir,
+        directories=run.directories,
+        registries=(),
+        pull=pull_parent,
+        scratch=scratch / "pulled",
+    )
+    ancestry = parents.incus_lineage(parent)
+    work = scratch / "factory"
+    prepare_incus_work(work, run, image, parent)
+    started = now()
+    run_builder(run.builder_, work, run.mirror, run.out_dir / f"{image}.build.log")
+    finished = now()
+    rootfs = work / Path(incus_build.ROOTFS).name
+    metadata = work / "metadata.tar.gz"
+    metadata.write_bytes(
+        incus.metadata_tarball(
+            image=image,
+            suite=suite,
+            arch=arch,
+            identity=entry["identity"],
+            source_date_epoch=run.loaded.definition.debian.source_date_epoch,
+        )
+    )
+    fingerprint = fileartifacts.fingerprint_of(metadata, rootfs)
+    names = incus.names(image, suite, arch, entry["identity"], fingerprint)
+    packages = debian.installed_packages((work / Path(incus_build.STATUS).name).read_text(encoding="utf-8"))
+    statements = image_records(
+        image=image,
+        entry=entry,
+        plan=run.plan,
+        lock=run.lock,
+        name=names.image,
+        digest=fingerprint,
+        packages=packages,
+        source=run.source,
+        releases=[*run.releases, *vouched(run.sources.cache, entry)],
+        builder_=run.builder_,
+        started=started,
+        finished=finished,
+        ancestors=ancestry,
+        files=[(names.metadata, sha256_file(metadata)), (names.rootfs, sha256_file(rootfs))],
+    )
+    # Records first, as for core; then the rootfs, and the metadata tarball last: it is the file that
+    # makes the pair an artifact (fileartifacts), so an interrupted build never leaves a half.
+    (run.out_dir / records_name_for(fingerprint)).write_text(records.record_lines(statements))
+    os.replace(rootfs, run.out_dir / names.rootfs)
+    os.replace(metadata, run.out_dir / names.metadata)
+    artifact = parents.ParentArtifact(image, "incus", names.metadata, fingerprint, run.out_dir / names.metadata)
+    return Result(artifact, len(packages))
+
+
 def split_parent_targets(texts: Sequence[str]) -> tuple[list[Path], list[published.OciTarget]]:
     """The `--parents` targets: where parents not built in this run may be, `dir://` and `oci://`."""
     directories: list[Path] = []
@@ -786,8 +941,11 @@ def build_command(
     built: dict[str, parents.ParentArtifact] = {}
     for image in chosen:
         with tempfile.TemporaryDirectory(prefix=f".work-{image}-", dir=out_dir) as scratch:
-            if plan["images"][image]["kind"] == "core":
+            kind = plan["images"][image]["kind"]
+            if kind == "core":
                 result = build_core(run, image, Path(scratch))
+            elif kind == "incus":
+                result = build_incus(run, image, Path(scratch), built)
             else:
                 result = build_oci(run, image, Path(scratch), built)
         built[image] = result.artifact

@@ -247,6 +247,8 @@ class BuildClaim:
     image: str
     identity: str
     finished_on: str | None
+    ancestors: tuple[tuple[str, str], ...] = ()
+    """(image, sha256) of the `parent: <image>` and `ancestor: <image>` resolved dependencies, nearest first."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,7 +329,26 @@ def _provenance(predicate: object) -> BuildClaim:
         times = _object(metadata, "runDetails.metadata") if metadata is not None else {}
         if "finishedOn" in times:
             finished = _finish_time(times["finishedOn"], "finishedOn")
-    return BuildClaim(image, identity, finished)
+    return BuildClaim(image, identity, finished, _ancestors(definition.get("resolvedDependencies")))
+
+
+def _ancestors(value: object) -> tuple[tuple[str, str], ...]:
+    """The images a build descends from, as its resolved dependencies name them (`parent: core`, then
+    `ancestor: <image>` for each further one). Other dependencies are not read here."""
+    if not isinstance(value, list):
+        return ()
+    found: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name, digest = item.get("name"), item.get("digest")
+        if not isinstance(name, str) or not name.startswith(("parent: ", "ancestor: ")):
+            continue
+        sha256 = digest.get("sha256") if isinstance(digest, dict) else None
+        if not isinstance(sha256, str) or not HEX64.fullmatch(sha256):
+            raise RecordsError(f"resolvedDependencies {name!r} has no sha256 digest")
+        found.append((name.split(": ", 1)[1], sha256))
+    return tuple(found)
 
 
 def _test_result(predicate: object) -> CheckClaim:

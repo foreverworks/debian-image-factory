@@ -16,10 +16,11 @@ from typing import Final
 
 from input_lock.identity import HEX64
 
-from .. import commands, oci, ocilayout, planfile, published
+from .. import commands, fileartifacts, incus, oci, ocilayout, planfile, published
+from .. import records as records_module
 
 CORE_EXTENSION: Final = "tar.gz"
-EXTENSIONS: Final[Mapping[str, str]] = {"core": CORE_EXTENSION, "oci": oci.LAYOUT_EXT}
+EXTENSIONS: Final[Mapping[str, str]] = {"core": CORE_EXTENSION, "oci": oci.LAYOUT_EXT, "incus": incus.METADATA_EXT}
 """The extension of each artifact kind a child can be built on."""
 DPKG_STATUS: Final = "var/lib/dpkg/status"
 
@@ -106,8 +107,52 @@ def describe_layout(path: Path, *, check_layers: bool) -> ParentArtifact:
     return ParentArtifact(parts.image, "oci", path.name, layout.descriptor.digest, path)
 
 
+def describe_incus(path: Path) -> ParentArtifact:
+    """An Incus image by its metadata tarball: the fingerprint of it and its rootfs beside it, checked
+    against the digest its name carries."""
+    parts = name_parts(path.name, "incus")
+    read = fileartifacts.read_artifact(path, parts)
+    if isinstance(read, published.Rejected):
+        raise commands.Failed(f"{path.name}: {read.reason}")
+    return ParentArtifact(parts.image, "incus", path.name, read.digest, path)
+
+
 def describe(path: Path, kind: str, *, check_layers: bool = True) -> ParentArtifact:
-    return describe_core(path) if kind == "core" else describe_layout(path, check_layers=check_layers)
+    if kind == "core":
+        return describe_core(path)
+    if kind == "incus":
+        return describe_incus(path)
+    return describe_layout(path, check_layers=check_layers)
+
+
+def incus_rootfs(parent: ParentArtifact) -> Path:
+    """The rootfs beside an Incus parent's metadata tarball."""
+    rootfs = incus.rootfs_of(parent.name)
+    if parent.path is None or rootfs is None:
+        raise commands.Failed(f"{parent.name}: its rootfs is needed to build on it")
+    return parent.path.parent / rootfs
+
+
+def incus_lineage(parent: ParentArtifact) -> list[records_module.Parent]:
+    """The images an Incus image descends from, nearest first: its parent, then every ancestor the
+    parent's own provenance names (`parent: <image>`, `ancestor: <image>`), up to core."""
+    chain = [records_module.Parent(parent.image, parent.digest)]
+    if parent.kind == "core":
+        return chain
+    if parent.path is None:
+        raise commands.Failed(f"{parent.name}: its records are needed to list the images below it")
+    path = parent.path.parent / published.records_name_for(parent.digest)
+    try:
+        statements = published.parse_envelopes(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, published.RecordsError) as error:
+        raise commands.Failed(f"{path.name}: the records of {parent.name} cannot be read ({error})") from None
+    builds = [
+        one for one in statements if one.build is not None and any(s.sha256 == parent.digest for s in one.subjects)
+    ]
+    if len(builds) != 1 or builds[0].build is None:
+        raise commands.Failed(f"{path.name}: {len(builds)} provenance records name {parent.name}, not one")
+    chain.extend(records_module.Parent(name, digest) for name, digest in builds[0].build.ancestors)
+    return chain
 
 
 def base_of(parent: ParentArtifact) -> Base:
@@ -200,7 +245,7 @@ def locate_parent(
         return built[parent]
     kind = entry["kind"]
     if kind not in EXTENSIONS:
-        raise commands.Failed(f"images.{child}: its parent {parent} is a {kind} image, which no OCI image is built on")
+        raise commands.Failed(f"images.{child}: its parent {parent} is a {kind} image, which no image is built on")
     digest = named_digest(entry)
     searched: list[str] = []
     for directory in (out_dir, *directories):
