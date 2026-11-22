@@ -15,11 +15,14 @@ from unittest import mock
 
 import input_lock
 from input_lock import JsonValue
+from input_lock.records import TestOutcome
 
-from debian_image_factory import cli, commands
-from tests.support import fixture_archive
+from debian_image_factory import cli, commands, definition, publish
+from tests.support import fake_registry, fixture_archive
 from tests.support.definitions import jsonable
+from tests.support.fake_registry import Fake
 from tests.support.fixture_archive import FIRST_ID, LATER_ID, SECOND_ID, Fixture
+from tests.support.oci_fixtures import make_image
 
 FACTORY = """\
 schema = 1
@@ -321,6 +324,25 @@ class PlanTest(CliCase):
         run = self.run_plan("--snapshot", FIRST_ID, "--against", f"dir://{self.tmp}/nowhere")
         self.assertEqual({entry["state"] for entry in run.plan().values()}, {"build"})
 
+    def test_against_an_empty_registry_builds_too(self) -> None:
+        with fake_registry.running(Fake()) as name:
+            run = self.run_plan("--snapshot", FIRST_ID, "--against", f"oci://{name}/images")
+        self.assertEqual(run.code, 0)
+        self.assertEqual({entry["state"] for entry in run.plan().values()}, {"build"})
+
+    def test_against_a_registry_that_holds_an_image_reuses_it(self) -> None:
+        identity = str(self.run_plan("--snapshot", FIRST_ID).plan()["core"]["identity"])
+        checks: list[tuple[str, TestOutcome]] = [(check, "PASSED") for check in definition.BUILTIN_CHECKS["core"]]
+        out = Path(tempfile.mkdtemp(dir=self.tmp))
+        built = make_image(out, image="core", identity=identity, checks=checks)
+        with fake_registry.running(Fake()) as name:
+            publish.publish_command(out, [f"oci://{name}/images"], "none", io.StringIO())
+            run = self.run_plan("--snapshot", FIRST_ID, "--against", f"oci://{name}/images")
+        self.assertEqual(run.code, 0)
+        self.assertEqual(run.plan()["core"]["state"], "reuse")
+        self.assertEqual(run.plan()["core"]["artifact"], built.digest)
+        self.assertEqual(run.plan()["app-a"]["state"], "build")
+
     def test_rebuild_with_a_reason_is_recorded(self) -> None:
         run = self.run_plan("--snapshot", FIRST_ID, "--rebuild", "app-b", "--reason", "key rotation")
         self.assertEqual(run.plan()["app-b"]["because"], [{"rebuild": "key rotation"}])
@@ -465,13 +487,13 @@ class ExitCodeTest(CliCase):
         self.assertIn("unknown target scheme", run.err)
 
     def test_a_target_not_read_yet_is_exit_2(self) -> None:
-        run = self.plan(self.workspace(), "--snapshot", FIRST_ID, "--against", "oci://registry.example.com/images")
+        run = self.plan(self.workspace(), "--snapshot", FIRST_ID, "--against", "github-release://someone/repo@v1")
         self.assertEqual(run.code, 2)
         self.assertIn("arrive in a later release", run.err)
 
     def test_a_target_not_read_yet_is_refused_before_anything_is_resolved(self) -> None:
         root = self.workspace()
-        for target in ("oci://registry.example.com/images", "github-release://someone/repo@v1"):
+        for target in ("github-release://someone/repo@v1",):
             with self.subTest(target=target):
                 run = self.raw(
                     "plan", "--lock", str(root / "lock.json"), "--definition", str(root / "factory.toml"),
@@ -479,7 +501,10 @@ class ExitCodeTest(CliCase):
                     "--cache", str(self.tmp / "cache"), "--against", target,
                 )  # fmt: skip
                 self.assertEqual(run.code, 2)  # not 1: the unreachable service was never asked
-                self.assertIn("arrive in a later release; this release reads dir:// targets", run.err)
+                self.assertIn(
+                    "github-release targets arrive in a later release; this release reads dir:// and oci:// targets",
+                    run.err,
+                )
 
     def test_a_lock_that_is_not_utf8_is_exit_1_naming_the_file(self) -> None:
         root = self.workspace()

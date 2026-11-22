@@ -288,9 +288,10 @@ def parse_targets(against: Sequence[str]) -> list[published.Target]:
     except ValueError as error:
         raise Usage(str(error)) from None
     for target in parsed:
-        if not isinstance(target, published.DirTarget):
-            scheme = "oci" if isinstance(target, published.OciTarget) else "github-release"
-            raise Usage(f"{scheme} targets arrive in a later release; this release reads dir:// targets")
+        if isinstance(target, published.ReleaseTarget):
+            raise Usage(
+                "github-release targets arrive in a later release; this release reads dir:// and oci:// targets"
+            )
     return parsed
 
 

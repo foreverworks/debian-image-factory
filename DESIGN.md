@@ -168,6 +168,9 @@ release fixes: mmdebstrap, apt, dpkg, tar, gzip, cpio, squashfs-tools and python
 ships them, plus the tools that only move or check bytes (gnupg, gpgv, oras, util-linux). Its
 recipe is `builder/Dockerfile`; its snapshot is the `debian_snapshot` of the repository's own
 `lock.json`, which also pins input-lock.
+A later release publishes that builder image through `publish.push_layout`, pinned by digest, from
+the layout `docker save` writes; `push_layout` takes any single-image OCI layout and assumes none of
+the factory's annotations.
 
 - **In CI and by default locally**, the builder is a container image the factory release pins by
   digest. From the first milestone it is built by the factory's own release pipeline from a fixed
@@ -567,7 +570,15 @@ The plan never keeps a list of what was built. It asks the targets, by identity:
 
 - **OCI targets:** every published image carries a tag `identity-<identity in full hex>` (73
   characters, within the registry limit), besides any tag the consumer moves. One manifest request
-  answers whether that identity exists; the annotation and provenance on the manifest confirm it.
+  answers whether that identity exists (404: nothing). The manifest must be an OCI image manifest
+  whose identity annotation is the identity; its records are then gathered from the registry
+  (the referrers API, or the tag schema when the registry answers 404 there), each envelope read
+  from its blob and checked against its digest, and joined as the lines of a records file that the
+  provenance rules below apply to. The artifact is named `oci://<registry>/<repository>@sha256:<manifest
+  digest>`. A referrer that cannot be read, or an image that does not count, is listed under
+  `rejected` with the reason. The tag names the latest image pushed for the identity: a build that
+  replaces a failed one moves it, and the older manifest stays reachable by digest. The order of the
+  records, which decides a check's last result, is the order the registry lists them in.
 - **File targets** (`github-release://`, `dir://`): artifact files are named
   `<image>-<suite>-<arch>-<first 16 hex of the identity>-<first 12 hex of the digest>.<ext>`. A
   listing filtered by the image and identity prefix answers; the provenance in the
@@ -585,8 +596,8 @@ A child whose parent waits waits too, unless the child itself is reusable. Sever
 check count in file order, the last one wins; when several artifacts qualify, the newest
 `finishedOn` wins, ties by the smallest digest. The provenance names the image in
 `externalParameters.image` and the identity in `internalParameters.identity` (8.2), and a records
-file counts only when a statement's subject is the file's real sha256. M1 reads `dir://` targets;
-`oci://` and `github-release://` lookups arrive with their publishers.
+file counts only when a statement's subject is the file's real sha256. `dir://` and `oci://`
+lookups are live; `github-release://` arrives with its publisher.
 
 ### 7.5 Choosing the build snapshot ID
 
@@ -728,6 +739,21 @@ Where they live:
   `sha256-<subject digest>` holding an index of the referrers. Updating that index is a
   read-modify-write, so the factory serializes attaches per subject: one attach at a time per image,
   re-reading the index before each write.
+
+  How the tag schema is used, exactly. A record is attached in this order: the envelope blob (the
+  line's bytes without its newline), the empty config blob, then the artifact manifest above, pushed
+  by digest. If that PUT answers `OCI-Subject`, the registry has indexed the referrer and nothing more
+  is done. Otherwise the factory reads the tag `sha256-<subject digest in hex>` (404: no index yet),
+  appends the referrer's descriptor to its `manifests` unless a descriptor with the same digest is
+  there, and PUTs the result as an image index (`application/vnd.oci.image.index.v1+json`) under that
+  tag. The index is canonical JSON (sorted keys, no whitespace) and lists referrers in attach order,
+  each as `mediaType`, `digest`, `size`, `artifactType` (`application/vnd.in-toto+json`) and the
+  `in-toto.io/predicate-type` annotation of its record. The tag is read again right before each
+  write and records are attached one at a time, so a publisher never overwrites what it has just
+  read; two publishers attaching to one image at the same moment can still lose an entry, and
+  publishing again restores it. Readers ask the referrers API first and read the tag only on a 404.
+  A record counts as already attached when a referrer of the subject carries an envelope with the
+  same digest, so publishing again adds only the records that are new.
 - **Files:** one `<digest>.intoto.jsonl` beside the artifact, one envelope per line, where
   `<digest>` is the sha256 (or Incus fingerprint) in full hex.
 
@@ -908,7 +934,8 @@ debian-image-factory build plan.json --out out/ [--image NAME]... [--builder-ima
 debian-image-factory test out/ [--check NAME]...
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
 debian-image-factory publish out/ --to TARGET... [--sign none|keyless|key:REF]
-debian-image-factory verify REF [--require-checks]       records match the bits, provenance names the lock, checks complete
+debian-image-factory verify REF [--require-checks] [--lock FILE] [--definition FILE]
+                                                         records match the bits, provenance names the lock, checks complete
 debian-image-factory prune --against TARGET... --pin DIGEST... [--keep-good 5] [--keep-candidates 1] [--dry-run]
 ```
 
@@ -930,6 +957,33 @@ every build already runs with no network.
 Targets are `oci://<registry>/<repository>`, `github-release://<owner>/<repo>@<tag>` and
 `dir://<path>`. `plan --against` looks identities up live in those targets (7.4); nothing about
 the published state is stored in the consumer's repository.
+
+`publish` writes `dir://` targets (files only: an OCI image layout is refused there) and `oci://`
+targets (OCI images only: a core tarball is refused there; when `out/` holds both, each target
+takes its kind and the command names what it left). An OCI image is pushed with its tag
+`identity-<identity>`, its records are attached as referrers (8.2), and publishing again pushes and
+attaches only what the registry lacks. Credentials come from the Docker config (`$DOCKER_CONFIG`
+or `~/.docker`: `auths`, `credHelpers`, `credsStore`); registries on `localhost`, `127.0.0.1` and
+`[::1]` are spoken to over http, all others over https.
+
+`verify REF` takes `oci://<registry>/<repository>@sha256:<hex>`, `oci://<registry>/<repository>:<tag>`,
+a local `.oci` layout directory, or an artifact file with its `<digest>.intoto.jsonl` beside it,
+and names every problem it finds (exit 1) or prints a short summary (exit 0). It checks that:
+
+- the bits match their digest: an image's manifest digest (a registry's blobs are checked as they
+  are read, a layout on disk in full, layers included; from a registry the layers are checked when
+  pulled), a file's sha256;
+- every record is a DSSE envelope of an in-toto Statement v1 that names the artifact's digest as a
+  subject;
+- there is exactly one provenance, whose build type is a release of this factory's, naming the
+  image and an identity equal to the artifact's (an image's identity annotation; a file's name
+  carries its first 16 hex);
+- its resolved dependencies name `lock.json` by sha256, and that is the sha256 of `--lock` when given;
+- there is exactly one SBOM, whose document namespace ends in `sha256-<digest>` and whose
+  `SPDXRef-Image` has the version `sha256:<digest>`;
+- with `--require-checks`, every check the definition (`--definition`, default `factory.toml`)
+  requires for the image has a passing last result, by the rules of 7.4 (`has_lock_entries` comes
+  from the provenance's locked inputs); without it the checks present are listed.
 
 Exit codes: 0 done, 1 a check or validation failed (with every problem named), 2 usage. `plan`
 exits 0 whether or not anything needs building; `plan.json` and the Action's `changed` output say.
@@ -1093,6 +1147,16 @@ identities of the images that install it, and nothing else.
   OCI, `sbom-complete`, `ancestry`, `same-resolution`, `no-build-snapshot`, `byte-equal`, `oci-run`;
   offline replay from an inputs bundle with `--network none`; publishing to a throwaway local
   registry container, then `verify` and `plan --against` it.
+- **Two registries, one with the referrers API and one without** (`tests/integration/test_registries.py`,
+  rootless Docker on 127.0.0.1): zot v2.1.23 (`ghcr.io/project-zot/zot`), which answers the referrers
+  endpoint with 200 and answers `OCI-Subject` on a referrer's manifest, and the CNCF distribution
+  registry 3.1.2 (`docker.io/library/registry`), which has no referrers handler and answers 404 there,
+  as GHCR does in production. The test asks each for the referrers of an unknown digest before it
+  relies on that. A synthetic one-layer image with records shaped like the factory's is published to
+  each, published again (no second copy of a blob, manifest or record), found by `plan`'s lookup,
+  pulled back byte for byte and verified; a changed layer then fails `verify`. The registry client's
+  unit tests run against an in-process server (authentication challenges, uploads, `OCI-Subject`,
+  the tag schema).
 - **The engine revision guard.** For every kind whose fixture build is byte-equal, the expected
   digest is recorded beside the engine revision. A change that alters those bytes without raising
   the revision fails here. A kind not yet byte-equal relies on review: any change to its build code
