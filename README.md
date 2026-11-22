@@ -3,10 +3,10 @@
 **Every Debian image you ship, built from one archive snapshot, rebuilt only when something in it
 actually changed, and carrying standard records of what is inside and how it was made.**
 
-> **Status: the contract works, nothing is built yet.** The first milestone is in: it checks your
-> lock and definition, resolves every image's exact package set from a snapshot, computes each
-> image's input identity and tells you what would be built and why. Building images comes with the
-> next milestones. The full design is in [DESIGN.md](DESIGN.md). If something here is unclear,
+> **Status: core, OCI and Incus images build, test and publish.** The factory checks your lock
+> and definition, resolves every image's exact package set from a snapshot, tells you what would be
+> built and why, and builds core, OCI and Incus images with their SBOM, provenance and checks.
+> Installer and OS images, and the nightly loop, come with the next milestones. The full design is in [DESIGN.md](DESIGN.md). If something here is unclear,
 > please open an issue.
 
 ## The problem
@@ -195,8 +195,16 @@ each image under the tag `identity-<identity>` and attaches its records as refer
 (an `oci://` reference, a layout directory or a file) against its records. Credentials come from your
 Docker config. Files publish to a GitHub release too: `publish out/ --to github-release://example/images@v1`
 uploads them as assets (creating the release when the tag has none), and `plan --against` the same address
-reads them back. It uses `GITHUB_TOKEN`, else `GH_TOKEN`, and `GITHUB_API_URL` when it is set. The later
-milestones add installer and OS images.
+reads them back. It uses `GITHUB_TOKEN`, else `GH_TOKEN`, and `GITHUB_API_URL` when it is set.
+
+An Incus image is two files named by their Incus fingerprint, `<name>.incus.tar.gz` (its metadata
+and the factory's NoCloud templates) and `<name>.rootfs.squashfs`, ready for `incus image import
+<name>.incus.tar.gz <name>.rootfs.squashfs`. An instance gets its user data from `cloud-init.user-data`
+(or the older `user.user-data`), its hostname from its name, and its machine ID and SSH host keys at
+its first boot. `test` proves that on an Incus host: `incus-boot` launches it with each key, and
+`two-clones` launches two and compares their identities. Where no Incus host answers, both are reported
+as not run, never as passed; `scripts/incus-vm -- <command>` runs a command on an Incus host in a
+throwaway Debian 13 VM (KVM when the machine has it, emulated otherwise).
 
 In GitHub Actions, one step runs the same thing nightly, and reports `changed=false` on the nights
 when there is nothing to do. The planned interface is in [DESIGN.md, section 9](DESIGN.md#9-running-it).
@@ -255,11 +263,14 @@ it runs on the python3 Debian already ships. It is distributed as a single `.pyz
 
 ## Status and roadmap
 
-Two milestones are in. The first: the lock and definition checks, identities, `lock check`, `lock
+The first milestone brought the lock and definition checks, identities, `lock check`, `lock
 snapshot`, `lock baseline`, `plan` and a pinned builder image. The second builds core: `fetch` and
 its partial mirror, an offline core build that gives the same bytes from the same inputs, its SBOM
-and provenance, the core checks behind `test`, and the `dir://` target. Next come OCI, Incus,
-installer and OS images, then the nightly "rebuild only what changed" loop. The milestones are in
+and provenance, the core checks behind `test`, and the `dir://` target. The third builds OCI images
+with one added layer per child, publishes them to registries with their records as referrers, and
+adds `verify`. The fourth builds Incus images and their children, boots them on an Incus host in
+`test`, and publishes files to GitHub releases. Installer and OS images come next, then the nightly
+"rebuild only what changed" loop. The milestones are in
 [DESIGN.md, section 14](DESIGN.md#14-milestones).
 
 `scripts/test static`, `scripts/test unit` and `scripts/test integration` run the same checks CI

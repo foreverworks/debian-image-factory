@@ -68,7 +68,7 @@ def unpack_lines(parent: str, source_date_epoch: int) -> list[str]:
     if parent == "incus":
         return [
             *lines,
-            f'unsquashfs -no-progress -quiet -excludes -ef {DEVICES_LIST} -d "$root" {PARENT_SQUASHFS}',
+            f'unsquashfs -no-progress -quiet -exclude-file {DEVICES_LIST} -d "$root" {PARENT_SQUASHFS}',
         ]
     raise ValueError(f"an Incus image is built on core or on an Incus image, not on {parent!r}")
 
