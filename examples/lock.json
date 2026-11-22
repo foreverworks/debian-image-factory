@@ -14,7 +14,7 @@
       "extractVersion": "^v(?<version>.+)$",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "url": "https://github.com/foreverworks/debian-image-factory/releases/download/v{version}/debian-image-factory-{version}.pyz",
-      "version": "0.6.2"
+      "version": "0.6.3"
     },
     "example-tool": {
       "apt": "example-tool",
