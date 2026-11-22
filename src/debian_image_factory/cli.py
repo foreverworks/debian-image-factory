@@ -223,6 +223,14 @@ def parser() -> argparse.ArgumentParser:
             "key:PATH_OR_KMS_URI (a key you hold; never sent to a transparency log)"
         ),
     )
+    publish_.add_argument(
+        "--require-signed-target",
+        action="store_true",
+        help=(
+            "with --sign, fail when a target already holds a record unsigned, which publish never rewrites; "
+            "without it publish warns with the count and succeeds"
+        ),
+    )
 
     verify_ = commands_.add_parser(
         "verify", help="the records of an artifact match its bits, and its required checks are complete"
@@ -420,7 +428,12 @@ def dispatch(arguments: argparse.Namespace) -> int:
         )
     if arguments.command == "publish":
         return publish.publish_command(
-            arguments.out_dir, arguments.to, arguments.sign, sys.stdout, images=arguments.image
+            arguments.out_dir,
+            arguments.to,
+            arguments.sign,
+            sys.stdout,
+            images=arguments.image,
+            require_signed_target=arguments.require_signed_target,
         )
     if arguments.command == "verify":
         return verify.verify_command(

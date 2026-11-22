@@ -98,16 +98,37 @@ def artifacts_in(out_dir: Path) -> list[fileartifacts.FileArtifact]:
     return found
 
 
-def signed_additions(signer: sign.Signer | None, new: str, present: str, where: str, out: TextIO) -> str:
+def report_additions(found: sign.Additions, where: str, require: bool, out: TextIO) -> None:
+    """Say what a signed publish left alone: held lines that are no record (a warning each), records the target
+    already holds (said), and records it holds unsigned, which stay unsigned: a warning with their count, or a
+    failure when `require` (`--require-signed-target`)."""
+    for warning in found.ignored:
+        print(f"{where}: warning: {warning}", file=out)
+    if found.skipped:
+        print(f"{where}: {found.skipped} records are already there and are not signed again", file=out)
+    if found.unsigned_held:
+        why = (
+            f"{found.unsigned_held} of them are not signed in the target and stay unsigned: a record the target "
+            "holds is never rewritten, so only the records this publish adds are signed"
+        )
+        if require:
+            raise commands.Failed(f"{where}: --require-signed-target: {why}")
+        print(f"{where}: warning: {why}", file=out)
+
+
+def signed_additions(
+    signer: sign.Signer | None, new: str, present: str, where: str, out: TextIO, require: bool = False
+) -> str:
     """The records `new` holds, signed when there is a signer and left out when `present` holds their payload
-    already (`sign.to_add`); the text to merge into `present`. A record left out is said so."""
+    already (`sign.to_add`); the text to merge into `present`. What was left out or left unsigned is said."""
+    held = present.splitlines()
+    labels = [f"{where} line {number}" for number in range(1, len(held) + 1)]
     try:
-        lines, skipped = sign.to_add(signer, [one for one in new.splitlines() if one.strip()], present.splitlines())
+        found = sign.to_add(signer, [one for one in new.splitlines() if one.strip()], held, labels)
     except sign.SignError as error:
         raise commands.Failed(f"{where}: {error}") from None
-    if skipped:
-        print(f"{where}: {skipped} records are already there and are not signed again", file=out)
-    return "".join(one + "\n" for one in lines)
+    report_additions(found, where, require, out)
+    return "".join(one + "\n" for one in found.lines)
 
 
 def publish_dir(
@@ -116,6 +137,7 @@ def publish_dir(
     target: Path,
     out: TextIO,
     signer: sign.Signer | None = None,
+    require_signed: bool = False,
 ) -> None:
     """Copy `artifacts` of `out_dir` (each of its files) and merge their records into the directory `target`,
     signed when there is a `signer`."""
@@ -133,7 +155,8 @@ def publish_dir(
         records_name = published.records_name_for(artifact.digest)
         held = target / records_name
         present = held.read_text(encoding="utf-8") if held.is_file() else ""
-        new = signed_additions(signer, (out_dir / records_name).read_text(encoding="utf-8"), present, str(target), out)
+        fresh = (out_dir / records_name).read_text(encoding="utf-8")
+        new = signed_additions(signer, fresh, present, str(target), out, require_signed)
         merged = merged_lines(present, new)
         added = len(merged.splitlines()) - len([line for line in present.splitlines() if line.strip()])
         if merged != present:
@@ -171,6 +194,7 @@ def publish_release(
     target: published.ReleaseTarget,
     out: TextIO,
     signer: sign.Signer | None = None,
+    require_signed: bool = False,
 ) -> None:
     """Upload `artifacts` of `out_dir` (each of its files) to the release `target`, create the release
     when the tag has none, and merge each artifact's records into its records asset.
@@ -199,7 +223,7 @@ def publish_release(
                     held[path.name] = github.store_asset(client, release, path.name, path, secrets.token_hex(8))
                     states.append("uploaded")
             state = "already there" if set(states) == {"already there"} else "uploaded"
-            added = merge_records(client, release, held, artifact.digest, out_dir, signer, out)
+            added = merge_records(client, release, held, artifact.digest, out_dir, signer, out, require_signed)
             print(f"{client.name}: {artifact.name} {state}, {added} record lines added", file=out)
     except github.AlreadyExistsError as error:
         raise commands.Failed(f"{error}; nothing was overwritten") from None
@@ -226,6 +250,7 @@ def merge_records(
     out_dir: Path,
     signer: sign.Signer | None = None,
     out: TextIO | None = None,
+    require_signed: bool = False,
 ) -> int:
     """Merge the records file of `out_dir` for `digest` into the release's records asset; the number of
     lines added. `held` follows the release's assets."""
@@ -237,7 +262,7 @@ def merge_records(
             present = github.read_asset(client, held[name]).decode("utf-8")
         except UnicodeDecodeError:
             raise commands.Failed(f"{client.name}: the records asset {name} is not UTF-8") from None
-    new = signed_additions(signer, new, present, client.name, out or io.StringIO())
+    new = signed_additions(signer, new, present, client.name, out or io.StringIO(), require_signed)
     merged = merged_lines(present, new)
     if merged == present:
         return 0
@@ -406,18 +431,29 @@ def describe(error: OSError) -> str:
 
 
 def signed_for_registry(
-    client: registry.Client, digest: str, lines: Sequence[bytes], signer: sign.Signer, out: TextIO
+    client: registry.Client,
+    digest: str,
+    lines: Sequence[bytes],
+    signer: sign.Signer,
+    out: TextIO,
+    require_signed: bool = False,
 ) -> list[bytes]:
     """`lines` signed, minus the records the image `digest` already has attached in the repository."""
-    envelopes, _ = registry.fetch_envelopes(client, registry.referrers_of(client, digest).attached)
-    held = [one.decode("utf-8", errors="replace") for one in envelopes]
+    held: list[str] = []
+    labels: list[str] = []
+    for one in registry.referrers_of(client, digest).attached:
+        envelopes, problems = registry.fetch_envelopes(client, [one])
+        for problem in problems:
+            print(f"{client.name}: warning: {problem}", file=out)
+        for envelope in envelopes:
+            held.append(envelope.decode("utf-8", errors="replace"))
+            labels.append(f"{client.name} referrer sha256:{one.referrer.digest}")
     try:
-        added, skipped = sign.to_add(signer, [one.decode("utf-8") for one in lines], held)
+        found = sign.to_add(signer, [one.decode("utf-8") for one in lines], held, labels)
     except sign.SignError as error:
         raise commands.Failed(f"{client.name}: {error}") from None
-    if skipped:
-        print(f"{client.name}: {skipped} records are already attached and are not signed again", file=out)
-    return [one.encode("utf-8") for one in added]
+    report_additions(found, client.name, require_signed, out)
+    return [one.encode("utf-8") for one in found.lines]
 
 
 def publish_oci(
@@ -427,6 +463,7 @@ def publish_oci(
     out: TextIO,
     connect: Callable[[published.OciTarget], registry.Client],
     signer: sign.Signer | None = None,
+    require_signed: bool = False,
 ) -> None:
     """Push every layout of `out_dir` to the repository `target`, tagging each `identity-<identity>`. With a
     `signer` each record is signed first, unless the repository already holds that record."""
@@ -435,7 +472,7 @@ def publish_oci(
         layout, identity, lines = checked_layout(out_dir, path)
         try:
             if signer is not None:
-                lines = signed_for_registry(client, layout.descriptor.digest, lines, signer, out)
+                lines = signed_for_registry(client, layout.descriptor.digest, lines, signer, out, require_signed)
             report = push_layout(client, layout, [oci.identity_tag(identity)], lines)
         except oci.OciError as error:
             raise commands.Failed(f"{path}: {error}") from None
@@ -496,6 +533,7 @@ def publish_command(
     images: Sequence[str] = (),
     env: Mapping[str, str] | None = None,
     run: sign.Run = sign.run_process,
+    require_signed_target: bool = False,
 ) -> int:
     try:
         signer = sign.prepare(sign.parse_mode(sign_mode), os.environ if env is None else env, run)
@@ -503,6 +541,8 @@ def publish_command(
         raise commands.Usage(str(error)) from None
     except sign.SignError as error:
         raise commands.Failed(str(error)) from None
+    if require_signed_target and signer is None:
+        raise commands.Usage("--require-signed-target needs --sign keyless or --sign key:<key>")
     if not targets:
         raise commands.Usage("publish needs at least one --to TARGET")
     destinations = commands.parse_targets(targets)
@@ -530,7 +570,7 @@ def publish_command(
         if isinstance(one, published.DirTarget):
             for path in layouts:
                 print(f"{one.path}: {path.name} not published here, OCI images publish to oci:// targets", file=out)
-            publish_dir(out_dir, files, Path(one.path), out, signer)
+            publish_dir(out_dir, files, Path(one.path), out, signer, require_signed_target)
         elif isinstance(one, published.OciTarget):
             for artifact in files:
                 print(
@@ -539,7 +579,7 @@ def publish_command(
                     file=out,
                 )
             for repository, group in repositories:
-                publish_oci(out_dir, repository, group, out, connect, signer)
+                publish_oci(out_dir, repository, group, out, connect, signer, require_signed_target)
         else:
             for path in layouts:
                 print(
@@ -547,5 +587,5 @@ def publish_command(
                     "OCI images publish to oci:// targets",
                     file=out,
                 )
-            publish_release(out_dir, files, one, out, signer)
+            publish_release(out_dir, files, one, out, signer, require_signed_target)
     return 0

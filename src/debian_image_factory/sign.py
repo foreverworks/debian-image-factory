@@ -303,22 +303,61 @@ def sign_line(signer: Signer, line: str) -> str:
     return with_signature(line, bundle_signature(bundle, payload))
 
 
-def to_add(signer: Signer | None, lines: Sequence[str], held: Sequence[str]) -> tuple[list[str], int]:
-    """The records to add to a target that holds `held`: with a signer, each line of `lines` signed; and the
-    number of lines left out because the target already holds that record's payload (signed or not).
-    Published records are never rewritten, so a record that is already there stays as it is, and a signed
-    publish run twice adds nothing. Without a signer, every line, as it is."""
+@dataclass(frozen=True, slots=True)
+class Additions:
+    """What `to_add` decided for a target."""
+
+    lines: list[str]
+    """The records to add, signed."""
+    skipped: int
+    """The lines left out because the target already holds that record's payload."""
+    unsigned_held: int
+    """Of those, how many the target holds without a signature: they stay unsigned."""
+    ignored: tuple[str, ...]
+    """The held lines that are no record (not JSON, not an object, no payload), each named by its position."""
+
+
+def held_payloads(held: Sequence[str], labels: Sequence[str]) -> tuple[dict[str, bool], tuple[str, ...]]:
+    """The payload of each record in `held` and whether it is signed there, and a warning for every held line
+    that is no record, named by its `labels` entry (unsigned publish leaves such a line where it is, too)."""
+    found: dict[str, bool] = {}
+    ignored: list[str] = []
+    for line, label in zip(held, labels, strict=True):
+        if not line.strip():
+            continue
+        try:
+            envelope = _envelope(line)
+        except SignError as error:
+            ignored.append(f"{label}: {error}, left as it is and not compared")
+            continue
+        payload = envelope.get("payload")
+        if not isinstance(payload, str):
+            ignored.append(f"{label}: a record has no payload, left as it is and not compared")
+            continue
+        found[payload] = found.get(payload, False) or bool(signatures_of(envelope))
+    return found, tuple(ignored)
+
+
+def to_add(signer: Signer | None, lines: Sequence[str], held: Sequence[str], labels: Sequence[str] = ()) -> Additions:
+    """The records to add to a target that holds `held` (`labels` name its lines for messages, by default
+    "line N"): with a signer, each line of `lines` signed, minus the lines whose payload the target already
+    holds, signed or not. Published records are never rewritten, so a record that is already there stays as it
+    is, and a signed publish run twice adds nothing. A held line that is no record is skipped and reported in
+    `ignored`. Without a signer, every line, as it is."""
     if signer is None:
-        return list(lines), 0
-    held_payloads = {payload_of(one) for one in held if one.strip()}
+        return Additions(list(lines), 0, 0, ())
+    names = list(labels) if labels else [f"line {number}" for number in range(1, len(held) + 1)]
+    held_state, ignored = held_payloads(held, names)
     found: list[str] = []
-    skipped = 0
+    skipped = unsigned = 0
     for line in lines:
-        if payload_of(line) in held_payloads:
+        payload = payload_of(line)
+        if payload in held_state:
             skipped += 1
+            unsigned += not held_state[payload]
         else:
             found.append(sign_line(signer, line))
-    return found, skipped
+    return Additions(found, skipped, unsigned, ignored)
 
 
 # ---- verifying --------------------------------------------------------------------------------

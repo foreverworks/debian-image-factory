@@ -2,10 +2,13 @@
 
 import contextlib
 import io
+import subprocess
+import tempfile
 import threading
 import types
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from pathlib import Path
 from unittest import mock
 
 from debian_image_factory import capacity, commands
@@ -203,3 +206,110 @@ class ScheduleImagesTest(unittest.TestCase):
         text = str(caught.exception)
         self.assertIn("node-26: the builder failed", text)
         self.assertIn("node-22: the builder failed", text)
+
+
+class InterruptTest(unittest.TestCase):
+    def test_ctrl_c_stops_what_runs_starts_nothing_and_raises_again(self) -> None:
+        release = threading.Event()
+        started: list[str] = []
+        stopped: list[bool] = []
+
+        b_running = threading.Event()
+
+        def work(image: str, built: Mapping[str, str]) -> str:
+            started.append(image)
+            if image != "a":
+                b_running.set()
+                release.wait(timeout=10)
+            return image
+
+        def interrupted(image: str, result: str) -> None:
+            b_running.wait(timeout=10)
+            raise KeyboardInterrupt
+
+        def stop() -> None:
+            stopped.append(True)
+            release.set()
+
+        names = ["a", "b", "c", "d"]
+        with self.assertRaises(KeyboardInterrupt):
+            schedule.run(names, dict.fromkeys(names), work, jobs=2, on_done=interrupted, on_interrupt=stop)
+        self.assertEqual(stopped, [True])
+        self.assertEqual(sorted(started), ["a", "b"])  # c and d never started
+
+    def test_schedule_images_stops_the_builders_and_turns_it_into_a_failure_with_a_message(self) -> None:
+        entries = {name: {"parent": None, "kind": "oci"} for name in ("a", "b")}
+        context = types.SimpleNamespace(plan={"images": entries})
+        stopped: list[bool] = []
+
+        def interrupted(*args: object, **kwargs: Callable[[], object]) -> None:
+            kwargs["on_interrupt"]()
+            raise KeyboardInterrupt
+
+        with (
+            mock.patch.object(run.schedule, "run", interrupted),
+            mock.patch.object(run, "stop_builders", lambda: stopped.append(True) or 0),
+            self.assertRaises(commands.Failed) as caught,
+        ):
+            run.schedule_images(context, ["a", "b"], 2, io.StringIO())  # type: ignore[arg-type]  # a stand-in with only plan
+        self.assertEqual(stopped, [True])
+        self.assertIn("interrupted", str(caught.exception))
+
+
+class StopBuildersTest(unittest.TestCase):
+    def test_each_running_builder_is_stopped_by_its_own_container_id(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            cidfile = Path(scratch) / ".a.build.log.cid"
+            cidfile.write_text("abc123\n")
+            calls: list[list[str]] = []
+
+            def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                calls.append(args)
+                run._RUNNING.discard(cidfile)  # the container ended, so its builder returned
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            run._RUNNING.add(cidfile)
+            try:
+                with mock.patch.object(run.subprocess, "run", fake_run):
+                    count = run.stop_builders(wait=5)
+            finally:
+                run._RUNNING.discard(cidfile)
+        self.assertEqual(count, 1)
+        self.assertEqual(calls, [["docker", "stop", "--time", "10", "abc123"]])
+
+
+class RecordsWriteTest(unittest.TestCase):
+    def context(self, out_dir: Path) -> run.Run:
+        return types.SimpleNamespace(out_dir=out_dir, written=set())  # type: ignore[return-value]  # only these two are read
+
+    def write(self, context: run.Run, name: str, lines: list[str]) -> None:
+        with mock.patch.object(run.records, "record_lines", lambda _: "".join(f"{one}\n" for one in lines)):
+            run.write_records(context, name, [])
+
+    def test_two_images_with_one_artifact_merge_their_records(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            context = self.context(Path(scratch))
+            self.write(context, "x.intoto.jsonl", ["one", "two"])
+            self.write(context, "x.intoto.jsonl", ["one", "three"])
+            self.assertEqual((Path(scratch) / "x.intoto.jsonl").read_text().splitlines(), ["one", "three", "two"])
+            self.assertEqual([p.name for p in Path(scratch).iterdir()], ["x.intoto.jsonl"])  # no temporary left
+
+    def test_a_file_from_an_earlier_run_is_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            (Path(scratch) / "x.intoto.jsonl").write_text("old\n")
+            self.write(self.context(Path(scratch)), "x.intoto.jsonl", ["new"])
+            self.assertEqual((Path(scratch) / "x.intoto.jsonl").read_text(), "new\n")
+
+    def test_concurrent_writers_leave_a_whole_file(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            context = self.context(Path(scratch))
+            threads = [
+                threading.Thread(target=self.write, args=(context, "x.intoto.jsonl", [f"line-{n}", "shared"]))
+                for n in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            lines = (Path(scratch) / "x.intoto.jsonl").read_text().splitlines()
+            self.assertEqual(sorted(lines), sorted([f"line-{n}" for n in range(8)] + ["shared"]))

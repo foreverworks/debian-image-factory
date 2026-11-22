@@ -206,10 +206,28 @@ class SigningTest(unittest.TestCase):
         fake = FakeCosign()
         signer = prepared(fake, "keyless")
         other = provenance_line("b", "1" * 64).strip()
-        added, skipped = sign.to_add(signer, [line(), other], [line()])
-        self.assertEqual((len(added), skipped), (1, 1))
-        self.assertEqual(sign.payload_of(added[0]), sign.payload_of(other))
-        self.assertEqual(sign.to_add(None, [line(), other], [line()]), ([line(), other], 0))
+        found = sign.to_add(signer, [line(), other], [line()])
+        self.assertEqual((len(found.lines), found.skipped, found.unsigned_held), (1, 1, 1))
+        self.assertEqual(sign.payload_of(found.lines[0]), sign.payload_of(other))
+        self.assertEqual(sign.to_add(None, [line(), other], [line()]), sign.Additions([line(), other], 0, 0, ()))
+
+    def test_a_signed_held_record_is_not_counted_as_left_unsigned(self) -> None:
+        signer = prepared(FakeCosign(), "keyless")
+        found = sign.to_add(signer, [line()], [sign.sign_line(signer, line())])
+        self.assertEqual((found.skipped, found.unsigned_held), (1, 0))
+
+    def test_a_held_line_that_is_no_record_is_skipped_with_its_position(self) -> None:
+        signer = prepared(FakeCosign(), "keyless")
+        other = provenance_line("b", "1" * 64).strip()
+        found = sign.to_add(
+            signer, [other], ["not json", line(), "[1]", '{"a":1}'], ["f line 1", "f line 2", "f line 3", "f line 4"]
+        )
+        self.assertEqual(len(found.lines), 1)
+        self.assertEqual(found.skipped, 0)
+        self.assertEqual(len(found.ignored), 3)
+        self.assertTrue(found.ignored[0].startswith("f line 1: a record is not JSON"))
+        self.assertTrue(found.ignored[1].startswith("f line 3: a record is not a JSON object"))
+        self.assertTrue(found.ignored[2].startswith("f line 4: a record has no payload"))
 
 
 class VerifyingTest(unittest.TestCase):
@@ -291,6 +309,56 @@ class CommandsTest(unittest.TestCase):
                 provenance_line(name, digest),
                 "the build's own records stay unsigned",
             )
+
+    def signed_target(self, scratch: str, extra: tuple[str, ...] = ()) -> tuple[Path, Path, Path, dict[str, str], str]:
+        out, target = Path(scratch) / "out", Path(scratch) / "t"
+        name, digest = make_out(out)
+        key = Path(scratch) / "cosign.key"
+        key.write_text("k")
+        target.mkdir()
+        held = target / published.records_name_for(digest)
+        held.write_text("".join(one + "\n" for one in (*extra, provenance_line(name, digest).strip())))
+        return out, target, key, {"PATH": str(fake_path())}, str(held)
+
+    def test_records_a_target_holds_unsigned_stay_unsigned_with_a_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            out, target, key, env, held = self.signed_target(scratch)
+            said = io.StringIO()
+            publish.publish_command(out, [f"dir://{target}"], f"key:{key}", said, env=env, run=FakeCosign())
+            self.assertRegex(said.getvalue(), r"warning: 1 of them are not signed in the target and stay unsigned")
+            self.assertFalse(sign.is_signed(Path(held).read_text().splitlines()[-1]))
+
+    def test_require_signed_target_fails_instead(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            out, target, key, env, held = self.signed_target(scratch)
+            before = Path(held).read_text()
+            with self.assertRaisesRegex(commands.Failed, "--require-signed-target: 1 of them are not signed"):
+                publish.publish_command(
+                    out,
+                    [f"dir://{target}"],
+                    f"key:{key}",
+                    io.StringIO(),
+                    env=env,
+                    run=FakeCosign(),
+                    require_signed_target=True,
+                )
+            self.assertEqual(Path(held).read_text(), before)
+
+    def test_require_signed_target_needs_a_signature_to_ask_for(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            out, target, _, env, _ = self.signed_target(scratch)
+            with self.assertRaisesRegex(commands.Usage, "--require-signed-target needs --sign"):
+                publish.publish_command(
+                    out, [f"dir://{target}"], "none", io.StringIO(), env=env, require_signed_target=True
+                )
+
+    def test_a_hand_edited_line_in_the_target_does_not_stop_a_signed_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            out, target, key, env, held = self.signed_target(scratch, extra=("this is not json",))
+            said = io.StringIO()
+            publish.publish_command(out, [f"dir://{target}"], f"key:{key}", said, env=env, run=FakeCosign())
+            self.assertIn(f"{target} line 1: a record is not JSON", said.getvalue())
+            self.assertIn("this is not json", Path(held).read_text())
 
     def test_publish_checks_cosign_before_it_writes_anything(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:

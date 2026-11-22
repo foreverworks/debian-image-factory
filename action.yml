@@ -31,13 +31,14 @@ inputs:
       How publish signs each record, passed as --sign: none (the default), keyless (Sigstore, with the workflow's OIDC
       identity: the job needs `permissions: id-token: write`, and the signature goes to the public Rekor log) or
       key:REF (a key file or KMS URI you hold, never sent to a log). Anything but none installs cosign 3.1.4
-      (sigstore/cosign-installer, which needs envsubst on the runner) before publish.
+      (sigstore/cosign-installer, which needs envsubst on the runner) before publish. Needs factory 0.7.0 or newer: the
+      Action stops before installing cosign when the release your lock pins is older.
     default: none
   mirror:
     description: A server that serves snapshot.debian.org's paths, passed as --mirror. Empty for snapshot.debian.org itself.
     default: ""
   jobs:
-    description: How many images build at a time, passed to build as --jobs. Empty for the default, the runner's CPUs held back by its free memory; 1 builds one image after another. Needs a release of the factory that has build --jobs.
+    description: How many images build at a time, passed to build as --jobs. Empty for the default, the runner's CPUs held back by its free memory; 1 builds one image after another. Needs factory 0.7.0 or newer: the Action stops early when the release your lock pins is older.
     default: ""
   pyz:
     description: A local .pyz to run instead of the release the lock pins, not checked against the lock. Only for testing the factory itself.
@@ -166,6 +167,29 @@ runs:
             || { echo "debian-image-factory: the .pyz is not version $version" >&2; exit 1; }
         fi
         echo "pyz=$pyz" >> "$GITHUB_OUTPUT"
+
+    - name: Check the release has what the inputs ask for
+      id: features
+      shell: bash
+      env:
+        PYZ: ${{ steps.release.outputs.pyz }}
+        SIGN: ${{ inputs.sign }}
+        JOBS: ${{ inputs.jobs }}
+      run: |
+        set -euo pipefail
+        [ "$SIGN" != none ] || [ -n "$JOBS" ] || exit 0
+        version=$(python3 "$PYZ" --version)
+        version=${version#debian-image-factory }
+        # sort -V puts the older of the two first
+        [ "$(printf '%s\n%s\n' 0.7.0 "$version" | sort -V | head -n 1)" = 0.7.0 ] && exit 0
+        if [ "$SIGN" != none ]; then
+          echo "debian-image-factory: sign is $SIGN, which needs factory 0.7.0 or newer, and the release this run uses is $version: raise the version in your lock, or set sign to none" >&2
+          exit 1
+        fi
+        if [ -n "$JOBS" ]; then
+          echo "debian-image-factory: jobs is $JOBS, which needs factory 0.7.0 or newer, and the release this run uses is $version: raise the version in your lock, or leave jobs empty" >&2
+          exit 1
+        fi
 
     - name: Planning needs apt, gpgv and Debian's archive keyring
       id: prerequisites

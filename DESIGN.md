@@ -1236,7 +1236,7 @@ through the CI's OIDC identity (cosign 3.1.4); `--sign key:<path or KMS URI>` us
 consumer holds. The factory never holds a key, and nothing in a record changes shape when signing is
 switched on.
 
-*Built (0.6.3).* `publish` signs after the build and the tests, when it merges a record into a target; the
+*Built (0.7.0).* `publish` signs after the build and the tests, when it merges a record into a target; the
 records in `out/` stay unsigned, so one build can be published signed to one target and unsigned to another.
 cosign is found on PATH and must be exactly 3.1.4 (`GitVersion` of `cosign version`); a missing or another
 cosign fails before anything is written, naming 3.1.4. `keyless` also fails before any write when the

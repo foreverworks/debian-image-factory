@@ -7,6 +7,7 @@ was built from. The builder runs with `--network none` and reads only the partia
 out and the files of this build's work directory.
 """
 
+import contextlib
 import gzip
 import hashlib
 import io
@@ -16,10 +17,11 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import zlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
@@ -119,19 +121,82 @@ def open_builder(reference: str) -> Builder:
     return Builder(reference, digest, owner)
 
 
+_RUNNING_LOCK: Final = threading.Lock()
+_RUNNING: Final[set[Path]] = set()
+"""The container-id files of the builders running now, so an interrupted build can stop each by its own id."""
+
+
 def run_builder(builder_: Builder, work: Path, mirror: Path, log: Path) -> None:
-    """Run build.sh in the builder with no network, the mirror read-only; its output goes to `log`."""
+    """Run build.sh in the builder with no network, the mirror read-only; its output goes to `log`. The
+    container's id is written beside the log while it runs (`stop_builders` reads it)."""
+    cidfile = log.parent / f".{log.name}.cid"
+    cidfile.unlink(missing_ok=True)
     args = [
-        "docker", "run", "--rm", "--privileged", "--network", "none",
+        "docker", "run", "--rm", "--privileged", "--network", "none", "--cidfile", str(cidfile),
         "-v", f"{mirror.resolve()}:{core.MIRROR}:ro",
         "-v", f"{work.resolve()}:{core.WORK}",
         builder_.reference, "sh", f"{core.WORK}/build.sh",
     ]  # fmt: skip
-    with log.open("wb") as handle:
-        done = subprocess.run(args, stdout=handle, stderr=subprocess.STDOUT, check=False)
+    with _RUNNING_LOCK:
+        _RUNNING.add(cidfile)
+    try:
+        with log.open("wb") as handle:
+            done = subprocess.run(args, stdout=handle, stderr=subprocess.STDOUT, check=False)
+    finally:
+        with _RUNNING_LOCK:
+            _RUNNING.discard(cidfile)
+        cidfile.unlink(missing_ok=True)
     if done.returncode != 0:
         tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-15:]
         raise commands.Failed(f"the builder failed (exit {done.returncode}); the end of {log}:\n" + "\n".join(tail))
+
+
+def stop_builders(wait: float = 15.0) -> int:
+    """Stop the builder containers running now, each by the id its own `docker run` wrote, never by a name or
+    a pattern. A builder whose container has not started yet is looked for again until none is running or
+    `wait` seconds have passed. Returns how many containers it asked docker to stop."""
+    stopped: set[str] = set()
+    deadline = time.monotonic() + wait
+    while True:
+        with _RUNNING_LOCK:
+            files = sorted(_RUNNING)
+        if not files or time.monotonic() >= deadline:
+            return len(stopped)
+        for cidfile in files:
+            try:
+                container = cidfile.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue  # docker has not started the container yet, or it has just ended
+            if container and container not in stopped:
+                stopped.add(container)
+                with contextlib.suppress(OSError):
+                    subprocess.run(["docker", "stop", "--time", "10", container], capture_output=True, check=False)
+        time.sleep(0.2)
+
+
+_RECORDS_LOCK: Final = threading.Lock()
+
+
+def write_records(run: "Run", name: str, statements: Sequence[Statement]) -> None:
+    """Write the records file `name` of an artifact, safely when two images of one run have the same artifact
+    (and so the same file): under a lock, merged with what another image of this run already wrote there
+    (every line once, the latest writer's lines first), through a temporary file that is renamed into place, so a
+    reader never sees half a file. A file left by an earlier run is replaced, not merged."""
+    path = run.out_dir / name
+    lines = records.record_lines(statements).splitlines()
+    with _RECORDS_LOCK:
+        if path in run.written:
+            held = path.read_text(encoding="utf-8").splitlines()
+            lines = [*lines, *(line for line in held if line not in lines)]
+        run.written.add(path)
+        fd, temporary = tempfile.mkstemp(prefix=f".{name}.", dir=run.out_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write("".join(f"{line}\n" for line in lines))
+            os.replace(temporary, path)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
 
 
 # ---- the work directory -------------------------------------------------------------------------
@@ -604,6 +669,8 @@ class Run:
     """The `dir://` targets given as --parents."""
     registries: Sequence[published.TargetTemplate]
     """The `oci://` targets given as --parents; a `{image}` repository is each parent's own."""
+    written: set[Path] = field(default_factory=set)
+    """The records files this run has written (`write_records`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -654,7 +721,7 @@ def build_core(run: Run, image: str, scratch: Path) -> Result:
     )
     # Records first: an interrupted build leaves at most records without an artifact, which
     # nothing reads, never an artifact that publish would refuse for lack of records.
-    (run.out_dir / records_name_for(digest)).write_text(records.record_lines(statements))
+    write_records(run, records_name_for(digest), statements)
     os.replace(packed, run.out_dir / name)
     return Result(parents.ParentArtifact(image, "core", name, digest, run.out_dir / name), len(packages))
 
@@ -755,7 +822,7 @@ def build_oci(run: Run, image: str, scratch: Path, built: Mapping[str, parents.P
         ancestors=[records.Parent(one.image, one.digest) for one in ancestry],
     )
     # Records first, as for core: the layout directory is renamed into place only once they are written.
-    (run.out_dir / records_name_for(digest)).write_text(records.record_lines(statements))
+    write_records(run, records_name_for(digest), statements)
     target = run.out_dir / name
     if target.exists():
         shutil.rmtree(target)
@@ -910,7 +977,7 @@ def build_incus(run: Run, image: str, scratch: Path, built: Mapping[str, parents
     )
     # Records first, as for core; then the rootfs, and the metadata tarball last: it is the file that
     # makes the pair an artifact (fileartifacts), so an interrupted build never leaves a half.
-    (run.out_dir / records_name_for(fingerprint)).write_text(records.record_lines(statements))
+    write_records(run, records_name_for(fingerprint), statements)
     os.replace(rootfs, run.out_dir / names.rootfs)
     os.replace(metadata, run.out_dir / names.metadata)
     artifact = parents.ParentArtifact(image, "incus", names.metadata, fingerprint, run.out_dir / names.metadata)
@@ -1036,7 +1103,7 @@ def build_booting(run: Run, image: str, scratch: Path, built: Mapping[str, paren
         removed_from_parent=removed_from(parent, packed, kind),
     )
     # Records first, as for core.
-    (run.out_dir / records_name_for(digest)).write_text(records.record_lines(statements))
+    write_records(run, records_name_for(digest), statements)
     os.replace(packed, run.out_dir / name)
     return Result(parents.ParentArtifact(image, kind, name, digest, run.out_dir / name), len(packages))
 
@@ -1210,15 +1277,22 @@ def schedule_images(run: Run, chosen: Sequence[str], jobs: int, out: TextIO) -> 
     def failed(image: str, error: BaseException) -> None:
         print(f"{image}: FAILED", file=out)
 
-    outcome = schedule.run(
-        chosen,
-        {image: images[image]["parent"] for image in chosen},
-        lambda image, built: build_image(run, image, {name: one.artifact for name, one in built.items()}),
-        jobs=size,
-        on_start=lambda image: print(f"{image}: building", file=out) if len(chosen) > 1 else None,
-        on_done=done,
-        on_fail=failed,
-    )
+    try:
+        outcome = schedule.run(
+            chosen,
+            {image: images[image]["parent"] for image in chosen},
+            lambda image, built: build_image(run, image, {name: one.artifact for name, one in built.items()}),
+            jobs=size,
+            on_start=lambda image: print(f"{image}: building", file=out) if len(chosen) > 1 else None,
+            on_done=done,
+            on_fail=failed,
+            on_interrupt=stop_builders,
+        )
+    except KeyboardInterrupt:
+        raise commands.Failed(
+            "interrupted: the running builders were stopped and no other image was started; "
+            "the images that had finished keep their artifacts"
+        ) from None
     if outcome.failed:
         lines = [failure_text(image, error) for image, error in outcome.failed.items()]
         if outcome.skipped:

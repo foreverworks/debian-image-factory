@@ -332,7 +332,7 @@ token to `plan` and `publish` and to no other step, and needs `contents: write` 
 put that token in a step's environment by itself, which is why the input exists.
 
 The inputs are `definition`, `lock`, `params`, `snapshot`, `against`, `steps` (default
-`plan,fetch,build,test`), `publish`, `sign` (`none`, `keyless` or `key:REF`; not `none` installs cosign 3.1.4, and `keyless` needs `id-token: write`), `mirror`, `jobs` (images built at a time, `build --jobs`), `token` (default the workflow's token) and
+`plan,fetch,build,test`), `publish`, `sign` (`none`, `keyless` or `key:REF`; not `none` installs cosign 3.1.4, and `keyless` needs `id-token: write`), `mirror`, `jobs` (images built at a time, `build --jobs`; `sign` and `jobs` need factory 0.7.0 or newer, and the Action stops early with a message when your lock pins an older release), `token` (default the workflow's token) and
 `keep-work` (default `true`, so later steps can read the `plan` output; `false` removes the work directory,
 with the build output, when the run ends); the outputs are `changed`, `plan` (the path of
 `plan.json`) and `artifacts` (JSON of image to digest). The runner needs Docker to build, and `apt`

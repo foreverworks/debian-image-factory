@@ -36,13 +36,18 @@ def run[T](
     on_start: Callable[[str], None] = lambda image: None,
     on_done: Callable[[str, T], None] = lambda image, result: None,
     on_fail: Callable[[str, BaseException], None] = lambda image, error: None,
+    on_interrupt: Callable[[], object] = lambda: None,
 ) -> Outcome[T]:
     """Build the images of `order` (parents before children), `jobs` at a time.
 
     `parent_of` says each image's parent; a parent that is not in `order` is already built (it is somewhere
     else), so it holds nothing back. `work(image, built)` gets a snapshot of the results of the images
     finished so far, and starts in the order of `order` as images become ready: with one job that is
-    exactly `order`, one after another."""
+    exactly `order`, one after another.
+
+    On KeyboardInterrupt nothing new starts, the work not yet started is cancelled, `on_interrupt()` runs (it
+    stops what the running `work` calls started, so they return) and the interrupt is raised again once they
+    have."""
     if jobs < 1:
         raise ValueError(f"jobs must be at least 1, not {jobs}")
     pending = list(order)
@@ -55,24 +60,30 @@ def run[T](
         return parent is None or parent not in order or parent in done
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        while True:
-            while not failed and len(running) < jobs:
-                found = next((image for image in pending if ready(image)), None)
-                if found is None:
+        try:
+            while True:
+                while not failed and len(running) < jobs:
+                    found = next((image for image in pending if ready(image)), None)
+                    if found is None:
+                        break
+                    pending.remove(found)
+                    on_start(found)
+                    running[pool.submit(work, found, dict(done))] = found
+                if not running:
                     break
-                pending.remove(found)
-                on_start(found)
-                running[pool.submit(work, found, dict(done))] = found
-            if not running:
-                break
-            finished, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
-            for future in sorted(finished, key=lambda one: order.index(running[one])):
-                image = running.pop(future)
-                error = future.exception()
-                if error is None:
-                    done[image] = future.result()
-                    on_done(image, done[image])
-                else:
-                    failed[image] = error
-                    on_fail(image, error)
+                finished, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in sorted(finished, key=lambda one: order.index(running[one])):
+                    image = running.pop(future)
+                    error = future.exception()
+                    if error is None:
+                        done[image] = future.result()
+                        on_done(image, done[image])
+                    else:
+                        failed[image] = error
+                        on_fail(image, error)
+        except KeyboardInterrupt:
+            for future in running:
+                future.cancel()
+            on_interrupt()
+            raise
     return Outcome(done, failed, tuple(pending))

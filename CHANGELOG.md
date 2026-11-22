@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.3 (not yet tagged)
+## 0.7.0 (not yet tagged)
 
 - Laying out the shared mirror publishes every file by an atomic rename, so parallel builds and test processes sharing one
   snapshot directory no longer fail with "two different InRelease files" when one reads a file another is writing.
@@ -20,6 +20,8 @@
   after another as before; the Action passes its `jobs` input as `--jobs`. Output lines start with the image's
   name; when images fail, nothing new starts, the running ones finish, and every failure is reported by name.
   Artifacts, digests and records are the same as a serial build's.
+
+## 0.6.3 (2026-11-22)
 
 - A workflow rewrites the checksum of the input-lock entry on Renovate's branches, so its pull requests no longer
   carry a stale `sha256`.
