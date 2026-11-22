@@ -114,7 +114,7 @@ def sha256_of(path: str) -> str:
 def entry_of(path: str, info: os.stat_result, epoch: int) -> Entry:
     """The state of `path`, whose lstat is `info`."""
     mode = stat.S_IMODE(info.st_mode)
-    uid, gid, mtime = info.st_uid, info.st_gid, min(int(info.st_mtime), epoch)
+    uid, gid, mtime = info.st_uid, info.st_gid, min(info.st_mtime_ns // 1_000_000_000, epoch)
     attributes = xattrs_of(path)
     if stat.S_ISDIR(info.st_mode):
         return Entry("dir", mode, uid, gid, mtime, xattrs=attributes)
@@ -225,7 +225,9 @@ def remove_path(path: str) -> None:
 
 
 def checked_parent(root: str, path: str, verified: set[str]) -> None:
-    """The directory holding `path` must lie inside the root once its symbolic links are followed."""
+    """The directory holding `path` must lie inside the root once its symbolic links are followed.
+    `verified` caches the directories found inside; whoever creates a symbolic link empties it, since
+    the link may replace a directory a cached path goes through."""
     parent = os.path.dirname(path)
     if parent in verified:
         return
@@ -269,7 +271,10 @@ def apply_deletions(root: str, names: Sequence[str], verified: set[str]) -> None
                 for child in os.listdir(target):
                     remove_path(os.path.join(target, child))
         else:
-            remove_path(os.path.join(root, directory, base.removeprefix(WHITEOUT)))
+            gone = base.removeprefix(WHITEOUT)
+            if not gone:
+                raise LayerError(f"/{name}: a whiteout that names no file")
+            remove_path(os.path.join(root, directory, gone))
 
 
 def hidden_by(markers: Sequence[str], path: str) -> bool:
@@ -319,6 +324,7 @@ def unpack_layer(root: str, layer: str, skipped: dict[str, Entry], notes: list[s
                     shutil.copyfileobj(source, target, 1 << 20)
             elif member.issym():
                 os.symlink(member.linkname, full)
+                verified.clear()  # it may stand where a checked directory was
             elif member.islnk():
                 first = clean_name(member.linkname)
                 checked_parent(root, first, verified)

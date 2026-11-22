@@ -86,6 +86,18 @@ class OciAcceptanceTest(unittest.TestCase):
                 cls.registries[kind] = name
             targets_ = [f"--to={cls.target(kind)}" for kind in cls.registries]
             factory("publish", str(cls.out), f"--to=dir://{cls.work / 'published'}", *targets_)
+            # node-26 again, in an empty directory, its parent pulled from the registry without the API
+            reuse = cls.work / "plan-reuse.json"
+            against = ["--against", f"dir://{cls.work / 'published'}", "--against", cls.target("distribution")]
+            factory("plan", *files(), *against, "--out", str(reuse))
+            factory("fetch", str(reuse))
+            # the first target holds nothing, so the second is asked: each target in turn (DESIGN 9.1)
+            empty = f"oci://{cls.registries['zot']}/factory/empty"
+            parents = ["--parents", empty, "--parents", cls.target("distribution")]
+            factory(
+                "build", str(reuse), "--out", str(cls.work / "out-pulled"), "--image", "node-26",
+                *parents, "--builder-image", tag, *files(),
+            )  # fmt: skip
         except BaseException:
             cls.tearDownClass()
             raise
@@ -115,6 +127,14 @@ class OciAcceptanceTest(unittest.TestCase):
 
     def client(self, kind: str) -> registry.Client:
         return registry.connect(published.OciTarget(self.registries[kind], "factory/images"))
+
+    # ---- a parent pulled from a registry ----------------------------------------------------------
+
+    def test_a_parent_pulled_from_a_registry_gives_the_same_image(self) -> None:
+        self.assertEqual(
+            ocilayout.read_layout(layout_of(self.work / "out-pulled", "node-26")).descriptor.digest,
+            self.digest("node-26"),
+        )
 
     # ---- a Node runtime image's provenance names core's digest ----------------------------------
 

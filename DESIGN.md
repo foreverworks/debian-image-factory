@@ -455,8 +455,9 @@ is the entry `signed_by` names and is not installed: it is a trust root used at 
   hard link whose target is not inside the prefix; never follows a symlink already in the image;
   writes everything owned by root:root, with the tarball's permission bits minus setuid, setgid and
   sticky, and every modification time the older of the member's and `source_date_epoch`; a directory
-  that exists keeps its mode, and every directory the unpack touches has its time put back, so the
-  same inputs give the same bytes. When the prefix is not `/usr/local`, `/usr/local/bin/node`, `npm`
+  that exists keeps its mode, a directory the tarball names takes its member's time (clamped the
+  same way), and any other directory the unpack touches has its time put back, so the same inputs
+  give the same bytes. When the prefix is not `/usr/local`, `/usr/local/bin/node`, `npm`
   and `npx` are symlinks to `<prefix>/bin/<name>`; for `/usr/local` the tarball's own `bin/` is there
   already.
 - *Probe.* `locked-inputs` runs `<prefix>/bin/node --version` in the image and expects `v<version>`;
@@ -1001,7 +1002,7 @@ debian-image-factory plan [--against TARGET]... [--snapshot lock|latest|ID] [--p
                           [--rebuild IMAGE --reason TEXT] [--previous PLAN] [--out FILE] > plan.json
 debian-image-factory fetch plan.json [--mirror URL] [--bundle]
 debian-image-factory build plan.json --out out/ [--image NAME]... [--parents TARGET]... [--builder-image REF] [--offline] [--builder container|host]
-debian-image-factory test out/ [--check NAME]...
+debian-image-factory test out/ [--check NAME]... [--url URL] [--definition FILE]
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
 debian-image-factory publish out/ --to TARGET... [--sign none|keyless|key:REF]
 debian-image-factory verify REF [--require-checks] [--lock FILE] [--definition FILE]
@@ -1013,8 +1014,11 @@ debian-image-factory prune --against TARGET... --pin DIGEST... [--keep-good 5] [
 server that serves its paths (`/archive/...` and `/mr/timestamp/`); `--keyring` and `--cache` say
 where the archive keyring and the download cache are. M1 shipped `lock check`, `lock snapshot`,
 `lock baseline` and `plan`; M2 adds `fetch`, `build` for core, `test` with the core checks and
-`publish` to `dir://` targets. Each later command arrives with its milestone, `fetch --bundle`
-with M6, and `lock checksums` with M5 (it is input-lock's `refresh` run against the definition).
+`publish` to `dir://` targets; M3 adds `build` for the OCI kind with `--parents`, `plan --against
+oci://`, the OCI checks and `locked-inputs` (`test --definition` gives it the module tables),
+`publish` to `oci://` targets and `verify`. Each later command arrives with its milestone, `fetch
+--bundle` with M6, and `lock checksums` with M5 (it is input-lock's `refresh` run against the
+definition).
 
 `build` reads the plan, and also the lock and the definition (`--lock`, `--definition`, as `plan`
 does): hooks and file trees live beside the definition, and provenance names the lock. Before it

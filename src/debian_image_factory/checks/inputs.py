@@ -110,8 +110,8 @@ def locked_inputs(
                 problems = [f"{name}: {listed}"]
             else:
                 own = [probe for probe in listed if probe.entry == name]
-                if not own:
-                    passed.append(f"{name} ({TRUST_ROOT})")
+                if not own:  # a keyring is a trust root, handled above; anything else must be seen installed
+                    failed.append(f"{name}: module {module} has no probe that sees it installed")
                     continue
                 problems = [problem for probe in own if (problem := probe_problem(name, probe, run)) is not None]
         if problems:

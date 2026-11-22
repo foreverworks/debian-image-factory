@@ -37,8 +37,8 @@ class Fake:
 
 
 def run(entries: dict[str, dict[str, str]], runner: Fake, status: bytes | None = None) -> Result:
-    modules = example_definition().modules
-    return inputs.locked_inputs(entries, modules, status, runner)
+    """The check as `test` runs it on the example: the plan's `trust` names the Node keyring as `signed_by`."""
+    return inputs.locked_inputs(entries, example_definition().modules, status, runner, {"node-release-keys"})
 
 
 class ModuleEntriesTest(unittest.TestCase):
@@ -104,6 +104,13 @@ class AptEntriesTest(unittest.TestCase):
         found = run({"example-tool": TOOL}, Fake(), None)
         self.assertEqual(found.outcome, "FAILED")
         self.assertIn("is not in the tarball", found.failed[0])
+
+    def test_a_module_entry_no_probe_sees_fails_unless_it_is_a_trust_root(self) -> None:
+        found = inputs.locked_inputs(
+            {"node-26": NODE, "node-release-keys": KEYS}, example_definition().modules, None, Fake()
+        )
+        self.assertEqual(found.outcome, "FAILED")
+        self.assertEqual(found.failed, ("node-release-keys: module node has no probe that sees it installed",))
 
     def test_an_entry_missing_its_fields(self) -> None:
         found = run({"t": {"module": "vendor-deb", "apt": "x"}}, Fake(), status_text([]))

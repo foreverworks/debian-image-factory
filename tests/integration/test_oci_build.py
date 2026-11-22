@@ -224,7 +224,14 @@ class OciBuildTest(unittest.TestCase):
         self.assertEqual(len(layout.manifest.layers), 2)
         self.assertEqual(layout.manifest.layers[0].digest, sha256_of(self.core_tarball()))
         members = {member.name: member for member in layer_members(layout)}
-        self.assertEqual(sorted(members), [CORE_PARENT_INPUTS])
+        self.assertIn("usr/lib/x86_64-linux-gnu/libatomic.so.1", members)  # what the node module asks apt for
+        of_libatomic = (
+            "etc/ld.so.cache",
+            "usr/lib/x86_64-linux-gnu/libatomic",
+            "usr/share/doc/libatomic1",
+            "var/lib/dpkg/",
+        )
+        self.assertEqual(sorted(name for name in members if not name.startswith(of_libatomic)), [CORE_PARENT_INPUTS])
         with tarfile.open(layout.layers[-1], mode="r:gz") as archive:
             handle = archive.extractfile(CORE_PARENT_INPUTS)
             assert handle is not None

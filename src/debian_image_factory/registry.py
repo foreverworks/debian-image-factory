@@ -7,8 +7,9 @@ Nothing else in the package talks to a registry. What this module guarantees to 
   or an index to `MANIFEST_LIMIT`, a blob to the size its descriptor states), and every request has a
   timeout.
 - **http only for the machine itself.** `localhost`, `127.0.0.1` and `[::1]` are spoken to over http,
-  every other registry over https; a token realm or an upload location that leaves that rule or the
-  registry's own host is refused.
+  every other registry over https. A token realm must be https, or http on the machine itself when the
+  registry is there too; it may be another host (Docker Hub's is), as Docker allows. An upload location
+  that leaves the registry's own host is refused.
 - **Credentials stay in this module.** They come from the Docker config (`$DOCKER_CONFIG/config.json`
   or `~/.docker/config.json`: an `auths` entry, a `credHelpers` entry or `credsStore`), a bearer token
   is fetched from the challenge's realm, and neither is printed, logged or put in an error message.
@@ -68,7 +69,12 @@ class RegistryError(OSError):
     OSError so a command reports it the way it reports an unreadable directory."""
 
 
-class DigestMismatchError(RegistryError):
+class UnusableBlobError(RegistryError):
+    """A blob the registry does not hold, or one whose descriptor or bytes cannot be accepted: the fault of
+    whoever pushed what points at it, not of the registry being unreachable."""
+
+
+class DigestMismatchError(UnusableBlobError):
     """Bytes a registry served that do not hash to the digest they were asked for."""
 
 
@@ -310,7 +316,8 @@ def _token(client: Client, challenge: Challenge, write: bool) -> str | None:
     when there are any, anonymously otherwise. None when the realm is not one this client may ask."""
     realm = challenge.params.get("realm", "")
     parts = urllib.parse.urlsplit(realm)
-    if not (parts.scheme == "https" or (parts.scheme == "http" and is_local(parts.netloc))):
+    local = parts.scheme == "http" and is_local(parts.netloc) and is_local(client.registry)
+    if not (parts.scheme == "https" or local):
         return None
     query: dict[str, str] = {}
     if "service" in challenge.params:
@@ -330,6 +337,8 @@ def _token(client: Client, challenge: Challenge, write: bool) -> str | None:
         raise RegistryError(f"{client.registry}: its token service answered HTTP {error.code}") from None
     except ValueError:
         raise RegistryError(f"{client.registry}: its token service did not answer JSON") from None
+    except http.client.HTTPException as error:
+        raise RegistryError(f"{client.registry}: its token service broke off: {error!r}") from None
     if isinstance(answer, dict):
         for key in ("token", "access_token"):
             value = answer.get(key)
@@ -364,6 +373,8 @@ def _open(client: Client, method: str, url: str, headers: Mapping[str, str], bod
             response: Answer = _opener(url).open(request, timeout=client.timeout)
         except urllib.error.HTTPError as error:
             response = error
+        except http.client.HTTPException as error:  # not an OSError: a bad status line, a cut-off answer
+            raise RegistryError(f"{client.registry}: {method} broke off: {error!r}") from None
         if response.status == 401 and attempt == 0:
             challenge = pick_challenge(response.headers.get_all("WWW-Authenticate") or [])
             if challenge is not None and _authenticate(client, challenge, write):
@@ -396,7 +407,10 @@ def _call(
     """One request, its body read in full up to `limit` bytes."""
     response = _open(client, method, url, headers or {}, body, write)
     with closing(response):
-        data = response.read(limit + 1)
+        try:
+            data = response.read(limit + 1)
+        except http.client.HTTPException as error:
+            raise RegistryError(f"{client.registry}: the answer to {method} broke off: {error!r}") from None
         if len(data) > limit:
             raise RegistryError(f"{client.registry}: an answer to {method} was larger than {limit} bytes")
         status = response.status
@@ -458,14 +472,25 @@ def put_blob(client: Client, digest: str, size: int, source: bytes | Path) -> No
 def fetch_blob(client: Client, descriptor: oci.Descriptor, limit: int) -> bytes:
     """A blob in memory, at most `limit` bytes, checked against the descriptor's size and digest."""
     if descriptor.size > limit:
-        raise RegistryError(f"{client.name}: blob sha256:{descriptor.digest} is {descriptor.size} bytes, over {limit}")
+        raise UnusableBlobError(
+            f"{client.name}: blob sha256:{descriptor.digest} is {descriptor.size} bytes, over {limit}"
+        )
     url = _url(client, f"blobs/{oci.digest_text(descriptor.digest)}")
     response = _call(client, "GET", url, limit=descriptor.size)
+    if response.status == 404:
+        raise UnusableBlobError(str(_refusal(client, f"reading blob {descriptor.digest[:12]}", response)))
     if response.status != 200:
         raise _refusal(client, f"reading blob {descriptor.digest[:12]}", response)
     if len(response.body) != descriptor.size or oci.sha256_hex(response.body) != descriptor.digest:
         raise DigestMismatchError(f"{client.name}: blob sha256:{descriptor.digest} does not match its digest")
     return response.body
+
+
+def read_chunk(client: Client, response: Answer) -> bytes:
+    try:
+        return response.read(1024 * 1024)
+    except http.client.HTTPException as error:
+        raise RegistryError(f"{client.registry}: a blob download broke off: {error!r}") from None
 
 
 def download_blob(client: Client, descriptor: oci.Descriptor, destination: Path) -> None:
@@ -480,7 +505,7 @@ def download_blob(client: Client, descriptor: oci.Descriptor, destination: Path)
                 raise RegistryError(f"{client.name}: reading blob {descriptor.digest[:12]}: HTTP {response.status}")
             hasher = hashlib.sha256()
             seen = 0
-            while chunk := response.read(1024 * 1024):
+            while chunk := read_chunk(client, response):
                 seen += len(chunk)
                 if seen > descriptor.size:
                     raise DigestMismatchError(f"{client.name}: blob sha256:{descriptor.digest} is larger than its size")
@@ -672,13 +697,14 @@ def referrers_of(client: Client, digest: str) -> Referrers:
 
 def fetch_envelopes(client: Client, attached: Sequence[Attached]) -> tuple[tuple[bytes, ...], tuple[str, ...]]:
     """The envelope of each attached record, in the order given (referrers_of gives attach order), each
-    checked against its digest, and the reasons for the ones that could not be read."""
+    checked against its digest, and the reasons for the ones that could not be read (absent, too large or
+    not matching: DESIGN 7.4 rejects such a record). A registry that cannot be reached still fails whole."""
     found: list[bytes] = []
     problems: list[str] = []
     for one in attached:
         try:
             found.append(fetch_blob(client, one.envelope, ENVELOPE_LIMIT))
-        except DigestMismatchError as error:
+        except UnusableBlobError as error:
             problems.append(f"{client.name}@sha256:{one.referrer.digest}: {error}")
     return tuple(found), tuple(problems)
 

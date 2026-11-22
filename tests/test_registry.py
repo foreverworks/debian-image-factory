@@ -74,6 +74,18 @@ class SchemeTest(unittest.TestCase):
 
 
 class ChallengeTest(unittest.TestCase):
+    def test_a_remote_registry_may_not_send_its_token_request_over_http(self) -> None:
+        asked: list[str] = []
+
+        def credentials(name: str) -> None:
+            asked.append(name)
+
+        client = registry.connect(OciTarget("registry.example", "a/b"), credentials=credentials)
+        for realm in ("http://127.0.0.1:9/token", "http://registry.example/token", "ftp://registry.example/t"):
+            with self.subTest(realm=realm):
+                self.assertIsNone(registry._token(client, registry.Challenge("bearer", {"realm": realm}), False))
+        self.assertEqual(asked, [], "no credentials were looked up for a realm that is refused")
+
     def test_a_bearer_challenge_gives_its_realm_service_and_scope(self) -> None:
         found = registry.pick_challenge(
             ['Bearer realm="https://auth.example.com/token",service="registry",scope="repository:a/b:pull,push"']
@@ -419,6 +431,17 @@ class ReferrersTest(unittest.TestCase):
             self.assertEqual(len(envelopes), 1)
             self.assertEqual(len(unread), 1)
             self.assertIn("does not match its digest", unread[0])
+
+    def test_an_envelope_the_registry_does_not_hold_is_reported_not_raised(self) -> None:
+        fake = Fake()
+        with fake_registry.running(fake) as name, tempfile.TemporaryDirectory() as scratch:
+            client = client_for(name)
+            digest = self.push(client, Path(scratch))
+            found = registry.referrers_of(client, digest)
+            del fake.blobs[f"sha256:{found.attached[0].envelope.digest}"]
+            envelopes, unread = registry.fetch_envelopes(client, found.attached)
+            self.assertEqual((len(envelopes), len(unread)), (1, 1))
+            self.assertIn("HTTP 404", unread[0])
 
     def test_a_referrer_that_is_not_a_single_envelope_is_reported(self) -> None:
         fake = Fake()

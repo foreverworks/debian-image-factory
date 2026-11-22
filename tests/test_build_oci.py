@@ -298,10 +298,36 @@ class LocateTest(unittest.TestCase):
         def pull(target: published.OciTarget, digest: str, dest: Path) -> Path:
             calls.append((target.registry, digest))
             assert self.base.path is not None
-            return self.base.path
+            shutil.copytree(self.base.path, dest)  # what registry.pull_layout does: the layout at `dest`
+            return dest
 
-        self.assertEqual(self.locate(entry=entry, out=empty, registries=[registry], pull=pull), self.base)
+        found = self.locate(entry=entry, out=empty, registries=[registry], pull=pull)
+        self.assertEqual((found.digest, found.name), (self.base.digest, self.base.name))
         self.assertEqual(calls, [("registry.example", self.base.digest)])
+
+    def test_every_registry_is_tried_in_turn(self) -> None:
+        empty = self.dir / "empty"
+        empty.mkdir()
+        entry = entry_for(self.base, "cd" * 32, artifact=self.base.digest)
+        first, second = (published.OciTarget(name, "images/oci-base") for name in ("one.example", "two.example"))
+        calls: list[str] = []
+
+        def pull(target: published.OciTarget, digest: str, dest: Path) -> Path:
+            calls.append(target.registry)
+            if target is first:
+                raise commands.Failed(f"oci://{target.registry}/{target.repository}@sha256:{digest}: no manifest")
+            assert self.base.path is not None
+            shutil.copytree(self.base.path, dest)
+            return dest
+
+        found = self.locate(entry=entry, out=empty, registries=[first, second], pull=pull)
+        self.assertEqual((found.digest, calls), (self.base.digest, ["one.example", "two.example"]))
+
+        def miss(target: published.OciTarget, digest: str, dest: Path) -> Path:
+            raise commands.Failed(f"{target.registry}: no manifest")
+
+        with self.assertRaisesRegex(commands.Failed, r"one\.example: no manifest.*two\.example: no manifest"):
+            self.locate(entry=entry, out=empty, registries=[first, second], pull=miss)
 
     def test_the_default_pull_names_the_registry_it_could_not_read(self) -> None:
         empty = self.dir / "empty"

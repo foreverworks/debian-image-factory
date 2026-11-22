@@ -212,14 +212,17 @@ def locate_parent(
             return found[0]
         searched.append(str(directory))
     if digest is not None and kind == "oci":
-        for registry in registries:
-            pulled = describe_layout(pull(registry, digest, scratch), check_layers=True)
+        name = published.artifact_name(parent, suite, arch, entry["identity"], digest, "oci")
+        for number, registry in enumerate(registries):
+            where = f"oci://{registry.registry}/{registry.repository}"
+            try:  # each target in turn (DESIGN 9.1): one that lacks the image, or fails, is not the last word
+                pulled = describe_layout(pull(registry, digest, scratch / str(number) / name), check_layers=True)
+            except commands.Failed as error:
+                searched.append(f"{where} ({error})")
+                continue
             if pulled.digest != digest:
-                raise commands.Failed(
-                    f"oci://{registry.registry}/{registry.repository}: pulled {pulled.digest}, not {digest}"
-                )
+                raise commands.Failed(f"{where}: pulled {pulled.digest}, not {digest}")
             return pulled
-        searched.extend(f"oci://{registry.registry}/{registry.repository}" for registry in registries)
     wanted = f"digest {digest}" if digest is not None else f"identity {entry['identity'][:16]}"
     raise commands.Failed(
         f"images.{child}: its parent {parent} ({wanted}) is not built in this run and was not found in "

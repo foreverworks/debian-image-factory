@@ -158,6 +158,28 @@ class UnpackTest(Fixture):
         with self.assertRaisesRegex(layer.LayerError, "leaves the root"):
             self.unpack(sneaky, root=other)
 
+    def test_a_link_that_replaces_a_checked_directory_cannot_lead_out_of_the_root(self) -> None:
+        outside = self.dir / "outside"
+        outside.mkdir()
+        first, second = self.dir / "first.tar.gz", self.dir / "second.tar.gz"
+        write_layer(first, [directory("a"), regular("a/f", b"x")])
+        write_layer(second, [symlink("a", str(outside)), regular("a/pwn", b"x")])
+        other = self.dir / "other"
+        other.mkdir()
+        with self.assertRaisesRegex(layer.LayerError, "leaves the root"):
+            self.unpack(first, second, root=other)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_a_whiteout_that_names_no_file_is_refused(self) -> None:
+        first, empty = self.dir / "first.tar.gz", self.dir / "empty.tar.gz"
+        write_layer(first, [directory("x"), regular("x/f", b"x")])
+        write_layer(empty, [(info("x/.wh."), b"")])
+        other = self.dir / "other"
+        other.mkdir()
+        with self.assertRaisesRegex(layer.LayerError, "names no file"):
+            self.unpack(first, empty, root=other)
+        self.assertTrue((other / "x").is_dir())
+
     def test_xattrs_are_restored_when_the_file_system_takes_them(self) -> None:
         probe = self.dir / "probe"
         probe.write_bytes(b"")
