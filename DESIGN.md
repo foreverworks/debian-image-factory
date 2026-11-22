@@ -1677,13 +1677,13 @@ their own CI.
 on the plain runner label (it boots nothing), one at a time (a concurrency group, never cancelled, so two
 nights never race on the cache). It plans `.github/nightly/factory.toml` with `snapshot: latest` against a
 `dir://` target kept in the Actions cache: the newest `nightly-` entry is restored, and a night that built
-something saves a new one, so a quiet night saves nothing. It publishes nowhere public (16.2). The
+something prunes the directory (`prune`, the default retention, no pins) and saves a new one, so a quiet
+night saves nothing. It publishes nowhere public (16.2). The
 definition is the example's file kinds, a core and an Incus base: a `dir://` target holds files only, so
 the example's OCI images, which need a registry, would read `build` every night and a quiet night would
 not exist. Its Incus checks need an Incus host, which the runner lacks, so the base stays a candidate
 (`wait`, never `build`). It runs the factory built from the checkout through the Action's `pyz` input,
-until this repository's own lock names a release. `prune` is called there once it has landed and has a
-test in this workflow.
+until this repository's own lock names a release.
 
 ## 13. Code: language and style
 

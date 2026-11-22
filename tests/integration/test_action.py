@@ -27,6 +27,7 @@ class NightlyActionTest(unittest.TestCase):
     work: Path
     scratch: tempfile.TemporaryDirectory[str]
     target: Path
+    pyz: Path
     first: action.Result
     second: action.Result
 
@@ -56,9 +57,9 @@ class NightlyActionTest(unittest.TestCase):
         built = subprocess.run(
             [str(ROOT / "scripts" / "build-pyz"), str(cls.work / "pyz")], check=True, capture_output=True, text=True
         )
-        pyz = Path(built.stdout.strip().splitlines()[-1])
-        cls.first = cls.night("first", pyz)
-        cls.second = cls.night("second", pyz)
+        cls.pyz = Path(built.stdout.strip().splitlines()[-1])
+        cls.first = cls.night("first", cls.pyz)
+        cls.second = cls.night("second", cls.pyz)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -93,6 +94,18 @@ class NightlyActionTest(unittest.TestCase):
         self.assertEqual(self.second.outputs["summary"], {"changed": "false", "images": "", "vm": "false"})
         for step in ("fetch", "build", "test", "publish"):
             self.assertNotIn(step, self.second.outputs, f"{step} ran on a night with nothing to build")
+
+    def test_the_nightly_s_prune_deletes_nothing_it_just_published(self) -> None:
+        before = sorted(path.name for path in self.target.iterdir())
+        done = subprocess.run(
+            [
+                "python3", str(self.pyz), "prune", "--against", f"dir://{self.target}",
+                "--definition", str(NIGHTLY / "factory.toml"),
+            ],
+            capture_output=True, text=True, check=False,
+        )  # fmt: skip
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(sorted(path.name for path in self.target.iterdir()), before)
 
     def test_the_second_night_finds_what_the_first_published(self) -> None:
         plan = json.loads(Path(self.second.outputs["plan"]["path"]).read_text(encoding="utf-8"))

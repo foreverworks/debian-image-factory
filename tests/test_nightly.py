@@ -12,10 +12,14 @@ passing check records.
 
 import hashlib
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Final
+
+from input_lock.records import TestOutcome
 
 from debian_image_factory import published
 from tests import test_cli
@@ -69,7 +73,7 @@ def read_plan(path: Path) -> dict[str, object]:
 class NightTest(test_cli.CliCase):
     document: dict[str, object]
     """The plan.json of the last `night`."""
-    plan: dict[str, dict[str, object]]
+    images: dict[str, dict[str, object]]
     """Its images."""
 
     def wrapper(self) -> Path:
@@ -79,7 +83,8 @@ class NightTest(test_cli.CliCase):
             "import sys\n"
             f"sys.path[:0] = [{str(action.ROOT / 'src')!r}, {str(action.ROOT / '.vendor')!r}]\n"
             "from debian_image_factory.cli import main\n"
-            f"sys.exit(main([*sys.argv[1:], '--keyring', {str(self.fixture.keyring)!r}]))\n"
+            f"keyring = ['--keyring', {str(self.fixture.keyring)!r}] if sys.argv[1] in ('plan', 'fetch') else []\n"
+            "sys.exit(main([*sys.argv[1:], *keyring]))\n"
         )
         return path
 
@@ -109,7 +114,7 @@ class NightTest(test_cli.CliCase):
             self.document = read_plan(Path(result.outputs["plan"]["path"]))
             images = self.document["images"]
             assert isinstance(images, dict)
-            self.plan = images
+            self.images = images
             return result
 
     def publish_all(self, plan: dict[str, dict[str, object]], target: Path) -> dict[str, str]:
@@ -120,7 +125,7 @@ class NightTest(test_cli.CliCase):
         for name, entry in plan.items():
             identity, kind, required = str(entry["identity"]), str(entry["kind"]), entry["checks"]
             assert isinstance(required, list)
-            checks = [(str(check), "PASSED") for check in required]
+            checks: list[tuple[str, TestOutcome]] = [(str(check), "PASSED") for check in required]
             if kind == "incus":
                 built = incusimage.write_image(target, name, identity, f"rootfs of {name}".encode())
                 with built.records.open("a", encoding="utf-8") as handle:
@@ -143,7 +148,7 @@ class NightTest(test_cli.CliCase):
         target = Path(tempfile.mkdtemp(dir=self.tmp)) / "target"
         empty = self.night(root, FIRST_ID, target, steps="plan")
         self.assertEqual(empty.outputs["summary"]["changed"], "true", "nothing published yet: everything builds")
-        first = self.plan
+        first = self.images
         self.assertEqual({entry["state"] for entry in first.values()}, {"build"})
         digests = self.publish_all(first, target)
         return root, target, digests, first
@@ -151,11 +156,13 @@ class NightTest(test_cli.CliCase):
     def test_a_night_with_no_relevant_upload_builds_nothing(self) -> None:
         root, target, digests, first = self.first_night(QUIET)
         result = self.night(root, "latest", target, publish="true")
-        states = {name: entry["state"] for name, entry in self.plan.items()}
+        states = {name: entry["state"] for name, entry in self.images.items()}
         self.assertEqual(states, dict.fromkeys(first, "reuse"))
         # a later snapshot, and the same identities: the build snapshot enters no identity
         self.assertEqual(self.document["snapshot"], SECOND_ID)
-        self.assertEqual({n: e["identity"] for n, e in self.plan.items()}, {n: e["identity"] for n, e in first.items()})
+        self.assertEqual(
+            {n: e["identity"] for n, e in self.images.items()}, {n: e["identity"] for n, e in first.items()}
+        )
         self.assertEqual(result.outputs["summary"], {"changed": "false", "images": "", "vm": "false"})
         for step in ("fetch", "build", "test", "publish"):
             self.assertNotIn(step, result.outputs, f"{step} must not run when nothing builds")
@@ -166,7 +173,7 @@ class NightTest(test_cli.CliCase):
     def test_one_upload_rebuilds_exactly_its_chain(self) -> None:
         root, target, digests, first = self.first_night(CHAIN)
         result = self.night(root, "latest", target, steps="plan")
-        states = {name: entry["state"] for name, entry in self.plan.items()}
+        states = {name: entry["state"] for name, entry in self.images.items()}
         self.assertEqual(
             states,
             {
@@ -180,16 +187,31 @@ class NightTest(test_cli.CliCase):
         self.assertEqual(result.outputs["summary"]["changed"], "true")
         self.assertEqual(result.outputs["summary"]["images"], "incus-app,incus-base")
         # the new package is why the base builds, and the base is why its child does
-        because = self.plan["incus-base"]["because"]
+        because = self.images["incus-base"]["because"]
         self.assertEqual(because, [{"published": "no artifact with this identity"}])
-        self.assertEqual(self.plan["incus-app"]["because"], [{"parent": "incus-base", "state": "build"}])
+        self.assertEqual(self.images["incus-app"]["because"], [{"parent": "incus-base", "state": "build"}])
         for name in ("core", "installer", "os"):
-            self.assertEqual(self.plan[name]["identity"], first[name]["identity"], name)
-            self.assertEqual(self.plan[name]["artifact"], digests[name], name)
+            self.assertEqual(self.images[name]["identity"], first[name]["identity"], name)
+            self.assertEqual(self.images[name]["artifact"], digests[name], name)
         for name in ("incus-base", "incus-app"):
-            self.assertNotEqual(self.plan[name]["identity"], first[name]["identity"], name)
+            self.assertNotEqual(self.images[name]["identity"], first[name]["identity"], name)
         artifacts = json.loads(result.outputs["artifacts"]["json"])
         self.assertEqual(sorted(artifacts), ["core", "installer", "os"])
+
+    def test_the_nightly_s_prune_keeps_every_published_build_and_the_next_night_is_still_quiet(self) -> None:
+        root, target, digests, _ = self.first_night(QUIET)
+        before = sorted(path.name for path in target.iterdir())
+        done = subprocess.run(
+            [
+                "python3", str(self.wrapper()), "prune", "--against", f"dir://{target}",
+                "--definition", str(root / "factory.toml"),
+            ],
+            capture_output=True, text=True, check=False, env={**os.environ, "XDG_CACHE_HOME": str(self.tmp / "cache")},
+        )  # fmt: skip
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(sorted(path.name for path in target.iterdir()), before)
+        self.assertEqual(self.night(root, "latest", target).outputs["summary"]["changed"], "false")
+        self.assertEqual(len(digests), 5)
 
     def test_the_same_night_twice_changes_nothing(self) -> None:
         root, target, _, _ = self.first_night(QUIET)
@@ -203,8 +225,10 @@ class NightTest(test_cli.CliCase):
         records = target / published.records_name_for(digest)
         records.write_text(records.read_text() + result_line(core.name, digest, "package-set", "FAILED"))
         self.night(root, "latest", target, steps="plan")
-        self.assertEqual(self.plan["core"]["state"], "build")
-        self.assertEqual(self.plan["core"]["because"][0], {"failed": ["package-set"]}, first["core"]["checks"])
+        self.assertEqual(self.images["core"]["state"], "build")
+        because = self.images["core"]["because"]
+        assert isinstance(because, list)
+        self.assertEqual(because[0], {"failed": ["package-set"]}, first["core"]["checks"])
 
 
 if __name__ == "__main__":

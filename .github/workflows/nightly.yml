@@ -5,7 +5,8 @@
 #
 # The target is a `dir://` directory kept in the Actions cache: the newest `nightly-` entry is restored, and a
 # night that built something saves a new one. Nothing is published anywhere public (DESIGN 16.2).
-# TODO: call `prune --against` on the directory before the save, once prune has landed and has a test here.
+# A night that built something also prunes the directory (`prune`: the newest 5 good builds and 1 candidate per
+# image stay, nothing is pinned here), so the cache does not grow without end.
 #
 # Runs on the project's self-hosted runners (label debian-image-factory) while the repository is private, on
 # GitHub's hosted ones once it is public; see ci.yml. The images are not booted here, so no KVM label.
@@ -76,6 +77,15 @@ jobs:
           against: dir://${{ github.workspace }}/.nightly-target
           publish: true
           pyz: ${{ steps.pyz.outputs.path }}
+
+      - name: Prune the target
+        if: steps.factory.outputs.changed == 'true'
+        env:
+          PYZ: ${{ steps.pyz.outputs.path }}
+          TARGET: dir://${{ github.workspace }}/.nightly-target
+        run: |
+          set -euo pipefail
+          python3 "$PYZ" prune --against "$TARGET" --definition .github/nightly/factory.toml
 
       - name: Save the target
         if: steps.factory.outputs.changed == 'true'
