@@ -972,11 +972,15 @@ def incus_removed_from(parent: parents.ParentArtifact, rootfs: Path) -> list[str
     the parent is a core tarball or another Incus image's squashfs."""
     if parent.path is None:
         raise commands.Failed(f"the parent {parent.image} of an Incus image has no artifact file here")
-    if parent.kind == "incus":
-        held = squashfs_scan.scan_squashfs(parents.incus_rootfs(parent), frozenset(), None, False).members
-    else:
-        held = root_members(parent.path, parent.kind)
-    return ancestry.removed_from_parent(squashfs_scan.scan_squashfs(rootfs, frozenset(), None, False).members, held)
+    try:
+        if parent.kind == "incus":
+            held = squashfs_scan.scan_squashfs(parents.incus_rootfs(parent), frozenset(), None, False).members
+        else:
+            held = root_members(parent.path, parent.kind)
+        built = squashfs_scan.scan_squashfs(rootfs, frozenset(), None, False).members
+    except (squashfs.SquashfsError, OSError, tarfile.TarError, EOFError, zlib.error) as error:
+        raise commands.Failed(f"the roots of {parent.image} and its Incus child cannot be compared: {error}") from None
+    return ancestry.removed_from_parent(built, held)
 
 
 def build_booting(run: Run, image: str, scratch: Path, built: Mapping[str, parents.ParentArtifact]) -> Result:

@@ -1,6 +1,6 @@
 """The Incus checks: the pure parts of `incus-boot` and `two-clones`, the edge that drives Incus (through a
-stand-in for the `incus` command), `ancestry` by files, and `test` on an output directory that holds Incus
-images made from a squashfs fixture."""
+stand-in for the `incus` command), `ancestry` held to the removals the provenance records, and `test` on an
+output directory that holds Incus images made from a squashfs fixture."""
 
 import hashlib
 import io

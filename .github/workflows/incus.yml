@@ -1,13 +1,15 @@
 # The Incus boot contract (DESIGN 11, 12, 14's M4) on demand: `scripts/test incus` builds core, incus-base
 # and an Incus child, runs every check on them, incus-boot and two-clones on an Incus host that
-# scripts/incus-vm boots in a VM, and requires every check to pass. Run by hand from the Actions tab; the
-# same command runs locally, under QEMU TCG when there is no /dev/kvm.
+# scripts/incus-vm boots in a VM, and requires every check to pass. Run by hand from the Actions tab, and
+# called by release.yml on a tag, where it gates the publish; the same command runs locally, under QEMU
+# TCG when there is no /dev/kvm.
 #
 # Where it runs: see boot.yml. The kvm capability label is the one for jobs that boot a VM.
 name: incus
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

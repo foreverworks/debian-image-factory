@@ -1345,8 +1345,8 @@ identities of the images that install it, and nothing else.
   core, `incus-base` and an Incus child of it from the example definition, runs every check on all
   three (the Incus checks inside the VM), then requires each image's checks to pass with
   `verify --require-checks`: the boot contract for the base and for a child. The `incus` workflow
-  runs that tier by hand on a runner with KVM, and a release tag runs it after the integration tier,
-  gating the publish.
+  runs that tier by hand on a runner with KVM, and a release tag runs the same workflow beside the
+  integration tier, gating the publish.
 
 **Where it runs.** While the repository is private, its jobs run on the project's own self-hosted
 runners, picked by capability label (`debian-image-factory`, and `debian-image-factory-kvm` for jobs

@@ -18,7 +18,7 @@ from unittest import mock
 from input_lock import Package
 from input_lock.records import PROVENANCE_PREDICATE, SPDX_PREDICATE
 
-from debian_image_factory import commands, planfile, published, records
+from debian_image_factory import commands, planfile, published, records, squashfs
 from debian_image_factory.build import core, parents, run
 from debian_image_factory.build import incus as incus_build
 from tests.support import incusimage
@@ -633,6 +633,48 @@ class ImageRecordsTest(unittest.TestCase):
         provenance, sbom = self.records()
         self.assertEqual(provenance["predicateType"], PROVENANCE_PREDICATE)
         self.assertEqual(sbom["predicateType"], SPDX_PREDICATE)
+
+
+class IncusRemovedFromTest(unittest.TestCase):
+    """The parent's paths the new root does not hold, as the build records them (removedFromParent)."""
+
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.rootfs = self.root / "child.rootfs.squashfs"
+        self.rootfs.write_bytes(incusimage.fixture("incus-root"))
+
+    @staticmethod
+    def paths(image: bytes) -> set[str]:
+        return {entry.path for entry in squashfs.entries(io.BytesIO(image))}
+
+    def test_a_core_parent_s_paths_the_child_lacks_are_listed_and_the_root_never(self) -> None:
+        kept = sorted(self.paths(incusimage.fixture("incus-root")) - {"/"})[0]
+        tarball = self.root / "core.tar.gz"
+        with tarfile.open(tarball, "w:gz") as archive:
+            for name, kind in ((".", tarfile.DIRTYPE), ("." + kept, tarfile.REGTYPE), ("./gone", tarfile.DIRTYPE)):
+                member = tarfile.TarInfo(name)
+                member.type = kind
+                archive.addfile(member, io.BytesIO(b"") if kind == tarfile.REGTYPE else None)
+            gone = tarfile.TarInfo("./gone/file")
+            archive.addfile(gone, io.BytesIO(b""))
+        parent = parents.ParentArtifact("core", "core", tarball.name, "a" * 64, tarball)
+        self.assertEqual(run.incus_removed_from(parent, self.rootfs), ["/gone", "/gone/file"])
+
+    def test_an_incus_parent_is_read_from_its_squashfs(self) -> None:
+        image = write_image(self.root, "incus-base", IDENTITY, incusimage.fixture("scan"))
+        parent = parents.describe_incus(image.metadata)
+        expected = sorted(self.paths(incusimage.fixture("scan")) - self.paths(incusimage.fixture("incus-root")) - {"/"})
+        self.assertTrue(expected)
+        self.assertEqual(run.incus_removed_from(parent, self.rootfs), expected)
+
+    def test_a_root_that_cannot_be_read_fails_with_the_parent_named(self) -> None:
+        tarball = self.root / "core.tar.gz"
+        tarball.write_bytes(b"not a tarball")
+        parent = parents.ParentArtifact("core", "core", tarball.name, "a" * 64, tarball)
+        with self.assertRaisesRegex(commands.Failed, "the roots of core and its Incus child cannot be compared"):
+            run.incus_removed_from(parent, self.rootfs)
 
 
 if __name__ == "__main__":
