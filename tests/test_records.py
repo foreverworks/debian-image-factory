@@ -299,8 +299,8 @@ class DefinitionUriTest(unittest.TestCase):
     def test_https_loses_its_token_and_keeps_its_suffix(self) -> None:
         self.assertEqual(definition_uri("https://github.com/example/images"), "git+https://github.com/example/images")
         self.assertEqual(
-            definition_uri("https://x-access-token:ghs_secret@github.com/example/images.git"),
-            "git+https://github.com/example/images.git",
+            definition_uri("https://x-access-token:ghs_secret@example.com/example/images.git"),
+            "git+https://example.com/example/images.git",
         )
         self.assertEqual(
             definition_uri("https://tok@example.com:8443/a/b.git?x=y#z"), "git+https://example.com:8443/a/b.git"

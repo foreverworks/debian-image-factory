@@ -68,7 +68,10 @@ class CoreBuildTest(unittest.TestCase):
         tag = subprocess.run(
             [str(ROOT / "scripts" / "builder"), "build"], check=True, capture_output=True, text=True
         ).stdout.split()[-1]
-        cls.scratch = tempfile.TemporaryDirectory(prefix="dif-core-")
+        # Under dist/, not /tmp: the docker daemon mounts the build directory from its own view of the
+        # host, where a private /tmp (systemd PrivateTmp, a sandbox) does not exist.
+        (ROOT / "dist").mkdir(exist_ok=True)
+        cls.scratch = tempfile.TemporaryDirectory(prefix="integration-core-", dir=ROOT / "dist")
         cls.work = Path(cls.scratch.name)
         plan = cls.work / "plan.json"
         factory("plan", *files(), "--out", str(plan))

@@ -134,7 +134,8 @@ def _fields(value: object, where: str) -> dict[str, Value]:
     return found
 
 
-def _image(name: str, value: object) -> ImageEntry:
+def parse_image(name: str, value: object) -> ImageEntry:
+    """One `images.<name>` entry of a plan, every field checked."""
     where = f"images.{name}"
     entry = _object(value, where)
 
@@ -205,7 +206,7 @@ def parse_plan(data: object) -> Plan:
             "architecture": _text(_member(debian, "architecture", "debian"), "debian.architecture", NAME),
         },
         "params": _params(_member(plan, "params", ""), "params"),
-        "images": {name: _image(name, value) for name, value in images.items()},
+        "images": {name: parse_image(name, value) for name, value in images.items()},
     }
 
 

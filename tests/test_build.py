@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from debian_image_factory import tools
+from debian_image_factory import commands, definition, planfile, tools
+from debian_image_factory import plan as plan_module
 from debian_image_factory.build import core, run
 from debian_image_factory.identity import FileFact
 
@@ -139,6 +140,66 @@ class EdgeHelpersTest(unittest.TestCase):
     def test_input_file_name_is_the_url_basename(self) -> None:
         self.assertEqual(run.input_file_name({"url": "https://example.com/a/node-v1.tar.xz?x=1"}), "node-v1.tar.xz")
         self.assertEqual(run.input_file_name({"url": "https://example.com/"}), "file")
+
+    def test_input_file_name_never_leaves_its_folder(self) -> None:
+        for url in (
+            "https://example.com/a/%2F..%2F..%2Fetc%2Fpasswd",
+            "https://example.com/a/..%5C..%5Cx",
+            "https://example.com/a/x%00y",
+            "https://example.com/a/%2E%2E",
+        ):
+            self.assertEqual(run.input_file_name({"url": url}), "file", url)
+
+
+class VerifyPlanTest(unittest.TestCase):
+    """build re-derives every field of a plan entry it reads and refuses an entry that moved."""
+
+    def setUp(self) -> None:
+        self.loaded = commands.load(ROOT / "examples" / "lock.json", ROOT / "examples" / "factory.toml")
+        self.lock = commands.checked_lock(self.loaded)
+        self.params = definition.resolve_params(self.loaded.definition, {})
+        names = definition.top_down(self.loaded.definition)
+        resolved = {name: (("base-files", "13", "amd64"),) for name in names}
+        inputs = commands.compute_inputs(self.lock, self.loaded, resolved, self.params)
+        images = {
+            name: planfile.parse_image(
+                name, {**plan_module.image_entry(self.loaded.definition, inputs[name]), "state": "build"}
+            )
+            for name in names
+        }
+        self.plan: planfile.Plan = {
+            "schema": 1,
+            "factory": "0",
+            "engine": 1,
+            "snapshot": SNAPSHOT,
+            "baseline": None,
+            "debian": {"suite": "trixie", "components": ("main",), "architecture": "amd64"},
+            "params": {},
+            "images": images,
+        }
+
+    def verify(self) -> None:
+        run.verify_identity(self.lock, self.loaded, self.plan, "core", self.params)
+
+    def test_a_plan_made_from_the_lock_passes(self) -> None:
+        self.verify()
+
+    def test_an_edited_request_or_sources_is_refused_though_the_identity_is_unchanged(self) -> None:
+        core_entry = self.plan["images"]["core"]
+        for key, value in (("request", ("evil",)), ("apt_sources", "baseline"), ("checks", ())):
+            with self.subTest(key=key):
+                self.plan["images"]["core"] = {**core_entry, key: value}  # type: ignore[misc]  # one field replaced
+                with self.assertRaisesRegex(commands.Failed, rf"{key} differ"):
+                    self.verify()
+        self.plan["images"]["core"] = {**core_entry, "inputs": {"x": {"url": "https://example.com/x"}}}
+        with self.assertRaisesRegex(commands.Failed, "inputs differ"):
+            self.verify()
+
+    def test_a_plan_package_set_that_moved_changes_the_identity(self) -> None:
+        core_entry = self.plan["images"]["core"]
+        self.plan["images"]["core"] = {**core_entry, "packages": (("base-files", "14", "amd64"),)}
+        with self.assertRaisesRegex(commands.Failed, "identity"):
+            self.verify()
 
     def test_builder_snapshot_is_the_repository_lock_snapshot(self) -> None:
         lock = json.loads((ROOT / "lock.json").read_text())

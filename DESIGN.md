@@ -174,7 +174,9 @@ recipe is `builder/Dockerfile`; its snapshot is the `debian_snapshot` of the rep
   snapshot and published with its own records; the very first one is bootstrapped from Debian's
   official `debian:trixie` image pinned by digest. It runs with `--privileged`, which under rootless
   Docker grants nothing beyond the invoking user's own namespace, and mmdebstrap runs in root mode
-  inside it.
+  inside it. Under rootful Docker (GitHub-hosted runners among them) `--privileged` is real host
+  root: a definition's hooks then run as root on the host with no network, so build only
+  definitions you trust there.
 - **On a Debian host** (`--builder host`), mmdebstrap runs in unshare mode. That mode needs
   `newuidmap`, so it does not work where `NoNewPrivileges` is set; use the container there.
 - **Only tools that write bytes enter identities.** The package set of mmdebstrap, apt, dpkg, tar,

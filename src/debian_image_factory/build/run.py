@@ -30,6 +30,7 @@ from input_lock.lock import entry_env
 from input_lock.records import Statement, statement, subject
 
 from .. import ENGINE, __version__, commands, debian, definition, fetch, planfile, records, resolve
+from .. import plan as plan_module
 from .. import tools as builder
 from ..identity import FileFact
 from ..published import artifact_name, records_name_for
@@ -150,7 +151,8 @@ def input_file_name(fields: Mapping[str, input_lock.Value]) -> str:
     """The file name a hook finds a locked input under: the last segment of its rendered URL."""
     url = fields.get("url")
     name = unquote(urlparse(url).path.rsplit("/", 1)[-1]) if isinstance(url, str) else ""
-    return name if name not in ("", ".", "..") else "file"
+    unsafe = name in ("", ".", "..") or any(character in name for character in "/\\\0")
+    return "file" if unsafe else name
 
 
 def prepare_work(
@@ -266,7 +268,11 @@ def definition_source(definition_path: Path) -> records.DefinitionSource | None:
     changed = git(folder, "status", "--porcelain", "--", ".")
     if changed is not None:
         return None  # uncommitted changes: the commit does not describe what was built from
-    return records.DefinitionSource(uri, revision, definition_path.resolve().relative_to(top).as_posix())
+    try:
+        relative = definition_path.resolve().relative_to(top).as_posix()
+    except ValueError:
+        return None  # the checkout git names does not hold the resolved path
+    return records.DefinitionSource(uri, revision, relative)
 
 
 def reason_text(because: object) -> str | None:
@@ -406,12 +412,27 @@ def plan_order(plan: planfile.Plan) -> list[str]:
 def verify_identity(
     lock: Lock, loaded: commands.Loaded, plan: planfile.Plan, image: str, params: Mapping[str, definition.Param]
 ) -> None:
-    """The plan's identity for `image` must still be what the lock, the definition and its files give."""
+    """The plan's entry for `image` must still be what the lock, the definition and its files give.
+
+    Not only the identity: the build reads the entry's request, sources, inputs and parameters, so every
+    field the plan command derives is derived again here and compared. Only the package set is taken from
+    the plan as it stands, since it is what the identity is computed over."""
     resolved = {name: tuple(entry["packages"]) for name, entry in plan["images"].items()}
-    inputs = commands.compute_inputs(lock, loaded, resolved, params)
-    if image not in inputs or inputs[image].identity != plan["images"][image]["identity"]:
+    try:
+        inputs = commands.compute_inputs(lock, loaded, resolved, params)
+        if image not in inputs:
+            raise ValueError(f"the definition has no image {image}")
+        given = plan["images"][image]
+        expected = planfile.parse_image(
+            image, {**plan_module.image_entry(loaded.definition, inputs[image]), "state": given["state"]}
+        )
+    except (KeyError, ValueError) as error:
+        raise commands.Failed(f"images.{image}: the plan does not match the lock and the definition: {error}") from None
+    moved = sorted(key for key in expected if expected[key] != given.get(key))  # type: ignore[literal-required]  # keys come from expected itself
+    if moved:
         raise commands.Failed(
-            f"images.{image}: the lock, the definition or its files changed since this plan was made: plan again"
+            f"images.{image}: the lock, the definition or its files changed since this plan was made"
+            f" ({', '.join(moved)} differ): plan again"
         )
 
 
@@ -494,7 +515,9 @@ def build_command(
                 started=started,
                 finished=finished,
             )
-            os.replace(packed, out_dir / name)
+            # Records first: an interrupted build leaves at most records without an artifact, which
+            # nothing reads, never an artifact that publish would refuse for lack of records.
             (out_dir / records_name_for(digest)).write_text(records.record_lines(statements))
+            os.replace(packed, out_dir / name)
         print(f"{image}: {name} ({len(packages)} packages)", file=out)
     return 0
