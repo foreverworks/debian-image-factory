@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# The builder image: build it at the lock's snapshot, or list the byte-writing tools inside it.
+# The builder image: build it at the lock's snapshot, or list the byte-writing tools inside it; and the
+# boot checks' image (QEMU and OVMF) from the same base and snapshot.
 #   scripts/builder build [--tag TAG]   builds the image and prints its tag
 #   scripts/builder tools [--tag TAG]   prints [name, version, architecture] of the tools as JSON
+#   scripts/builder vm [--tag TAG]      builds the boot checks' image (builder/vm.Dockerfile) and prints its tag
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,7 +14,7 @@ tool_packages=(mmdebstrap apt dpkg tar gzip cpio squashfs-tools python3 python3.
   libpython3.13-stdlib libpython3.13-minimal zlib1g liblzma5)
 
 usage() {
-  echo "usage: scripts/builder build|tools [--tag TAG]" >&2
+  echo "usage: scripts/builder build|tools|vm [--tag TAG]" >&2
   exit 2
 }
 
@@ -28,11 +30,20 @@ while [ $# -gt 0 ]; do
 done
 
 snapshot="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["debian_snapshot"])' "$root/lock.json")"
-tag="${tag:-debian-image-factory-builder:$snapshot}"
+if [ "$command" = vm ]; then
+  tag="${tag:-debian-image-factory-vm:$snapshot}"
+else
+  tag="${tag:-debian-image-factory-builder:$snapshot}"
+fi
 
 case "$command" in
   build)
     docker build --quiet --build-arg "SNAPSHOT=$snapshot" --tag "$tag" --file "$root/builder/Dockerfile" \
+      "$root/builder" >/dev/null
+    echo "$tag"
+    ;;
+  vm)
+    docker build --quiet --build-arg "SNAPSHOT=$snapshot" --tag "$tag" --file "$root/builder/vm.Dockerfile" \
       "$root/builder" >/dev/null
     echo "$tag"
     ;;

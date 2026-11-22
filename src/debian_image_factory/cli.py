@@ -126,6 +126,19 @@ def parser() -> argparse.ArgumentParser:
         default=Path("factory.toml"),
         help="the build definition, read for module tables (locked-inputs); default factory.toml when present",
     )
+    test.add_argument(
+        "--parent",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="FILE",
+        help="a parent artifact outside OUT, for ancestry of an OS root or installer kit (repeat)",
+    )
+    test.add_argument(
+        "--vm-image",
+        default=builder.VM_IMAGE,
+        help=f"the boot checks' container image (default {builder.VM_IMAGE}, from scripts/builder vm)",
+    )
 
     publish_ = commands_.add_parser("publish", help="copy artifacts and their records to targets")
     publish_.add_argument("out_dir", type=Path, metavar="OUT", help="the directory build wrote")
@@ -230,7 +243,11 @@ def dispatch(arguments: argparse.Namespace) -> int:
             parent_targets=arguments.parents,
         )
     if arguments.command == "test":
-        effects = checks.Effects(modules=test_modules(arguments.definition))
+        effects = checks.Effects(
+            modules=test_modules(arguments.definition),
+            parents=tuple(arguments.parent),
+            vm=checks.Vm(image=arguments.vm_image),
+        )
         return checks.test_command(
             arguments.out, arguments.check, sources_of(arguments), sys.stdout, effects=effects, url=arguments.url
         )

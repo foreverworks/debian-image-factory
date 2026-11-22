@@ -4,6 +4,7 @@
 #   scripts/test static        ruff, ruff format, mypy, check-ignores, shellcheck
 #   scripts/test unit          the unit tests (seconds, no network, no root)
 #   scripts/test integration   the slow tests, DIF_INTEGRATION=1 (network, docker)
+#   scripts/test boot          only the boot checks' integration tests (QEMU; KVM when /dev/kvm opens)
 #   scripts/test matrix        the unit tier in docker on the Python floor and on the newest stable
 #   scripts/test all           static, unit and matrix (add integration by naming it)
 #
@@ -61,7 +62,12 @@ unit_like() {
     shift
     mkdir -p dist
     local log=dist/test-$name.log status=0
-    env "$@" PYTHONPATH=src:.vendor python3 -m unittest discover -s tests -t . >"$log" 2>&1 || status=$?
+    if [ -n "${UNITTEST_MODULES:-}" ]; then
+        # shellcheck disable=SC2086 # a list of module names
+        env "$@" PYTHONPATH=src:.vendor python3 -m unittest -v $UNITTEST_MODULES >"$log" 2>&1 || status=$?
+    else
+        env "$@" PYTHONPATH=src:.vendor python3 -m unittest discover -s tests -t . >"$log" 2>&1 || status=$?
+    fi
     cat "$log"
     return "$status"
 }
@@ -95,6 +101,7 @@ case "$tier" in
 static) static ;;
 unit) unit_like unit ;;
 integration) unit_like integration DIF_INTEGRATION=1 ;;
+boot) UNITTEST_MODULES=tests.integration.test_boot_checks unit_like boot DIF_INTEGRATION=1 ;;
 matrix) matrix ;;
 all)
     static

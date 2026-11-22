@@ -35,6 +35,10 @@ BUILDER_IMAGE: Final = f"debian-image-factory-builder:{BUILDER_SNAPSHOT}"
 """The builder image a build runs in unless `--builder-image` names another: the tag `scripts/builder
 build` gives the image it builds at that snapshot."""
 
+VM_IMAGE: Final = f"debian-image-factory-vm:{BUILDER_SNAPSHOT}"
+"""The boot checks' image (QEMU, OVMF and the disk tools, `builder/vm.Dockerfile`), from the builder's base
+and snapshot: the tag `scripts/builder vm` gives it. It writes no artifact's bytes, so it enters no identity."""
+
 type Tool = tuple[str, str, str]
 """One installed package: name, version, architecture."""
 

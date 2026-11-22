@@ -229,7 +229,7 @@ class RunTest(Base):
     def test_a_name_that_is_no_check_is_refused(self) -> None:
         self.out.image()
         with self.assertRaises(Usage):
-            self.out.run(FakeDocker(), ["installer-boot"])
+            self.out.run(FakeDocker(), ["no-such-check"])
 
     def test_package_set_and_sbom_read_the_status_of_the_last_layer_that_holds_it(self) -> None:
         newer = (*BASE, ("tool-b", "2.0", "amd64"))

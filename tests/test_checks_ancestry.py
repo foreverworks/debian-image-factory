@@ -1,10 +1,12 @@
-"""`ancestry`: the parent's layers are the first layers, and the base digest annotation names the parent."""
+"""`ancestry`: the parent's layers are the first layers, and the base digest annotation names the parent; for a
+root filesystem, the parent's files are present but for those of packages the child removed."""
 
 import unittest
 
 from debian_image_factory import oci
 from debian_image_factory.checks import ancestry
 from debian_image_factory.checks.model import NotRun, Result
+from debian_image_factory.checks.tarball import Member
 
 A, B, C, D = ("a" * 64, "b" * 64, "c" * 64, "d" * 64)
 
@@ -67,6 +69,60 @@ class AncestryTest(unittest.TestCase):
     def test_a_parent_known_only_by_digest_is_not_run(self) -> None:
         found = ancestry.ancestry([A], annotations(D), ancestry.Parent(D, None))
         self.assertIsInstance(found, NotRun)
+
+
+PARENT = ancestry.ParentRoot(
+    A,
+    tuple(
+        Member(p.rstrip("/") or "/", "dir" if p.endswith("/") else "file")
+        for p in (
+            "/",
+            "/usr/",
+            "/usr/bin/",
+            "/usr/bin/vim",
+            "/usr/bin/sh",
+            "/var/lib/dpkg/info/vim.list",
+            "/var/lib/dpkg/info/vim.md5sums",
+            "/var/lib/dpkg/info/libc6:amd64.list",
+            "/var/log/apt/history.log",
+            "/etc/ssh/ssh_host_ed25519_key",
+            "/dev/null",
+        )
+    ),
+    {
+        "/var/lib/dpkg/info/vim.list": b"/.\n/usr\n/usr/bin\n/usr/bin/vim\n",
+        "/var/lib/dpkg/info/libc6:amd64.list": b"/.\n/usr\n/usr/bin/sh\n",
+    },
+)
+
+
+class RootAncestryTest(unittest.TestCase):
+    def test_a_child_with_every_parent_file_passes(self) -> None:
+        child = [*PARENT.members, Member("/usr/bin/extra", "file")]
+        found = ancestry.root_ancestry(child, {"vim", "libc6"}, PARENT)
+        assert isinstance(found, Result)
+        self.assertEqual(found.outcome, "PASSED")
+
+    def test_a_file_gone_without_its_package_going_fails(self) -> None:
+        child = [m for m in PARENT.members if m.path != "/usr/bin/sh"]
+        found = ancestry.root_ancestry(child, {"vim", "libc6"}, PARENT)
+        assert isinstance(found, Result)
+        self.assertEqual(
+            found.failed, (f"parent-files-present: /usr/bin/sh is in the parent sha256:{A[:12]} and not here",)
+        )
+
+    def test_files_of_a_removed_package_and_cleaned_trees_may_go(self) -> None:
+        kept = {"/", "/usr", "/usr/bin", "/usr/bin/sh", "/var/lib/dpkg/info/libc6:amd64.list"}
+        child = [m for m in PARENT.members if m.path in kept]
+        found = ancestry.root_ancestry(child, {"libc6"}, PARENT)
+        assert isinstance(found, Result)
+        self.assertEqual(found.outcome, "PASSED")
+
+    def test_an_absent_parent_is_not_run_and_an_unreadable_status_fails(self) -> None:
+        self.assertIsInstance(ancestry.root_ancestry([], {"vim"}, "the parent core is not here"), NotRun)
+        found = ancestry.root_ancestry([], "no status", PARENT)
+        assert isinstance(found, Result)
+        self.assertEqual(found.outcome, "FAILED")
 
 
 if __name__ == "__main__":

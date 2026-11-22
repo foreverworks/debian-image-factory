@@ -20,6 +20,8 @@ ANCESTRY: Final = "ancestry"
 OCI_RUN: Final = "oci-run"
 LOCKED_INPUTS: Final = "locked-inputs"
 INCUS_BOOT: Final = "incus-boot"
+INSTALLER_BOOT: Final = "installer-boot"
+OS_BOOT: Final = "os-boot"
 
 CORE_CHECKS: Final = (
     NO_BUILD_SNAPSHOT,
@@ -56,7 +58,38 @@ INCUS_CHECKS: Final = (
 """The checks this release runs on an Incus image: `definition.BUILTIN_CHECKS["incus"]`. `incus-boot` and
 `two-clones` need an Incus host (they are not run elsewhere); `locked-inputs` is not run on Incus images yet."""
 
-CHECKS_OF_KIND: Final[Mapping[str, tuple[str, ...]]] = {"core": CORE_CHECKS, "oci": OCI_CHECKS, "incus": INCUS_CHECKS}
+INSTALLER_CHECKS: Final = (
+    ANCESTRY,
+    INSTALLER_BOOT,
+    LOCKED_INPUTS,
+    NO_BUILD_SNAPSHOT,
+    NO_MACHINE_IDENTITY,
+    PACKAGE_SET,
+    SBOM_COMPLETE,
+    TWO_CLONES,
+)
+"""The checks this release runs on an installer kit: `definition.BUILTIN_CHECKS["installer"]` and
+`locked-inputs`."""
+
+OS_CHECKS: Final = (
+    ANCESTRY,
+    LOCKED_INPUTS,
+    NO_BUILD_SNAPSHOT,
+    NO_MACHINE_IDENTITY,
+    OS_BOOT,
+    PACKAGE_SET,
+    SBOM_COMPLETE,
+    TWO_CLONES,
+)
+"""The checks this release runs on an OS root: `definition.BUILTIN_CHECKS["os"]` and `locked-inputs`."""
+
+CHECKS_OF_KIND: Final[Mapping[str, tuple[str, ...]]] = {
+    "core": CORE_CHECKS,
+    "oci": OCI_CHECKS,
+    "incus": INCUS_CHECKS,
+    "installer": INSTALLER_CHECKS,
+    "os": OS_CHECKS,
+}
 """The kinds `test` runs checks on, and each one's checks."""
 
 LIMIT: Final = 25

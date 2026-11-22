@@ -113,8 +113,15 @@ def plan_text(
     return json.dumps(plan)
 
 
-def sbom_line(name: str, digest: str, packages: Iterable[Package], inputs: Mapping[str, str] | None = None) -> str:
-    """One records line: the SPDX statement of an artifact, as the build writes it."""
+def sbom_line(
+    name: str,
+    digest: str,
+    packages: Iterable[Package],
+    inputs: Mapping[str, str] | None = None,
+    more_subjects: Sequence[tuple[str, str]] = (),
+) -> str:
+    """One records line: the SPDX statement of an artifact, as the build writes it (an installer kit's also
+    names its kernel and initrd: `more_subjects`)."""
     root: SpdxPackage = {
         "SPDXID": "SPDXRef-Image",
         "name": "core",
@@ -137,4 +144,5 @@ def sbom_line(name: str, digest: str, packages: Iterable[Package], inputs: Mappi
         "core", f"https://example.com/sbom/{digest}", "2026-11-21T00:00:00Z", "Tool: test", root,
         [*rec.deb_packages(packages, SUITE), *locked],
     )  # fmt: skip
-    return rec.jsonl([rec.envelope(rec.statement([rec.subject(name, digest)], rec.SPDX_PREDICATE, document))])
+    subjects = [rec.subject(name, digest), *(rec.subject(n, d) for n, d in more_subjects)]
+    return rec.jsonl([rec.envelope(rec.statement(subjects, rec.SPDX_PREDICATE, document))])

@@ -1,9 +1,10 @@
 """`debian-image-factory test OUT`: run the built-in checks on the artifacts in OUT and attest each result.
 
-OUT is what a build left: `plan.json`, the artifacts named by `published.artifact_name` (a core tarball, or
-an OCI image layout directory), and `<digest>.intoto.jsonl` beside each. Each check that ran appends one
-in-toto test-result statement to its artifact's records file; a check that could not run is listed and
-writes nothing.
+OUT is what a build left: `plan.json`, the artifacts named by `published.artifact_name` (a core or OS root
+tarball, an installer kit, or an OCI image layout directory), and `<digest>.intoto.jsonl` beside each. Each
+check that ran appends one in-toto test-result statement to its artifact's records file; a check that could
+not run is listed and writes nothing. A boot check that failed leaves each boot's serial log beside its
+artifact.
 """
 
 import contextlib
@@ -13,7 +14,7 @@ import tarfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TextIO
+from typing import Final, TextIO
 
 import input_lock.records as rec
 
@@ -28,13 +29,17 @@ from . import (
     container,
     incus_host,
     inputs,
+    kit,
     layers,
     machine_identity,
+    newc,
     packages,
     resolution,
     snapshot,
     squashfs_scan,
     tarball,
+    vm,
+    vmrun,
 )
 from .container import ProbeRunner
 from .dockerio import DOCKER, Docker
@@ -42,10 +47,12 @@ from .model import (
     ANCESTRY,
     CHECKS_OF_KIND,
     INCUS_BOOT,
+    INSTALLER_BOOT,
     LOCKED_INPUTS,
     NO_BUILD_SNAPSHOT,
     NO_MACHINE_IDENTITY,
     OCI_RUN,
+    OS_BOOT,
     PACKAGE_SET,
     SAME_RESOLUTION,
     SBOM_COMPLETE,
@@ -53,14 +60,25 @@ from .model import (
     CheckOutcome,
     NotRun,
     Result,
+    result,
+    split,
 )
 
 CHUNK = 1024 * 1024
 
-ARTIFACT_KINDS = {"tar.gz": "core", oci.LAYOUT_EXT: "oci", incus.METADATA_EXT: "incus"}
-"""The artifact name extensions `test` reads, and the kind of image each one is."""
+ARTIFACT_KINDS: dict[str, tuple[str, ...]] = {
+    "tar.gz": ("core", "os"),
+    "tar": ("installer",),
+    oci.LAYOUT_EXT: ("oci",),
+    incus.METADATA_EXT: ("incus",),
+}
+"""The artifact name extensions `test` reads, and the kinds of image each can be: a core and an OS root are
+both a `.tar.gz`, so the plan entry's kind tells them apart."""
+BOOT_KINDS: Final = ("installer", "os")
 
 type TwoClones = Callable[[Path], CheckOutcome]
+type BootInstaller = Callable[[Path, int, vmrun.Vm], list[vm.Boot] | vmrun.Unready]
+type BootOs = Callable[[Path, vmrun.RootFacts, int, vmrun.Vm], list[vm.Boot] | vmrun.Unready]
 type LockedInputs = Callable[[ImageEntry, bytes | None, ProbeRunner, Mapping[str, Module] | None], CheckOutcome]
 """The `locked-inputs` check: the plan entry, the image's dpkg status (None when it has none), a runner
 that runs a `modules.Probe` in the image and gives (exit status, standard output), and the definition's
@@ -90,6 +108,11 @@ class Effects:
     locked_inputs: LockedInputs = locked_inputs_result
     modules: Mapping[str, Module] | None = None
     """The definition's modules, for the probes of `locked-inputs`; None when `test` has no definition."""
+    parents: tuple[Path, ...] = ()
+    """Parent artifacts outside OUT, for `ancestry` of an OS or installer child (`test --parent`)."""
+    vm: vmrun.Vm = vmrun.VM
+    boot_installer: BootInstaller = vmrun.boot_installer
+    boot_os: BootOs = vmrun.boot_os
 
 
 # ---- finding artifacts -----------------------------------------------------------------------------
@@ -97,13 +120,15 @@ class Effects:
 
 @dataclass(frozen=True, slots=True)
 class Found:
-    """An artifact `test` can run checks on. `digest` is the core tarball's sha256, or the OCI image's
-    manifest digest; `layout` is the image read from an OCI layout directory (None for a tarball)."""
+    """An artifact `test` can run checks on. `digest` is a tarball's sha256 (core, OS root, installer kit),
+    or the OCI image's manifest digest; `layout` is the image read from an OCI layout directory (None for a
+    tarball); `kind` is the plan entry's."""
 
     path: Path
     image: str
     digest: str
     layout: ocilayout.Layout | None = field(default=None)
+    kind: str = "core"
 
 
 def sha256_of(path: Path) -> str:
@@ -136,28 +161,30 @@ def read_artifact(path: Path, name: ArtifactName) -> tuple[str, ocilayout.Layout
 
 
 def find_artifacts(out_dir: Path, plan: Plan) -> tuple[list[Found], list[str]]:
-    """The core tarballs and OCI image layouts in `out_dir` the plan knows, and a line for each one skipped,
-    with its reason. A layout is a directory whose name an artifact name parses and whose manifest digest
-    is the one the name says."""
+    """The core and OS tarballs, installer kits and OCI image layouts in `out_dir` the plan knows, and a line
+    for each one skipped, with its reason. A layout is a directory whose name an artifact name parses and
+    whose manifest digest is the one the name says."""
     found: list[Found] = []
     skipped: list[str] = []
     for path in sorted(out_dir.iterdir()):
         name = parse_artifact_name(path.name)
         if name is None or fileartifacts.is_companion(name):
             continue  # an Incus rootfs is tested with its metadata tarball
-        kind = ARTIFACT_KINDS.get(name.ext)
-        if kind is None or path.is_dir() != (name.ext == oci.LAYOUT_EXT):
+        kinds = ARTIFACT_KINDS.get(name.ext)
+        if kinds is None or path.is_dir() != (name.ext == oci.LAYOUT_EXT):
             if path.is_file():
                 skipped.append(
-                    f"skipped {path.name}: only core tarballs, OCI image layouts and Incus images are tested here"
+                    f"skipped {path.name}: only core and OS tarballs, installer kits, OCI image layouts and"
+                    " Incus images are tested by this release"
                 )
             continue
         image = image_of(name, plan)
         if image is None:
             skipped.append(f"skipped {path.name}: no image of the plan has this name and identity")
             continue
-        if plan["images"][image]["kind"] != kind:
-            skipped.append(f"skipped {path.name}: image {image} is of kind {plan['images'][image]['kind']}, not {kind}")
+        kind = plan["images"][image]["kind"]
+        if kind not in kinds:
+            skipped.append(f"skipped {path.name}: image {image} is of kind {kind}, not {' or '.join(kinds)}")
             continue
         read = read_artifact(path, name)
         if isinstance(read, str):
@@ -167,33 +194,44 @@ def find_artifacts(out_dir: Path, plan: Plan) -> tuple[list[Found], list[str]]:
         if not digest.startswith(name.digest12):
             skipped.append(f"skipped {path.name}: its digest is {digest}, which its name does not say")
             continue
-        found.append(Found(path, image, digest, layout))
+        found.append(Found(path, image, digest, layout, kind))
     return found, skipped
 
 
 # ---- records ---------------------------------------------------------------------------------------
 
 
-def sbom_of(records_text: str | None, digest: str) -> Mapping[str, object] | str:
-    """The predicate of the one SBOM statement about `digest`, or why there is not exactly one."""
+def sbom_statement_of(
+    records_text: str | None, digest: str
+) -> tuple[Mapping[str, object], list[tuple[str, str]]] | str:
+    """(the predicate, the subjects as (name, sha256)) of the one SBOM statement about `digest`, or why there
+    is not exactly one."""
     if records_text is None:
         return "there is no records file for this artifact"
     try:
         statements = records.decode_statements(records_text)
     except records.RecordsError as error:
         return f"the records file cannot be read: {error}"
-    documents: list[Mapping[str, object]] = []
+    documents: list[tuple[Mapping[str, object], list[tuple[str, str]]]] = []
     for one in statements:
         subjects, predicate = one.get("subject"), one.get("predicate")
-        about = isinstance(subjects, list) and any(
-            isinstance(s, dict) and isinstance(s.get("digest"), dict) and s["digest"].get("sha256") == digest
-            for s in subjects
-        )
+        named = [
+            (str(s.get("name", "")), str(s["digest"].get("sha256", "")))
+            for s in (subjects if isinstance(subjects, list) else [])
+            if isinstance(s, dict) and isinstance(s.get("digest"), dict)
+        ]
+        about = any(sha == digest for _, sha in named)
         if about and one.get("predicateType") == rec.SPDX_PREDICATE and isinstance(predicate, dict):
-            documents.append({str(key): value for key, value in predicate.items()})
+            documents.append(({str(key): value for key, value in predicate.items()}, named))
     if len(documents) != 1:
         return f"the records hold {len(documents)} SBOM statements about this artifact, not one"
     return documents[0]
+
+
+def sbom_of(records_text: str | None, digest: str) -> Mapping[str, object] | str:
+    """The predicate of the one SBOM statement about `digest`, or why there is not exactly one."""
+    found = sbom_statement_of(records_text, digest)
+    return found if isinstance(found, str) else found[0]
 
 
 def test_result_line(found: Found, outcome: Result, url: str = "") -> str:
@@ -505,6 +543,206 @@ def run_incus_checks(
     return outcomes
 
 
+# ---- installer kits and OS roots --------------------------------------------------------------------
+
+
+def scan_root(
+    path: Path, kind: str, wanted: frozenset[str], needle: str | None, keys: bool, keep: tarball.Keep
+) -> tarball.Scan:
+    """One pass over the root filesystem an artifact holds: an installer kit's initrd, or a tarball's members."""
+    if kind == "installer":
+        return kit.scan_kit(path, wanted, needle, keys, keep)
+    return tarball.scan_tarball(path, wanted, needle, keys, keep)
+
+
+def parent_candidates(parent: str, plan: Plan, others: Sequence[Found], given: Sequence[Path]) -> list[Found]:
+    """The artifacts of image `parent` in this run's output and among the `--parent` files (whose names say
+    their image and digest; one whose bytes do not match its name is left out)."""
+    found = [one for one in others if one.image == parent]
+    entry = plan["images"].get(parent)
+    for path in given:
+        name = parse_artifact_name(path.name)
+        if name is None or name.image != parent or entry is None or path.is_dir():
+            continue
+        digest = sha256_of(path)
+        if digest.startswith(name.digest12) and all(one.digest != digest for one in found):
+            found.append(Found(path, parent, digest, None, entry["kind"]))
+    return found
+
+
+def root_parent(found: Found, plan: Plan, others: Sequence[Found], given: Sequence[Path]) -> ancestry.ParentRoot | str:
+    """The parent's root filesystem for `ancestry` of an OS root or an installer kit, or why it is not
+    available. When there are several artifacts of the parent image, the one the plan names is taken."""
+    parent = plan["images"][found.image]["parent"]
+    if parent is None:
+        return "the image has no parent"
+    candidates = parent_candidates(parent, plan, others, given)
+    planned = planned_digest(plan["images"].get(parent))
+    chosen = next((one for one in candidates if one.digest == planned), None)
+    if chosen is None and len(candidates) == 1:
+        chosen = candidates[0]
+    if chosen is None:
+        if candidates:
+            return f"there are {len(candidates)} artifacts of the parent {parent} and the plan names none of them"
+        return f"the parent {parent} is not in the output and not given with --parent"
+    scanned = scan_root(chosen.path, chosen.kind, frozenset(), None, False, ancestry.is_file_list)
+    return ancestry.ParentRoot(chosen.digest, scanned.members, scanned.contents)
+
+
+def uses_module_probes(entry: ImageEntry) -> bool:
+    """Whether `locked-inputs` must run a module's probe in the image: an entry a module installs that is
+    neither an apt package nor a trust root."""
+    roots = {signer["signed_by"] for signer in entry["trust"].values() if "signed_by" in signer}
+    return any(
+        fields.get("module") and not fields.get("apt") and name not in roots for name, fields in entry["inputs"].items()
+    )
+
+
+def no_probes(probe: object) -> tuple[int, str]:
+    raise AssertionError("no module entry, so no probe runs")
+
+
+def boot_kind_locked_inputs(found: Found, entry: ImageEntry, status: bytes | None, effects: Effects) -> CheckOutcome:
+    """`locked-inputs` for an OS root or an installer: apt entries by the dpkg status; module entries by their
+    probes, run in a container imported from the OS root. An installer's initrd is not made into a container
+    image by this release, so its module entries are not probed and the check is not run."""
+    if not uses_module_probes(entry) or effects.modules is None:
+        return effects.locked_inputs(entry, status, no_probes, effects.modules)
+    if found.kind == "installer":
+        return NotRun(
+            LOCKED_INPUTS,
+            "an installer's modules are probed in its root, which this release does not run as a container",
+        )
+    try:
+        with container.imported(found.path, effects.docker) as image:
+            if not isinstance(image, container.Loaded):
+                return NotRun(LOCKED_INPUTS, image)
+            return effects.locked_inputs(
+                entry, status, container.run_probe(image.image, effects.docker), effects.modules
+            )
+    except (OSError, subprocess.SubprocessError) as error:
+        return NotRun(LOCKED_INPUTS, f"docker failed: {error}")
+
+
+def boots_for(
+    found: Found, names: Sequence[str], effects: Effects
+) -> tuple[list[vm.Boot] | vmrun.Unready | None, vmrun.RootFacts | None]:
+    """The boots the checks need (two when `two-clones` runs, which also serve the boot check), and for an
+    OS root what its tarball says about /boot; (None, None) when no check boots."""
+    boot_check = INSTALLER_BOOT if found.kind == "installer" else OS_BOOT
+    count = 2 if TWO_CLONES in names else 1 if boot_check in names else 0
+    if count == 0:
+        return None, None
+    if found.kind == "installer":
+        return effects.boot_installer(found.path, count, effects.vm), None
+    facts = vmrun.root_facts(found.path)
+    return effects.boot_os(found.path, facts, count, effects.vm), facts
+
+
+def boot_outcome(
+    name: str,
+    found: Found,
+    boots: list[vm.Boot] | vmrun.Unready | None,
+    facts: vmrun.RootFacts | None,
+    the_kit: kit.Kit | None,
+    status: bytes | None,
+) -> CheckOutcome:
+    """`installer-boot`, `os-boot` or `two-clones` from the boots that ran. Boots that did not happen because
+    of this machine are not run; because of the artifact (an OS without GRUB for UEFI), failed."""
+    if boots is None:
+        return NotRun(name, "no boot ran")
+    if isinstance(boots, vmrun.Unready):
+        if not boots.artifact_fault:
+            return NotRun(name, boots.reason)
+        return result(name, [], failed=[f"bootable: {boots.reason}"])
+    artifact = found.path.name
+    if name == TWO_CLONES:
+        return vm.two_clones(boots, artifact)
+    if name == INSTALLER_BOOT:
+        assert the_kit is not None
+        return vm.installer_boot(the_kit.kernel, the_kit.problems, boots[0], artifact)
+    installed = packages.installed(status)
+    wants_ssh = not isinstance(installed, str) and any(p[0] == "openssh-server" for p in installed)
+    kernels = facts.kernels if facts is not None else ()
+    return vm.os_boot(kernels[0] if len(kernels) == 1 else kernels, wants_ssh, boots[0], artifact)
+
+
+def keep_serial_logs(
+    found: Found, boots: list[vm.Boot] | vmrun.Unready | None, outcomes: Sequence[CheckOutcome]
+) -> None:
+    """When a check on the boots failed, each boot's serial log goes beside the artifact (vm.log_name)."""
+    booting = {INSTALLER_BOOT, OS_BOOT, TWO_CLONES}
+    failed = any(isinstance(o, Result) and o.check in booting and o.outcome == "FAILED" for o in outcomes)
+    if not failed or not isinstance(boots, list):
+        return
+    for n, boot in enumerate(boots, 1):
+        (found.path.parent / vm.log_name(found.path.name, n)).write_text(boot.serial, encoding="utf-8")
+
+
+def run_boot_kind_checks(
+    found: Found,
+    names: Sequence[str],
+    plan: Plan,
+    records_text: str | None,
+    effects: Effects,
+    others: Sequence[Found],
+) -> list[CheckOutcome]:
+    """The named checks on an OS root tarball or an installer kit, in the order given. One pass reads the
+    root (the kit's initrd); the boots run once for every check that boots."""
+    entry = plan["images"][found.image]
+    looking = NO_BUILD_SNAPSHOT in names and not snapshot.cannot_tell(plan["snapshot"], plan["baseline"])
+    needle = plan["snapshot"] if looking else None
+    inside = {PACKAGE_SET, NO_MACHINE_IDENTITY, SBOM_COMPLETE, NO_BUILD_SNAPSHOT, LOCKED_INPUTS, ANCESTRY, OS_BOOT}
+    wanted = frozenset(machine_identity.WANTED | {packages.STATUS_PATH})
+    the_kit = kit.read_kit(found.path) if found.kind == "installer" else None
+    scanned = (
+        scan_root(found.path, found.kind, wanted, needle, NO_MACHINE_IDENTITY in names, tarball.keep_none)
+        if inside & set(names)
+        else tarball.EMPTY
+    )
+    status = scanned.contents.get(packages.STATUS_PATH)
+    boots, facts = boots_for(found, names, effects)
+    outcomes: list[CheckOutcome] = []
+    for name in names:
+        if name == PACKAGE_SET:
+            outcomes.append(packages.package_set(status, entry["packages"]))
+        elif name == NO_MACHINE_IDENTITY:
+            outcomes.append(machine_identity.no_machine_identity(scanned.members, scanned.contents, scanned.key_files))
+        elif name == SBOM_COMPLETE:
+            outcomes.append(kit_sbom_complete(found, status, records_text, entry, the_kit))
+        elif name == NO_BUILD_SNAPSHOT:
+            outcomes.append(snapshot.no_build_snapshot(plan["snapshot"], plan["baseline"], scanned.needle_hits))
+        elif name == ANCESTRY:
+            installed = packages.installed(status)
+            names_installed = installed if isinstance(installed, str) else {p[0] for p in installed}
+            outcomes.append(
+                ancestry.root_ancestry(
+                    scanned.members, names_installed, root_parent(found, plan, others, effects.parents)
+                )
+            )
+        elif name == LOCKED_INPUTS:
+            outcomes.append(boot_kind_locked_inputs(found, entry, status, effects))
+        elif name in (INSTALLER_BOOT, OS_BOOT, TWO_CLONES):
+            outcomes.append(boot_outcome(name, found, boots, facts, the_kit, status))
+    keep_serial_logs(found, boots, outcomes)
+    return outcomes
+
+
+def kit_sbom_complete(
+    found: Found, status: bytes | None, records_text: str | None, entry: ImageEntry, the_kit: kit.Kit | None
+) -> Result:
+    """`sbom-complete`, and for an installer kit also its subjects: the kit, then `vmlinuz` and `initrd.img`."""
+    statement = sbom_statement_of(records_text, found.digest)
+    document = statement if isinstance(statement, str) else statement[0]
+    base = packages.sbom_complete(status, document, packages.locked_versions(entry["inputs"]))
+    if the_kit is None or isinstance(statement, str):
+        return base
+    ok, bad = split(
+        "subjects-are-the-kit-files", kit.subjects_problems(statement[1], found.path.name, found.digest, the_kit)
+    )
+    return result(SBOM_COMPLETE, [*base.passed, *ok], base.warned, [*base.failed, *bad])
+
+
 def run_checks(
     found: Found,
     names: Sequence[str],
@@ -516,11 +754,14 @@ def run_checks(
 ) -> list[CheckOutcome]:
     """The named checks on one artifact, in the order given; `others` are the run's other artifacts, where
     an image's parent is looked for."""
-    if plan["images"][found.image]["kind"] == "incus":
+    kind = plan["images"][found.image]["kind"]
+    if kind == "incus":
         return run_incus_checks(found, names, plan, records_text, effects, others)
-    if found.layout is None:
-        return run_core_checks(found, names, plan, records_text, sources, effects)
-    return run_oci_checks(found, found.layout, names, plan, records_text, effects, others)
+    if found.layout is not None:
+        return run_oci_checks(found, found.layout, names, plan, records_text, effects, others)
+    if found.kind in BOOT_KINDS:
+        return run_boot_kind_checks(found, names, plan, records_text, effects, others)
+    return run_core_checks(found, names, plan, records_text, sources, effects)
 
 
 def describe(image: str, outcome: CheckOutcome) -> str:
@@ -552,18 +793,16 @@ def test_command(
     effects: Effects = Effects(),
     url: str = "",
 ) -> int:
-    """Run the plan's required checks (or only `requested`) on every core tarball, OCI image layout and Incus
-    image in `out_dir`.
+    """Run the plan's required checks (or only `requested`) on every artifact in `out_dir` (core and OS
+    tarballs, installer kits, OCI image layouts, Incus images).
 
-    Returns 1 when any check FAILED, else 0; raises Usage for a name that is not a check of core or oci and
+    Returns 1 when any check FAILED, else 0; raises Usage for a name that is not a check of any kind and
     Failed when plan.json or an artifact cannot be read.
     """
     known = sorted({name for names in CHECKS_OF_KIND.values() for name in names})
     unknown = sorted(set(requested) - set(known))
     if unknown:
-        raise Usage(
-            f"--check {', '.join(unknown)}: not a check of a core, OCI or Incus image (one of {', '.join(known)})"
-        )
+        raise Usage(f"--check {', '.join(unknown)}: not a check this release runs (one of {', '.join(known)})")
     try:
         plan = read_plan(out_dir / "plan.json")
         found, skipped = find_artifacts(out_dir, plan)
@@ -587,6 +826,8 @@ def test_command(
             raise Failed(f"{one.path.name}: is not a readable tarball: {error}") from None
         except squashfs.SquashfsError as error:
             raise Failed(f"{one.path.name}: its rootfs is not a readable squashfs: {error}") from None
+        except newc.NewcError as error:
+            raise Failed(f"{one.path.name}: its initrd is not a readable newc archive: {error}") from None
         for outcome in [*outcomes, *others]:
             out.write(describe(one.image, outcome) + "\n")
             if isinstance(outcome, Result) and outcome.outcome == "FAILED":

@@ -76,6 +76,23 @@ def loaded(layout: Path, docker: Docker = DOCKER) -> Iterator[Loaded | str]:
                 docker.run(["rmi", found.image])
 
 
+@contextlib.contextmanager
+def imported(root: Path, docker: Docker = DOCKER) -> Iterator[Loaded | str]:
+    """A root filesystem tarball (an OS root) as an image in the daemon while the block runs, under a
+    throwaway tag, or the reason it could not be put there; the tag is removed on exit."""
+    problem = clones.docker_problem(docker.run)
+    if problem is not None:
+        yield problem
+        return
+    tag = f"dif-root-{uuid.uuid4().hex[:12]}:test"
+    try:
+        ran = docker.run(["import", str(root), tag])
+        yield Loaded(tag) if ran.returncode == 0 else f"docker could not import the tarball: {ran.stderr.strip()}"
+    finally:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            docker.run(["rmi", "--force", tag])
+
+
 # ---- oci-run ---------------------------------------------------------------------------------------
 
 
