@@ -19,6 +19,7 @@ TWO_CLONES: Final = "two-clones"
 ANCESTRY: Final = "ancestry"
 OCI_RUN: Final = "oci-run"
 LOCKED_INPUTS: Final = "locked-inputs"
+INCUS_BOOT: Final = "incus-boot"
 
 CORE_CHECKS: Final = (
     NO_BUILD_SNAPSHOT,
@@ -43,7 +44,19 @@ OCI_CHECKS: Final = (
 """The checks this release runs on an OCI image: `definition.BUILTIN_CHECKS["oci"]` and `locked-inputs`,
 which an image has when it uses lock entries."""
 
-CHECKS_OF_KIND: Final[Mapping[str, tuple[str, ...]]] = {"core": CORE_CHECKS, "oci": OCI_CHECKS}
+INCUS_CHECKS: Final = (
+    ANCESTRY,
+    INCUS_BOOT,
+    NO_BUILD_SNAPSHOT,
+    NO_MACHINE_IDENTITY,
+    PACKAGE_SET,
+    SBOM_COMPLETE,
+    TWO_CLONES,
+)
+"""The checks this release runs on an Incus image: `definition.BUILTIN_CHECKS["incus"]`. `incus-boot` and
+`two-clones` need an Incus host (they are not run elsewhere); `locked-inputs` is not run on Incus images yet."""
+
+CHECKS_OF_KIND: Final[Mapping[str, tuple[str, ...]]] = {"core": CORE_CHECKS, "oci": OCI_CHECKS, "incus": INCUS_CHECKS}
 """The kinds `test` runs checks on, and each one's checks."""
 
 LIMIT: Final = 25

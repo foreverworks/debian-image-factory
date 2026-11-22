@@ -17,17 +17,31 @@ from typing import TextIO
 
 import input_lock.records as rec
 
-from .. import oci, ocilayout, records
+from .. import fileartifacts, incus, oci, ocilayout, published, records, squashfs
 from ..commands import Failed, Sources, Usage
 from ..definition import Module
 from ..planfile import ImageEntry, Plan, read_plan
 from ..published import ArtifactName, parse_artifact_name, records_name_for
-from . import ancestry, clones, container, inputs, layers, machine_identity, packages, resolution, snapshot, tarball
+from . import (
+    ancestry,
+    clones,
+    container,
+    incus_host,
+    inputs,
+    layers,
+    machine_identity,
+    packages,
+    resolution,
+    snapshot,
+    squashfs_scan,
+    tarball,
+)
 from .container import ProbeRunner
 from .dockerio import DOCKER, Docker
 from .model import (
     ANCESTRY,
     CHECKS_OF_KIND,
+    INCUS_BOOT,
     LOCKED_INPUTS,
     NO_BUILD_SNAPSHOT,
     NO_MACHINE_IDENTITY,
@@ -43,7 +57,7 @@ from .model import (
 
 CHUNK = 1024 * 1024
 
-ARTIFACT_KINDS = {"tar.gz": "core", oci.LAYOUT_EXT: "oci"}
+ARTIFACT_KINDS = {"tar.gz": "core", oci.LAYOUT_EXT: "oci", incus.METADATA_EXT: "incus"}
 """The artifact name extensions `test` reads, and the kind of image each one is."""
 
 type TwoClones = Callable[[Path], CheckOutcome]
@@ -72,6 +86,7 @@ class Effects:
 
     clones_check: TwoClones = clones.two_clones
     docker: Docker = DOCKER
+    incus: incus_host.Runner = incus_host.run_incus
     locked_inputs: LockedInputs = locked_inputs_result
     modules: Mapping[str, Module] | None = None
     """The definition's modules, for the probes of `locked-inputs`; None when `test` has no definition."""
@@ -106,7 +121,11 @@ def image_of(name: ArtifactName, plan: Plan) -> str | None:
 
 
 def read_artifact(path: Path, name: ArtifactName) -> tuple[str, ocilayout.Layout | None] | str:
-    """(the artifact's digest, its layout when it is an OCI image), or why it cannot be read."""
+    """(the artifact's digest, its layout when it is an OCI image), or why it cannot be read. An Incus
+    image's digest is the fingerprint of its metadata tarball (`path`) and the rootfs beside it."""
+    if name.ext == incus.METADATA_EXT:
+        read = fileartifacts.read_artifact(path, name)
+        return read.reason if isinstance(read, published.Rejected) else (read.digest, None)
     if name.ext != oci.LAYOUT_EXT:
         return sha256_of(path), None
     try:
@@ -124,13 +143,13 @@ def find_artifacts(out_dir: Path, plan: Plan) -> tuple[list[Found], list[str]]:
     skipped: list[str] = []
     for path in sorted(out_dir.iterdir()):
         name = parse_artifact_name(path.name)
-        if name is None:
-            continue
+        if name is None or fileartifacts.is_companion(name):
+            continue  # an Incus rootfs is tested with its metadata tarball
         kind = ARTIFACT_KINDS.get(name.ext)
         if kind is None or path.is_dir() != (name.ext == oci.LAYOUT_EXT):
             if path.is_file():
                 skipped.append(
-                    f"skipped {path.name}: only core tarballs and OCI image layouts are tested by this release"
+                    f"skipped {path.name}: only core tarballs, OCI image layouts and Incus images are tested here"
                 )
             continue
         image = image_of(name, plan)
@@ -376,6 +395,114 @@ def run_in_container(
         return NotRun(name, f"docker failed: {error}")
 
 
+def file_parent(found: Found, plan: Plan, others: Sequence[Found]) -> Found | str:
+    """The parent artifact of an Incus image among the run's artifacts (the one the image's provenance names,
+    when the parent image has several), or why it is not available here."""
+    parent = plan["images"][found.image]["parent"]
+    if parent is None:
+        return "the image has no parent"
+    local = [one for one in others if one.image == parent]
+    if not local:
+        return f"the parent {parent} is not in the output, so its files cannot be compared"
+    return local[0] if len(local) == 1 else f"the output holds {len(local)} builds of the parent {parent}"
+
+
+def parent_named(records_text: str | None, digest: str) -> str | None:
+    """The parent digest the artifact's provenance names (its `parent: <image>` dependency), when it has
+    exactly one readable provenance that names one."""
+    if records_text is None:
+        return None
+    try:
+        builds = [
+            one.build
+            for one in published.parse_envelopes(records_text)
+            if one.build is not None and any(subject.sha256 == digest for subject in one.subjects)
+        ]
+    except published.RecordsError:
+        return None
+    if len(builds) != 1 or not builds[0].ancestors:
+        return None
+    return builds[0].ancestors[0][1]
+
+
+def scan_parent(parent: Found, wanted: frozenset[str]) -> tarball.Scan:
+    if parent.path.name.endswith(f".{incus.METADATA_EXT}"):
+        rootfs = parent.path.with_name(incus.rootfs_of(parent.path.name) or "")
+        return squashfs_scan.scan_squashfs(rootfs, wanted, None, False)
+    return tarball.scan_tarball(parent.path, wanted, None, False)
+
+
+def run_incus_checks(
+    found: Found,
+    names: Sequence[str],
+    plan: Plan,
+    records_text: str | None,
+    effects: Effects,
+    others: Sequence[Found],
+) -> list[CheckOutcome]:
+    """The named checks on one Incus image, in the order given. One pass reads the rootfs, and the
+    metadata tarball is searched for the snapshot ID too; the image is imported into Incus once for the
+    checks that launch it, and deleted afterwards."""
+    entry = plan["images"][found.image]
+    rootfs = found.path.with_name(incus.rootfs_of(found.path.name) or "")
+    looking = NO_BUILD_SNAPSHOT in names and not snapshot.cannot_tell(plan["snapshot"], plan["baseline"])
+    needle = plan["snapshot"] if looking else None
+    inside = {PACKAGE_SET, NO_MACHINE_IDENTITY, SBOM_COMPLETE, NO_BUILD_SNAPSHOT, ANCESTRY}
+    wanted = frozenset(machine_identity.WANTED | {packages.STATUS_PATH})
+    keys = NO_MACHINE_IDENTITY in names
+    scanned = squashfs_scan.scan_squashfs(rootfs, wanted, needle, keys) if inside & set(names) else tarball.EMPTY
+    status = scanned.contents.get(packages.STATUS_PATH)
+    outcomes: list[CheckOutcome] = []
+    hosted = [name for name in names if name in (INCUS_BOOT, TWO_CLONES)]
+    imported: incus_host.Imported | str = "not needed"
+    if hosted:
+        problem = incus_host.incus_problem(effects.incus)
+        imported = problem or incus_host.import_image(found.path, rootfs, found.digest, effects.incus)
+    try:
+        for name in names:
+            if name == PACKAGE_SET:
+                outcomes.append(packages.package_set(status, entry["packages"]))
+            elif name == NO_MACHINE_IDENTITY:
+                outcomes.append(
+                    machine_identity.no_machine_identity(scanned.members, scanned.contents, scanned.key_files)
+                )
+            elif name == SBOM_COMPLETE:
+                outcomes.append(
+                    packages.sbom_complete(
+                        status, sbom_of(records_text, found.digest), packages.locked_versions(entry["inputs"])
+                    )
+                )
+            elif name == NO_BUILD_SNAPSHOT:
+                meta = tarball.scan_tarball(found.path, frozenset(), needle, False) if needle else tarball.EMPTY
+                hits = [*scanned.needle_hits, *(tarball.Hit(h.where, f"metadata {h.path}") for h in meta.needle_hits)]
+                outcomes.append(
+                    snapshot.no_build_snapshot(plan["snapshot"], plan["baseline"], hits[: tarball.HITS_LIMIT])
+                )
+            elif name == ANCESTRY:
+                parent = file_parent(found, plan, others)
+                if isinstance(parent, str):
+                    outcomes.append(NotRun(ANCESTRY, parent))
+                else:
+                    held = scan_parent(parent, frozenset())
+                    outcomes.append(
+                        ancestry.files_ancestry(
+                            scanned.members, held.members, parent.digest, parent_named(records_text, found.digest)
+                        )
+                    )
+            elif name in hosted:
+                if not isinstance(imported, incus_host.Imported):
+                    outcomes.append(NotRun(name, imported))
+                elif name == INCUS_BOOT:
+                    outcomes.append(incus_host.incus_boot(imported, effects.incus))
+                else:
+                    ssh = any(package[0] == "openssh-server" for package in entry["packages"])
+                    outcomes.append(incus_host.two_clones(imported, ssh=ssh, run=effects.incus))
+    finally:
+        if isinstance(imported, incus_host.Imported):
+            incus_host.forget_image(imported, effects.incus)
+    return outcomes
+
+
 def run_checks(
     found: Found,
     names: Sequence[str],
@@ -387,6 +514,8 @@ def run_checks(
 ) -> list[CheckOutcome]:
     """The named checks on one artifact, in the order given; `others` are the run's other artifacts, where
     an image's parent is looked for."""
+    if plan["images"][found.image]["kind"] == "incus":
+        return run_incus_checks(found, names, plan, records_text, effects, others)
     if found.layout is None:
         return run_core_checks(found, names, plan, records_text, sources, effects)
     return run_oci_checks(found, found.layout, names, plan, records_text, effects, others)
@@ -451,6 +580,8 @@ def test_command(
             raise Failed(f"{one.path.name}: cannot be tested: {error}") from None
         except tarfile.TarError as error:
             raise Failed(f"{one.path.name}: is not a readable tarball: {error}") from None
+        except squashfs.SquashfsError as error:
+            raise Failed(f"{one.path.name}: its rootfs is not a readable squashfs: {error}") from None
         for outcome in [*outcomes, *others]:
             out.write(describe(one.image, outcome) + "\n")
             if isinstance(outcome, Result) and outcome.outcome == "FAILED":

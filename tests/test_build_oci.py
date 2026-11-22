@@ -337,9 +337,9 @@ class LocateTest(unittest.TestCase):
         with self.assertRaisesRegex(commands.Failed, r"oci://127\.0\.0\.1:9/images/oci-base@sha256:"):
             self.locate(entry=entry, out=empty, registries=[registry], pull=run.pull_parent)
 
-    def test_a_parent_that_is_not_core_or_oci_is_refused(self) -> None:
-        entry: planfile.ImageEntry = {"kind": "incus", "identity": "ef" * 32}  # type: ignore[typeddict-item]  # only the fields locate_parent reads
-        with self.assertRaisesRegex(commands.Failed, "incus image"):
+    def test_a_parent_that_is_not_core_oci_or_incus_is_refused(self) -> None:
+        entry: planfile.ImageEntry = {"kind": "installer", "identity": "ef" * 32}  # type: ignore[typeddict-item]  # only the fields locate_parent reads
+        with self.assertRaisesRegex(commands.Failed, "installer image"):
             self.locate(entry=entry)
 
 
