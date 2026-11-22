@@ -344,7 +344,7 @@ class DefinitionRowsTest(IdentityCase):
 
     def test_an_images_own_section_enters_its_recipe(self) -> None:
         text = (example_text() + EXTRA).replace(
-            '[images.node-26]\nkind = "oci"', '[images.node-26]\nkind = "oci"\ncompression = "zstd"'
+            '[images.node-26]\nkind = "oci"', '[images.node-26]\nkind = "oci"\ncompression = "gzip"'
         )
         self.assertEqual(self.changed_by_definition(text), ["node-26", "node-child"])
 

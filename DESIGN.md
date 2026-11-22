@@ -822,7 +822,8 @@ kept as newc hard links, device nodes and symbolic links kept, no xattrs, and `/
 `{"files":{"initrd.img":{"sha256":"..","size":N},"vmlinuz":{..}},"image":"<image>","kernel":"<kver>","schema":1}`.
 
 Compression is gzip, or the format the target ecosystem reads by default, for everything published.
-zstd is supported per image (`compression = "zstd"`) for consumers who control every reader. The
+zstd per image (`compression = "zstd"`), for consumers who control every reader, is planned; until a
+release builds it, the definition check refuses it rather than build gzip in its place. The
 OS image's own initramfs keeps whatever its Debian packages configure, since the installed system
 regenerates it.
 

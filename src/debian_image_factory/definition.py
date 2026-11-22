@@ -51,7 +51,9 @@ kind installs by itself; `builtin:deb` takes its dependencies from the .deb. A p
 its script runs with what the image's packages put there."""
 
 APT_SOURCES: Final = ("live", "baseline", "baseline-except-security")
-COMPRESSION: Final = ("gzip", "zstd")
+COMPRESSION: Final = ("gzip",)
+PLANNED_COMPRESSION: Final = ("zstd",)
+"""Accepted by DESIGN 8.1 but built by no kind yet: refused, so a definition never asks for what it would not get."""
 BUILTIN_MODULES: Final = ("builtin:deb", "builtin:node-tarball", "builtin:file")
 COMPONENTS: Final = ("main", "contrib", "non-free", "non-free-firmware")
 ARCHITECTURES: Final = ("amd64",)
@@ -294,7 +296,9 @@ def parse_image(name: str, raw: Mapping[str, JsonValue], found: list[str]) -> Im
             f"{where}.apt_sources: a {kind} image keeps live sources (snapshot sources are for kinds that boot)"
         )
     compression = text(raw, "compression", where, found, "gzip") or "gzip"
-    if compression not in COMPRESSION:
+    if compression in PLANNED_COMPRESSION:
+        found.append(f"{where}.compression: {compression} is not built yet; every artifact is {COMPRESSION[0]}")
+    elif compression not in COMPRESSION:
         found.append(f"{where}.compression must be one of {list(COMPRESSION)}")
     kind_table = raw.get(kind, {})
     if not isinstance(kind_table, dict):
