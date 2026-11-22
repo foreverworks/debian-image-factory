@@ -22,6 +22,7 @@ LOCKED_INPUTS: Final = "locked-inputs"
 INCUS_BOOT: Final = "incus-boot"
 INSTALLER_BOOT: Final = "installer-boot"
 OS_BOOT: Final = "os-boot"
+BYTE_EQUAL: Final = "byte-equal"
 
 CORE_CHECKS: Final = (
     NO_BUILD_SNAPSHOT,
@@ -91,6 +92,10 @@ CHECKS_OF_KIND: Final[Mapping[str, tuple[str, ...]]] = {
     "os": OS_CHECKS,
 }
 """The kinds `test` runs checks on, and each one's checks."""
+
+OPTIONAL_CHECKS: Final = (BYTE_EQUAL,)
+"""Checks of every kind that no kind's built-in set holds: an image lists one in its `[checks]` to require it, or
+`test --check` runs it. `byte-equal` needs a second build of the image (`test --twin`)."""
 
 LIMIT: Final = 25
 """The most failing items one test lists by name; the rest are counted, so a record stays small."""

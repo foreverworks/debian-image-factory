@@ -219,13 +219,22 @@ PASSED when the ID is found nowhere. FAILED when it is found, naming the files.
 
 ## byte-equal
 
-Kinds: all, optional. Brought by: core in M2.
+Kinds: all, optional. Brought by: M6.
 
 It reports whether two builds from the same inputs give the same digest. A difference is not a
 fault of the artifact, so this check never fails: it is WARNED when the digests differ, and the
 difference is for a person to look at.
 
-PASSED when the digests are equal. WARNED when they differ.
+The check does not build anything. The second build is an input: run the same plan through `build`
+into another directory and name it, `debian-image-factory test out/ --check byte-equal --twin out2/`.
+A twin is an artifact of `--twin` whose name says the same image, suite, architecture, identity and
+kind of file, whatever its digest (an OCI image layout, an Incus image and the tarballs are all
+read as `test` reads them). The test is `same-digest`.
+
+PASSED when every twin has the artifact's digest. WARNED when one has another, naming it. Not run, and
+no record written, when there is no twin. An image lists `byte-equal` in its `[checks]` to require
+it: a build is good when its result is PASSED or WARNED, so the requirement means that a second build
+was compared, not that it matched.
 
 ## oci-run
 

@@ -167,6 +167,14 @@ def parser() -> argparse.ArgumentParser:
         help="a parent artifact outside OUT, for ancestry of an OS root or installer kit (repeat)",
     )
     test.add_argument(
+        "--twin",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="DIR",
+        help="the output of another build of the same plan, for byte-equal: its digests must equal OUT's (repeat)",
+    )
+    test.add_argument(
         "--vm-image",
         default=builder.VM_IMAGE,
         help=f"the boot checks' container image (default {builder.VM_IMAGE}, from scripts/builder vm)",
@@ -332,6 +340,7 @@ def dispatch(arguments: argparse.Namespace) -> int:
         effects = checks.Effects(
             modules=test_modules(arguments.definition),
             parents=tuple(arguments.parent),
+            twins=tuple(arguments.twin),
             vm=checks.Vm(image=arguments.vm_image),
         )
         return checks.test_command(

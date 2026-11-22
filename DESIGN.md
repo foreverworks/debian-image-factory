@@ -1213,7 +1213,7 @@ debian-image-factory plan [--against TARGET]... [--snapshot lock|latest|ID] [--p
 debian-image-factory fetch plan.json [--mirror URL] [--bundle [--bundle-dir DIR]]
 debian-image-factory build [plan.json] --out out/ [--image NAME]... [--parents TARGET]... [--builder-image REF]
                            [--offline] [--bundle FILE] [--builder container|host]
-debian-image-factory test out/ [--check NAME]... [--url URL] [--definition FILE]
+debian-image-factory test out/ [--check NAME]... [--url URL] [--definition FILE] [--twin DIR]...
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
 debian-image-factory publish out/ --to TARGET... [--sign none|keyless|key:REF]
 debian-image-factory verify REF [--pull [--artifact NAME|SHA256]] [--require-checks] [--lock FILE] [--definition FILE]
@@ -1502,7 +1502,7 @@ Each runs on the exact artifact and emits one test result.
 | `ancestry` | children | the parent's filesystem is the base: for OCI, the parent's layers are the first layers by digest; elsewhere (Incus, OS root, installer kit), the parent's files are present unless the child's own records say it removed them (its provenance lists them, `removedFromParent`, written by the build from a comparison of the two roots), and the provenance names the parent |
 | `same-resolution` | core | a second resolution of the same lock gives the same package set |
 | `no-build-snapshot` | all | the build snapshot ID appears nowhere in the artifact's bytes, including the build-time `file://` source, which the `apt_sources` rendering replaces before the image is packed; skipped with a note when the baseline ID equals the build ID. A release test also builds one package set at two different build snapshots and compares the bytes |
-| `byte-equal` | all, optional | two builds from the same inputs, in one run (so of one definition commit, which an OCI manifest's annotations carry, 5.3), give the same digest; WARNED, never FAILED, when they differ |
+| `byte-equal` | all, optional | two builds from the same inputs, in one run (so of one definition commit, which an OCI manifest's annotations carry, 5.3), give the same digest; WARNED, never FAILED, when they differ. The check does not rebuild: it compares the artifact with the same image built again, an output directory given with `test --twin DIR` (the artifacts whose names agree up to the digest). Without a twin it is not run, and an image lists it in its `[checks]` to require one. Proof that a kind is byte-equal is the release tier's integration tests (section 12), which build twice from one plan |
 | `oci-run` | oci | runs under rootless Docker: declared user and entrypoint, `cmd` exits 0 |
 | `incus-boot` | incus | in an Incus host inside a VM: cloud-init finishes through NoCloud from both `cloud-init.user-data` and `user.user-data`, creates the user, runs commands, an IPv4 address is reported, all still true after a restart |
 | `installer-boot` | installer | kit.json matches the kit's files; QEMU boots `vmlinuz` with `initrd.img` from RAM (`console=ttyS0`) to a serial report; the running kernel is kit.json's |

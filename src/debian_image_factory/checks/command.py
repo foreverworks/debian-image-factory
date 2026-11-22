@@ -28,6 +28,7 @@ from ..planfile import ImageEntry, Plan, read_plan
 from ..published import ArtifactName, parse_artifact_name, records_name_for
 from . import (
     ancestry,
+    byte_equal,
     clones,
     container,
     incus_host,
@@ -48,6 +49,7 @@ from .container import ProbeRunner
 from .dockerio import DOCKER, Docker
 from .model import (
     ANCESTRY,
+    BYTE_EQUAL,
     CHECKS_OF_KIND,
     INCUS_BOOT,
     INSTALLER_BOOT,
@@ -55,6 +57,7 @@ from .model import (
     NO_BUILD_SNAPSHOT,
     NO_MACHINE_IDENTITY,
     OCI_RUN,
+    OPTIONAL_CHECKS,
     OS_BOOT,
     PACKAGE_SET,
     SAME_RESOLUTION,
@@ -114,6 +117,8 @@ class Effects:
     """The definition's modules, for the probes of `locked-inputs`; None when `test` has no definition."""
     parents: tuple[Path, ...] = ()
     """Parent artifacts outside OUT, for `ancestry` of an OS or installer child (`test --parent`)."""
+    twins: tuple[Path, ...] = ()
+    """Output directories of other builds of the same plan, for `byte-equal` (`test --twin`)."""
     vm: vmrun.Vm = vmrun.VM
     boot_installer: BootInstaller = vmrun.boot_installer
     boot_os: BootOs = vmrun.boot_os
@@ -828,13 +833,36 @@ def run_checks(
     """The named checks on one artifact, in the order given; `others` are the run's other artifacts, where
     an image's parent is looked for."""
     kind = plan["images"][found.image]["kind"]
+    kind_names = [name for name in names if name != BYTE_EQUAL]
     if kind == "incus":
-        return run_incus_checks(found, names, plan, records_text, effects, others)
-    if found.layout is not None:
-        return run_oci_checks(found, found.layout, names, plan, records_text, effects, others)
-    if found.kind in BOOT_KINDS:
-        return run_boot_kind_checks(found, names, plan, records_text, effects, others)
-    return run_core_checks(found, names, plan, records_text, sources, effects)
+        outcomes = run_incus_checks(found, kind_names, plan, records_text, effects, others)
+    elif found.layout is not None:
+        outcomes = run_oci_checks(found, found.layout, kind_names, plan, records_text, effects, others)
+    elif found.kind in BOOT_KINDS:
+        outcomes = run_boot_kind_checks(found, kind_names, plan, records_text, effects, others)
+    else:
+        outcomes = run_core_checks(found, kind_names, plan, records_text, sources, effects)
+    if BYTE_EQUAL in names:
+        outcomes.append(byte_equal.compare(found.digest, twins_of(found, effects.twins)))
+    return outcomes
+
+
+def twins_of(found: Found, directories: Sequence[Path]) -> list[tuple[Path, str]]:
+    """The other builds of an artifact's image in `directories` (`test --twin`), each as (path, digest): the
+    artifacts whose names say the same image, identity and kind of file. One that cannot be read is left out."""
+    here = parse_artifact_name(found.path.name)
+    twins: list[tuple[Path, str]] = []
+    for directory in directories:
+        for path in sorted(directory.iterdir()):
+            name = parse_artifact_name(path.name)
+            if name is None or here is None or path.resolve() == found.path.resolve():
+                continue
+            if not byte_equal.same_build(here, name) or fileartifacts.is_companion(name):
+                continue
+            read = read_artifact(path, name)
+            if not isinstance(read, str):
+                twins.append((path, read[0]))
+    return twins
 
 
 def describe(image: str, outcome: CheckOutcome) -> str:
@@ -846,7 +874,7 @@ def describe(image: str, outcome: CheckOutcome) -> str:
 
 def choose(requested: Sequence[str], entry: ImageEntry) -> tuple[list[str], list[NotRun]]:
     """(the checks to run, the required checks this release has no code for) for one image."""
-    runs = CHECKS_OF_KIND.get(entry["kind"], ())
+    runs = (*CHECKS_OF_KIND.get(entry["kind"], ()), *OPTIONAL_CHECKS)
     if requested:
         return [str(name) for name in runs if name in requested], []
     runnable = [str(name) for name in runs if name in entry["checks"]]
@@ -872,7 +900,7 @@ def test_command(
     Returns 1 when any check FAILED, else 0; raises Usage for a name that is not a check of any kind and
     Failed when plan.json or an artifact cannot be read.
     """
-    known = sorted({name for names in CHECKS_OF_KIND.values() for name in names})
+    known = sorted({name for names in CHECKS_OF_KIND.values() for name in names} | set(OPTIONAL_CHECKS))
     unknown = sorted(set(requested) - set(known))
     if unknown:
         raise Usage(f"--check {', '.join(unknown)}: not a check this release runs (one of {', '.join(known)})")
