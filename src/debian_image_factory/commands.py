@@ -383,23 +383,33 @@ def resolve_all(
     return resolved
 
 
-def parse_targets(against: Sequence[str]) -> list[published.Target]:
-    """The targets, refused before anything is resolved when one is not a target."""
+def parse_targets(against: Sequence[str]) -> list[published.TargetTemplate]:
+    """The targets, refused before anything is resolved when one is not a target. An `oci://` repository may
+    carry `{image}` (`published.IMAGE_PLACEHOLDER`): `target_for` says what it is for one image."""
     try:
-        return [published.parse_target(target) for target in against]
+        return [published.parse_template(target) for target in against]
+    except ValueError as error:
+        raise Usage(str(error)) from None
+
+
+def target_for(template: published.TargetTemplate, image: str) -> published.Target:
+    """The target `template` is for `image`. Raises Usage when the image's name makes no repository."""
+    try:
+        return published.resolve_template(template, image)
     except ValueError as error:
         raise Usage(str(error)) from None
 
 
 def lookups(
-    parsed_targets: Sequence[published.Target], loaded: Loaded, inputs: Mapping[str, identity.ImageInputs]
+    parsed_targets: Sequence[published.TargetTemplate], loaded: Loaded, inputs: Mapping[str, identity.ImageInputs]
 ) -> tuple[dict[str, published.Decision], dict[str, list[str]]]:
     debian = loaded.definition.debian
     decisions: dict[str, published.Decision] = {}
     rejected: dict[str, list[str]] = {}
     for name, image_inputs in inputs.items():
         artifacts: list[published.Artifact] = []
-        for target in parsed_targets:
+        for template in parsed_targets:
+            target = target_for(template, name)
             try:
                 found = targets.lookup(target, name, debian.suite, debian.architectures[0], image_inputs.identity)
             except OSError as error:

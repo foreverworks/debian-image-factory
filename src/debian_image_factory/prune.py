@@ -26,6 +26,7 @@ its name, an unfinished upload) are listed as ignored and never deleted.
 
 import urllib.error
 from collections.abc import Callable, Collection, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
@@ -146,15 +147,19 @@ def prune_target(
     dry_run: bool,
     out: TextIO,
     connect: Callable[[OciTarget], registry.Client],
+    image: str | None = None,
 ) -> tuple[list[str], set[str]]:
     """Read `target`, print a line for each artifact and delete the ones retention does not keep. The
-    problems found (nothing is raised for them), and the digests seen."""
+    problems found (nothing is raised for them), and the digests seen. With `image`, only that image's
+    artifacts are judged: `target` is the repository a `{image}` target names for it."""
     label = published.format_target(target)
     problems: list[str] = []
     try:
         held = targets.list_artifacts(target, connect)
     except OSError as error:
         return [f"{label}: cannot be read: {describe(error)}"], set()
+    if image is not None:
+        held = replace(held, artifacts=tuple(one for one in held.artifacts if one.image == image))
     verdicts = retention.retain(held.artifacts, required, pins, keep_good, keep_candidates)
     delete: Deleter | None = None
     for verdict in verdicts:
@@ -194,7 +199,7 @@ def prune_command(
     if keep_good < 0 or keep_candidates < 0:
         raise commands.Usage("--keep-good and --keep-candidates are not negative")
     pinned = frozenset(pin_digest(text) for text in pins)
-    parsed = commands.parse_targets(against)
+    templates = commands.parse_targets(against)
     try:
         loaded = definition.parse(commands.read_text(definition_path))
     except definition.DefinitionError as error:
@@ -202,10 +207,20 @@ def prune_command(
     required = required_checks_of(loaded)
     problems: list[str] = []
     seen: set[str] = set()
-    for target in parsed:
-        found, digests = prune_target(target, required, pinned, keep_good, keep_candidates, dry_run, out, connect)
-        problems.extend(found)
-        seen |= digests
+    for template in templates:
+        # A target with `{image}` is a repository per image: each image of the definition is judged in its own.
+        # Any other target holds every image, each judged in it.
+        runs = (
+            [(commands.target_for(template, name), name) for name in loaded.images]
+            if template.per_image
+            else [(template.target, None)]
+        )
+        for target, image in runs:
+            found, digests = prune_target(
+                target, required, pinned, keep_good, keep_candidates, dry_run, out, connect, image
+            )
+            problems.extend(found)
+            seen |= digests
     for digest in sorted(pinned - seen):
         print(f"pin sha256:{digest} matches no artifact in these targets", file=out)
     if problems:

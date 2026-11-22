@@ -11,13 +11,18 @@ from pathlib import Path
 from debian_image_factory import cli, commands, oci, ocilayout, publish, records
 from debian_image_factory.checks import command
 from debian_image_factory.planfile import parse_plan
-from debian_image_factory.published import OciTarget
+from debian_image_factory.published import OciTarget, TargetTemplate, format_target, parse_template
 from tests.support import fake_registry, ocimage
 from tests.support.definitions import example_definition
 from tests.support.fake_registry import Fake
 from tests.support.oci_fixtures import make_image
 from tests.support.rootfs import IDENTITY, clean_files, write_artifact
 from tests.test_plan import inputs_for, make, reuse_all
+
+
+def template(target: OciTarget) -> TargetTemplate:
+    return parse_template(format_target(target))
+
 
 APP_LAYER: dict[str, object] = {"./srv/": None, "./srv/app": b"#!/bin/sh\n"}
 PARENT_IDENTITY = "c3" * 32
@@ -107,7 +112,7 @@ class ParentFromRegistryTest(unittest.TestCase):
             return tuple(one.digest for one in ocilayout.read_layout(self.parent.layout).manifest.layers)
 
         target = OciTarget("registry.example.com", "team/base")
-        status, printed = self.run_test(parent_registries=(target,), parent_layers=layers)
+        status, printed = self.run_test(parent_registries=(template(target),), parent_layers=layers)
         self.assertEqual(status, 0, printed)
         self.assertEqual(asked, [(target, self.parent.digest)])
         self.assertIn("node-26: ancestry PASSED", printed)
@@ -117,7 +122,7 @@ class ParentFromRegistryTest(unittest.TestCase):
         self.child([self.core_bytes, APP_LAYER])
         target = OciTarget("registry.example.com", "team/base")
         status, printed = self.run_test(
-            parent_registries=(target,), parent_layers=lambda _t, _d: tuple(["f0" * 32, "f1" * 32])
+            parent_registries=(template(target),), parent_layers=lambda _t, _d: tuple(["f0" * 32, "f1" * 32])
         )
         self.assertEqual(status, 1)
         self.assertIn("node-26: ancestry FAILED", printed)
@@ -129,7 +134,8 @@ class ParentFromRegistryTest(unittest.TestCase):
             raise OSError(f"{target.registry}: no manifest sha256:{digest}")
 
         status, printed = self.run_test(
-            parent_registries=(OciTarget("a.example.com", "x"), OciTarget("b.example.com", "y")), parent_layers=refuse
+            parent_registries=(template(OciTarget("a.example.com", "x")), template(OciTarget("b.example.com", "y"))),
+            parent_layers=refuse,
         )
         self.assertEqual(status, 0, printed)
         self.assertIn("node-26: ancestry not run: the parent base (sha256:" + self.parent.digest, printed)
@@ -147,7 +153,7 @@ class ParentFromRegistryTest(unittest.TestCase):
             return real
 
         status, printed = self.run_test(
-            parent_registries=(OciTarget("a.example.com", "x"), OciTarget("b.example.com", "y")),
+            parent_registries=(template(OciTarget("a.example.com", "x")), template(OciTarget("b.example.com", "y"))),
             parent_layers=second_only,
         )
         self.assertEqual(status, 0, printed)
@@ -172,7 +178,29 @@ class ParentFromRegistryTest(unittest.TestCase):
         for text in ("dir:///somewhere", "github-release://example/images@v1", "not a target"):
             with self.subTest(text), self.assertRaises(commands.Usage):
                 cli.parent_registries([text])
-        self.assertEqual(cli.parent_registries(["oci://example.com/a/b"]), (OciTarget("example.com", "a/b"),))
+        self.assertEqual(
+            [one.target for one in cli.parent_registries(["oci://example.com/a/b"])], [OciTarget("example.com", "a/b")]
+        )
+
+    def test_a_templated_registry_is_asked_for_the_parent_by_its_own_name(self) -> None:
+        self.child([*self.parent_layers, APP_LAYER])
+        asked: list[OciTarget] = []
+
+        def layers(target: OciTarget, digest: str) -> tuple[str, ...]:
+            asked.append(target)
+            return tuple(one.digest for one in ocilayout.read_layout(self.parent.layout).manifest.layers)
+
+        found = cli.parent_registries(["oci://registry.example.com/team/{image}"])
+        status, printed = self.run_test(parent_registries=found, parent_layers=layers)
+        self.assertEqual(status, 0, printed)
+        # the child is node-26 and the parent base: the repository is the parent's, never the child's
+        self.assertEqual(asked, [OciTarget("registry.example.com", "team/base")])
+        self.assertIn("node-26: ancestry PASSED", printed)
+
+    def test_parents_refuses_a_placeholder_outside_an_oci_repository(self) -> None:
+        for text in ("dir:///parents/{image}", "github-release://example/{image}@v1", "oci://{image}.example.com/x"):
+            with self.subTest(text), self.assertRaisesRegex(commands.Usage, "belongs in the repository of an oci://"):
+                cli.parent_registries([text])
 
 
 class RegistryLayersTest(unittest.TestCase):

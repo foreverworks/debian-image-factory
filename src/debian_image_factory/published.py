@@ -278,6 +278,55 @@ def parse_target(text: str) -> Target:
     raise ValueError(f"unknown target scheme {scheme + '://'!r} (expected dir://, oci:// or github-release://)")
 
 
+IMAGE_PLACEHOLDER: Final = "{image}"
+"""In the repository of an `oci://` target: the name of the image the target is for. One target string then
+names a repository per image (`oci://ghcr.io/example/{image}`), and every command that takes a target reads
+it the same way: the target as it resolves for the image being looked up, published or pruned."""
+
+
+@dataclass(frozen=True, slots=True)
+class TargetTemplate:
+    """A target as given: `text` is what the user wrote, `target` what it parses to (a repository with
+    `{image}` parses with the image name `image`, to check the template), `per_image` that it has the
+    placeholder."""
+
+    text: str
+    target: Target
+    per_image: bool
+
+
+def parse_template(text: str) -> TargetTemplate:
+    """A target that may carry `{image}` in the repository of an `oci://` target. Raises ValueError saying what
+    is wrong: a target that does not parse, or `{image}` anywhere but in an `oci://` repository (a directory or
+    a release holds each artifact under its own name already; a registry host is not per image)."""
+    if IMAGE_PLACEHOLDER not in text:
+        return TargetTemplate(text, parse_target(text), False)
+    scheme, _, rest = text.partition("://")
+    registry, slash, _ = rest.partition("/")
+    if scheme != "oci" or not slash or IMAGE_PLACEHOLDER in registry:
+        raise ValueError(f"{text}: {IMAGE_PLACEHOLDER} belongs in the repository of an oci:// target")
+    return TargetTemplate(text, parse_target(text.replace(IMAGE_PLACEHOLDER, "image")), True)
+
+
+def resolve_template(template: TargetTemplate, image: str) -> Target:
+    """The target `template` is for the image `image`: the template's own target, or with `{image}` the
+    repository named after the image. Raises ValueError when the image's name makes no repository."""
+    if not template.per_image:
+        return template.target
+    try:
+        return parse_target(template.text.replace(IMAGE_PLACEHOLDER, image))
+    except ValueError as error:
+        raise ValueError(f"{template.text}: the image {image} makes no repository ({error})") from None
+
+
+def resolve_registry(template: TargetTemplate, image: str) -> OciTarget:
+    """`resolve_template` for a template known to be an `oci://` target (one a command took as a registry)."""
+    target = resolve_template(template, image)
+    if not isinstance(target, OciTarget):
+        raise ValueError(f"{template.text}: not an oci:// target")
+    return target
+
+
 def format_target(target: Target) -> str:
     """A target as `parse_target` takes it."""
     match target:

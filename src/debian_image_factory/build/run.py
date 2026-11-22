@@ -601,8 +601,8 @@ class Run:
     out_dir: Path
     directories: Sequence[Path]
     """The `dir://` targets given as --parents."""
-    registries: Sequence[published.OciTarget]
-    """The `oci://` targets given as --parents."""
+    registries: Sequence[published.TargetTemplate]
+    """The `oci://` targets given as --parents; a `{image}` repository is each parent's own."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1042,17 +1042,14 @@ def build_booting(run: Run, image: str, scratch: Path, built: Mapping[str, paren
 
 def split_parent_targets(
     texts: Sequence[str], *, offline: bool = False
-) -> tuple[list[Path], list[published.OciTarget]]:
+) -> tuple[list[Path], list[published.TargetTemplate]]:
     """The `--parents` targets: where parents not built in this run may be, `dir://` and `oci://`.
 
     Offline, a registry is refused: nothing may pull, so the parent must be given as a local `dir://`."""
     directories: list[Path] = []
-    registries: list[published.OciTarget] = []
-    for text in texts:
-        try:
-            target = published.parse_target(text)
-        except ValueError as error:
-            raise commands.Usage(str(error)) from None
+    registries: list[published.TargetTemplate] = []
+    for template in commands.parse_targets(texts):
+        text, target = template.text, template.target
         if isinstance(target, published.DirTarget):
             directories.append(Path(target.path))
         elif isinstance(target, published.OciTarget):
@@ -1061,7 +1058,7 @@ def split_parent_targets(
                     f"--parents {text}: --offline reads nothing from a registry; "
                     "give the parent as dir://PATH (an .oci layout or its tarball), or build it in this run"
                 )
-            registries.append(target)
+            registries.append(template)
         else:
             raise commands.Usage(f"--parents {text}: a github-release:// target holds no parents; use dir:// or oci://")
     return directories, registries
@@ -1126,7 +1123,7 @@ def build_plan(
     builder_image: str,
     out: TextIO,
     directories: Sequence[Path],
-    registries: Sequence[published.OciTarget],
+    registries: Sequence[published.TargetTemplate],
     verified_at: datetime | None = None,
 ) -> int:
     """Build the images of the plan text `plan_text` (read from `plan_path`, or from a bundle) from the cache

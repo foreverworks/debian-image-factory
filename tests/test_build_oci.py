@@ -235,7 +235,7 @@ class LocateTest(unittest.TestCase):
             built=built or {},
             out_dir=out or self.out,
             directories=directories,
-            registries=registries,
+            registries=[published.parse_template(published.format_target(one)) for one in registries],
             pull=pull,
             scratch=self.dir / "pulled",
         )
@@ -305,6 +305,38 @@ class LocateTest(unittest.TestCase):
         self.assertEqual((found.digest, found.name), (self.base.digest, self.base.name))
         self.assertEqual(calls, [("registry.example", self.base.digest)])
 
+    def test_a_templated_registry_is_the_parents_own_repository(self) -> None:
+        empty = self.dir / "empty"
+        empty.mkdir()
+        entry = entry_for(self.base, "cd" * 32, artifact=f"sha256:{self.base.digest}")
+        asked: list[tuple[str, str]] = []
+
+        def pull(target: published.OciTarget, digest: str, dest: Path) -> Path:
+            asked.append((target.registry, target.repository))
+            assert self.base.path is not None
+            shutil.copytree(self.base.path, dest)
+            return dest
+
+        # the child is node-26, the parent oci-base: the target resolves for the parent, never the child
+        template = published.parse_template("oci://registry.example/team/{image}")
+        found = parents.locate_parent(
+            "node-26", "oci-base", entry, suite=SUITE, arch=ARCH, built={}, out_dir=empty, directories=[],
+            registries=[template], pull=pull, scratch=self.dir / "pulled",
+        )  # fmt: skip
+        self.assertEqual(found.digest, self.base.digest)
+        self.assertEqual(asked, [("registry.example", "team/oci-base")])
+
+    def test_a_template_that_makes_no_repository_for_the_parent_is_a_place_that_failed(self) -> None:
+        empty = self.dir / "empty"
+        empty.mkdir()
+        entry = entry_for(self.base, "cd" * 32, artifact=f"sha256:{self.base.digest}")
+        template = published.parse_template("oci://registry.example/team/{image}")
+        with self.assertRaisesRegex(commands.Failed, r"the image odd..name makes no repository"):
+            parents.locate_parent(
+                "node-26", "odd..name", entry, suite=SUITE, arch=ARCH, built={}, out_dir=empty, directories=[],
+                registries=[template], pull=refuse_pull, scratch=self.dir / "pulled",
+            )  # fmt: skip
+
     def test_every_registry_is_tried_in_turn(self) -> None:
         empty = self.dir / "empty"
         empty.mkdir()
@@ -314,7 +346,7 @@ class LocateTest(unittest.TestCase):
 
         def pull(target: published.OciTarget, digest: str, dest: Path) -> Path:
             calls.append(target.registry)
-            if target is first:
+            if target == first:
                 raise commands.Failed(f"oci://{target.registry}/{target.repository}@sha256:{digest}: no manifest")
             assert self.base.path is not None
             shutil.copytree(self.base.path, dest)
@@ -692,9 +724,17 @@ class CommandLineTest(unittest.TestCase):
     def test_parent_targets_are_split_by_kind_and_a_bad_one_is_a_usage_error(self) -> None:
         directories, registries = run.split_parent_targets(["dir:///srv/images", "oci://r.example/team/img"])
         self.assertEqual(directories, [Path("/srv/images")])
-        self.assertEqual(registries, [published.OciTarget("r.example", "team/img")])
+        self.assertEqual([one.target for one in registries], [published.OciTarget("r.example", "team/img")])
         for bad in ("github-release://o/r@v1", "ftp://x", "nonsense"):
             with self.assertRaises(commands.Usage):
+                run.split_parent_targets([bad])
+
+    def test_a_templated_parent_target_stays_a_template_and_is_refused_outside_oci(self) -> None:
+        directories, registries = run.split_parent_targets(["oci://r.example/team/{image}"])
+        self.assertEqual(directories, [])
+        self.assertEqual([one.text for one in registries], ["oci://r.example/team/{image}"])
+        for bad in ("dir:///srv/{image}", "github-release://example/{image}@v1", "oci://{image}.example/x"):
+            with self.subTest(bad), self.assertRaisesRegex(commands.Usage, "belongs in the repository of an oci://"):
                 run.split_parent_targets([bad])
 
     def test_oci_is_a_supported_kind_and_selected_in_parent_order(self) -> None:

@@ -254,12 +254,13 @@ def locate_parent(
     built: Mapping[str, ParentArtifact],
     out_dir: Path,
     directories: Sequence[Path],
-    registries: Sequence[published.OciTarget],
+    registries: Sequence[published.TargetTemplate],
     pull: Pull,
     scratch: Path,
 ) -> ParentArtifact:
     """The artifact of `child`'s parent: built earlier in this run, else in `out_dir`, else in a `dir://`
-    parent target, else pulled from an `oci://` one. Fails naming where it looked."""
+    parent target, else pulled from an `oci://` one (a `{image}` repository is the parent's own). Fails naming
+    where it looked."""
     if parent in built:
         return built[parent]
     kind = entry["kind"]
@@ -277,7 +278,12 @@ def locate_parent(
         searched.append(str(directory))
     if digest is not None and kind == "oci":
         name = published.artifact_name(parent, suite, arch, entry["identity"], digest, "oci")
-        for number, registry in enumerate(registries):
+        for number, template in enumerate(registries):
+            try:
+                registry = published.resolve_registry(template, parent)
+            except ValueError as error:
+                searched.append(str(error))
+                continue
             where = f"oci://{registry.registry}/{registry.repository}"
             try:  # each target in turn (DESIGN 9.1): one that lacks the image, or fails, is not the last word
                 pulled = describe_layout(pull(registry, digest, scratch / str(number) / name), check_layers=True)

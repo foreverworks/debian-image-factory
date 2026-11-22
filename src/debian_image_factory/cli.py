@@ -288,17 +288,16 @@ def sources_of(arguments: argparse.Namespace) -> commands.Sources:
     return commands.Sources(service=arguments.mirror, keyring=arguments.keyring, cache=cache)
 
 
-def parent_registries(texts: Sequence[str]) -> tuple[published.OciTarget, ...]:
-    """The `test --parents` targets: registries only, since `test` reads a parent's manifest and nothing else."""
-    found: list[published.OciTarget] = []
-    for text in texts:
-        try:
-            target = published.parse_target(text)
-        except ValueError as error:
-            raise commands.Usage(str(error)) from None
-        if not isinstance(target, published.OciTarget):
-            raise commands.Usage(f"--parents {text}: test reads a parent's layers from a registry: oci://REGISTRY/REPO")
-        found.append(target)
+def parent_registries(texts: Sequence[str]) -> tuple[published.TargetTemplate, ...]:
+    """The `test --parents` targets: registries only, since `test` reads a parent's manifest and nothing else.
+    A `{image}` repository is resolved with the parent's name when the parent is looked up."""
+    found: list[published.TargetTemplate] = []
+    for template in commands.parse_targets(texts):
+        if not isinstance(template.target, published.OciTarget):
+            raise commands.Usage(
+                f"--parents {template.text}: test reads a parent's layers from a registry: oci://REGISTRY/REPO"
+            )
+        found.append(template)
     return tuple(found)
 
 

@@ -1271,6 +1271,9 @@ debian-image-factory prune --against TARGET... --pin DIGEST... [--keep-good 5] [
                            [--definition FILE]
 ```
 
+A TARGET of `plan --against`, `build --parents`, `test --parents`, `prune --against` and `publish --to` may carry
+`{image}` in the repository of an `oci://` target, with one meaning in all five (below).
+
 `lock`, `plan` and `fetch` read snapshots from snapshot.debian.org, or through `--mirror URL`, any
 server that serves its paths (`/archive/...` and `/mr/timestamp/`); `--keyring` and `--cache` say
 where the archive keyring and the download cache are. M1 shipped `lock check`, `lock snapshot`,
@@ -1313,13 +1316,24 @@ Targets are `oci://<registry>/<repository>`, `github-release://<owner>/<repo>@<t
 `dir://<path>`. `plan --against` looks identities up live in those targets (7.4); nothing about
 the published state is stored in the consumer's repository.
 
+In the repository of an `oci://` target, `{image}` stands for the name of an image, and means the same in every
+command that takes a target: the target, resolved with the name of the image being looked up, so one string
+(`oci://ghcr.io/example/{image}`: image `debian` is `ghcr.io/example/debian`, `node-26` is `ghcr.io/example/node-26`)
+serves the whole nightly. `plan --against` looks image X's identity up in the target resolved for X;
+`build --parents` and `test --parents` pull or read a parent image P from the target resolved for P, the parent's
+own name that the plan holds; `prune --against` runs each image's retention on the target resolved for that image
+(an image of the definition, judged on its own artifacts there; the other images a repository might hold are not
+looked at); `publish --to` sends each image to the target resolved for it. `{image}` anywhere but in the repository
+of an `oci://` target (a `dir://` path, a release, the registry host) is refused with exit 2, and so is an image
+whose name makes no valid repository. One resolver (`published.resolve_template`) serves all five commands.
 `test` finds an image's parent in `out/`. A parent that is not there (a night on which only Node moved: Node
 builds, its Debian-built parent is reused from the registry) is known by the digest the plan names for it. For a
 core parent that digest is all `ancestry` needs. For an OCI parent `ancestry` also needs its layers, which
 `test --parents oci://<registry>/<repository>` reads: the parent's manifest, nothing else, from the first of
-the registries that holds it. Without `--parents`, or when no registry has the parent, `ancestry` is not run
-and says why, and a child whose required checks lack a result stays a candidate; with it, the child passes.
-`--parents` takes registries only: for an OS root or an installer kit `--parent FILE` gives the parent's file.
+the registries that holds it (for a target with `{image}`, the repository named for the parent). Without
+`--parents`, or when no registry has the parent, `ancestry` is not run and says why, and a child whose required
+checks lack a result stays a candidate; with it, the child passes. `--parents` takes registries only: for an OS
+root or an installer kit `--parent FILE` gives the parent's file.
 
 `publish` writes `dir://` targets (files only: an OCI image layout is refused there) and `oci://`
 targets (OCI images only: a core tarball is refused there; when `out/` holds both, each target

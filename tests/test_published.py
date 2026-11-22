@@ -33,8 +33,11 @@ from debian_image_factory.published import (
     parse_envelope,
     parse_envelopes,
     parse_target,
+    parse_template,
     partial_name,
     partial_of,
+    resolve_registry,
+    resolve_template,
     sort_newest_first,
 )
 from debian_image_factory.published import (
@@ -590,6 +593,55 @@ class TargetTest(unittest.TestCase):
         ):
             with self.assertRaises(ValueError, msg=text):
                 parse_target(text)
+
+
+class TemplateTest(unittest.TestCase):
+    def test_a_target_without_the_placeholder_is_itself_for_every_image(self) -> None:
+        template = parse_template("oci://ghcr.io/example/images")
+        self.assertFalse(template.per_image)
+        for image in ("debian", "node-26"):
+            self.assertEqual(resolve_template(template, image), OciTarget("ghcr.io", "example/images"))
+        self.assertEqual(resolve_template(parse_template("dir:///srv/out"), "debian"), DirTarget("/srv/out"))
+
+    def test_the_placeholder_is_the_name_of_the_image_looked_up(self) -> None:
+        template = parse_template("oci://ghcr.io/example/{image}")
+        self.assertTrue(template.per_image)
+        self.assertEqual(template.text, "oci://ghcr.io/example/{image}")
+        self.assertEqual(resolve_template(template, "debian"), OciTarget("ghcr.io", "example/debian"))
+        self.assertEqual(resolve_template(template, "node-26"), OciTarget("ghcr.io", "example/node-26"))
+        self.assertEqual(
+            resolve_template(parse_template("oci://ghcr.io/{image}/base-{image}"), "app"),
+            OciTarget("ghcr.io", "app/base-app"),
+        )
+
+    def test_the_placeholder_belongs_in_an_oci_repository(self) -> None:
+        for text in (
+            "dir:///srv/{image}",
+            "github-release://example/{image}@v1",
+            "github-release://example/images@{image}",
+            "oci://{image}.example.com/x",
+            "oci://ghcr.io:{image}/x",
+            "oci://{image}",
+        ):
+            with self.subTest(text), self.assertRaisesRegex(ValueError, "belongs in the repository of an oci://"):
+                parse_template(text)
+
+    def test_a_template_that_is_no_target_is_refused_with_the_placeholder_in_place(self) -> None:
+        for text in ("oci://ghcr.io/{image}/UPPER", "oci://bad host/{image}", "oci://ghcr.io"):
+            with self.subTest(text), self.assertRaises(ValueError):
+                parse_template(text)
+
+    def test_an_image_that_makes_no_repository_is_named(self) -> None:
+        with self.assertRaisesRegex(ValueError, "the image Odd_Name makes no repository"):
+            resolve_template(parse_template("oci://ghcr.io/example/{image}"), "Odd_Name")
+
+    def test_a_registry_template_resolves_to_a_registry(self) -> None:
+        self.assertEqual(
+            resolve_registry(parse_template("oci://ghcr.io/example/{image}"), "debian"),
+            OciTarget("ghcr.io", "example/debian"),
+        )
+        with self.assertRaisesRegex(ValueError, "not an oci:// target"):
+            resolve_registry(parse_template("dir:///srv/out"), "debian")
 
 
 if __name__ == "__main__":

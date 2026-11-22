@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Final, Literal, TextIO
+from typing import Literal, TextIO
 
 from input_lock.identity import HEX64
 
@@ -395,33 +395,6 @@ def target_scheme(target: published.Target) -> str:
     return "dir://" if isinstance(target, published.DirTarget) else "github-release://"
 
 
-IMAGE_PLACEHOLDER: Final = "{image}"
-"""In the repository of an `oci://` target: replaced by the name of the image each layout is, so one
-publish can send `debian` to one repository and `node-26` to another."""
-
-
-@dataclass(frozen=True, slots=True)
-class Destination:
-    """One `--to` as given: `text` is what the user wrote, `target` what it parses to (a repository with
-    `{image}` parses with the image name `image`, to check the template), `per_image` that it has the placeholder."""
-
-    text: str
-    target: published.Target
-    per_image: bool
-
-
-def destination_of(text: str) -> Destination:
-    """`text` as a destination. Raises Usage for a target that does not parse, or that has `{image}` but is
-    not an `oci://` target (a directory or a release holds each artifact under its own name already)."""
-    per_image = IMAGE_PLACEHOLDER in text
-    if per_image and not text.startswith("oci://"):
-        raise commands.Usage(f"{text}: {IMAGE_PLACEHOLDER} belongs in the repository of an oci:// target")
-    try:
-        return Destination(text, published.parse_target(text.replace(IMAGE_PLACEHOLDER, "image")), per_image)
-    except ValueError as error:
-        raise commands.Usage(str(error)) from None
-
-
 def image_of(name: str) -> str:
     parts = published.parse_artifact_name(name)
     assert parts is not None  # artifacts_in and layouts_in only return named artifacts
@@ -445,19 +418,17 @@ def selected(
     ]
 
 
-def oci_targets_for(destination: Destination, layouts: Sequence[Path]) -> list[tuple[published.OciTarget, list[Path]]]:
-    """The repositories `layouts` go to for an `oci://` destination: the one, or with `{image}` one per image,
+def oci_targets_for(
+    template: published.TargetTemplate, layouts: Sequence[Path]
+) -> list[tuple[published.OciTarget, list[Path]]]:
+    """The repositories `layouts` go to for an `oci://` target: the one, or with `{image}` one per image,
     each with its own layouts. Raises Usage when an image's name does not make a valid repository."""
-    if not destination.per_image:
-        assert isinstance(destination.target, published.OciTarget)
-        return [(destination.target, list(layouts))]
+    if not template.per_image:
+        assert isinstance(template.target, published.OciTarget)
+        return [(template.target, list(layouts))]
     found: list[tuple[published.OciTarget, list[Path]]] = []
     for image in sorted({image_of(one.name) for one in layouts}):
-        text = destination.text.replace(IMAGE_PLACEHOLDER, image)
-        try:
-            target = published.parse_target(text)
-        except ValueError as error:
-            raise commands.Usage(f"{destination.text}: the image {image} makes no repository ({error})") from None
+        target = commands.target_for(template, image)
         assert isinstance(target, published.OciTarget)
         found.append((target, [one for one in layouts if image_of(one.name) == image]))
     return found
@@ -475,7 +446,7 @@ def publish_command(
         raise commands.Usage("signing arrives in a later release; this release publishes unsigned records")
     if not targets:
         raise commands.Usage("publish needs at least one --to TARGET")
-    destinations = [destination_of(target) for target in targets]
+    destinations = commands.parse_targets(targets)
     if not out_dir.is_dir():
         raise commands.Failed(f"{out_dir}: no such directory (build writes it)")
     files, layouts = selected(images, artifacts_in(out_dir), layouts_in(out_dir))

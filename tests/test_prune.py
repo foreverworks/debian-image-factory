@@ -391,6 +391,81 @@ class RegistryCase(PruneCase):
         return built.digest
 
 
+class TemplatedRegistryTest(RegistryCase):
+    """`{image}` in an `oci://` repository: each image's retention runs in the repository named for it."""
+
+    def put_image(self, name: str, image: str, n: int, checks: Sequence[tuple[str, TestOutcome]] = GOOD) -> str:
+        """Publish build `n` of `image` through the same template `prune` is given; its manifest digest."""
+        out = self.root / f"out-{image}-{n}"
+        built = make_image(
+            out,
+            image=image,
+            identity=identity(n),
+            content=f"{image} {n}".encode(),
+            checks=checks,
+            finished=finished(n),
+        )
+        self.assertEqual(publish.publish_command(out, [f"oci://{name}/team/{{image}}"], "none", io.StringIO()), 0)
+        return built.digest
+
+    def deleted_in(self, fake: FakeRegistry) -> dict[str, list[str]]:
+        """The manifests deleted by digest, by the repository the request named."""
+        found: dict[str, list[str]] = {}
+        for line in fake.log:
+            if line.startswith("DELETE /v2/") and "/manifests/sha256:" in line:
+                repository, _, digest = line.removeprefix("DELETE /v2/").partition("/manifests/sha256:")
+                found.setdefault(repository, []).append(digest)
+        return found
+
+    def test_each_image_is_pruned_in_its_own_repository_and_only_there(self) -> None:
+        fake = FakeRegistry()
+        with fake_registry.running(fake) as name:
+            core = [self.put_image(name, "core", n) for n in (1, 2, 3)]
+            app = [self.put_image(name, "app", n) for n in (11, 12, 13)]
+            fake.log.clear()
+            said = self.prune([f"oci://{name}/team/{{image}}"], good=1, candidates=0)
+            gone = self.deleted_in(fake)  # each image's manifest and its records, in its repository
+            self.assertEqual(sorted(gone), ["team/app", "team/core"])
+            self.assertTrue(set(core[:2]) <= set(gone["team/core"]))
+            self.assertTrue(set(app[:2]) <= set(gone["team/app"]))
+            self.assertEqual(set(gone["team/core"]) & set(app), set())
+            self.assertEqual(set(gone["team/app"]) & set(core), set())
+            for digest in (core[2], app[2]):
+                self.assertIn(f"sha256:{digest}", fake.manifests)
+                self.assertNotIn(digest, gone["team/core"] + gone["team/app"])
+        self.assertEqual(len(self.lines(said, "deleted")), 4)
+        self.assertIn(f"oci://{name}/team/core@sha256:{core[0]} deleted, ", said)
+        self.assertIn(f"oci://{name}/team/app@sha256:{app[0]} deleted, ", said)
+        self.assertNotIn(f"oci://{name}/team/core@sha256:{app[0]}", said)
+        self.assertNotIn(f"oci://{name}/team/app@sha256:{core[0]}", said)
+
+    def test_a_plain_target_still_holds_every_image(self) -> None:
+        fake = FakeRegistry()
+        with fake_registry.running(fake) as name:
+            [self.put_image(name, "core", n) for n in (1, 2)]
+            [self.put_image(name, "app", n) for n in (11, 12)]
+            fake.log.clear()
+            said = self.prune([f"oci://{name}/team/shared"], good=1, candidates=0)
+        self.assertEqual(sorted(self.deleted_in(fake)), ["team/shared"])
+        self.assertEqual(len(self.lines(said, "deleted")), 2)
+
+    def test_a_pin_keeps_its_artifact_in_the_repository_of_its_image(self) -> None:
+        fake = FakeRegistry()
+        with fake_registry.running(fake) as name:
+            core = [self.put_image(name, "core", n) for n in (1, 2)]
+            self.put_image(name, "app", 11)
+            fake.log.clear()
+            self.prune([f"oci://{name}/team/{{image}}"], pins=[f"sha256:{core[0]}"], good=1, candidates=0)
+            self.assertEqual(self.deleted_in(fake), {})
+            self.assertIn(f"sha256:{core[0]}", fake.manifests)
+
+    def test_a_placeholder_outside_an_oci_repository_is_refused_before_anything_is_read(self) -> None:
+        for target in (f"dir://{self.root}/{{image}}", "github-release://example/{image}@v1"):
+            with self.subTest(target), self.assertRaisesRegex(commands.Usage, "belongs in the repository of an oci://"):
+                prune.prune_command([target], [], 5, 1, False, self.definition, io.StringIO())
+        self.assertEqual(cli.main(["prune", "--against", "dir:///x/{image}", "--definition", str(self.definition)]), 2)
+
+
 class RegistryTest(RegistryCase):
     def modes(self) -> list[tuple[str, FakeRegistry]]:
         return [

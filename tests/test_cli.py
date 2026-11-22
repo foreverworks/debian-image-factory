@@ -356,6 +356,31 @@ class PlanTest(CliCase):
         self.assertEqual(run.plan()["core"]["artifact"], f"sha256:{built.digest}")
         self.assertEqual(run.plan()["app-a"]["state"], "build")
 
+    def test_against_a_templated_registry_looks_each_image_up_in_its_own_repository(self) -> None:
+        identity = str(self.run_plan("--snapshot", FIRST_ID).plan()["core"]["identity"])
+        checks: list[tuple[str, TestOutcome]] = [(check, "PASSED") for check in definition.BUILTIN_CHECKS["core"]]
+        out = Path(tempfile.mkdtemp(dir=self.tmp))
+        built = make_image(out, image="core", identity=identity, checks=checks)
+        fake = Fake()
+        with fake_registry.running(fake) as name:
+            publish.publish_command(out, [f"oci://{name}/team/{{image}}"], "none", io.StringIO())
+            self.assertIn(f"sha256:{built.digest}", fake.manifests)
+            fake.log.clear()
+            run = self.run_plan("--snapshot", FIRST_ID, "--against", f"oci://{name}/team/{{image}}")
+        self.assertEqual(run.code, 0, run.err)
+        self.assertEqual(run.plan()["core"]["state"], "reuse")
+        self.assertEqual(run.plan()["core"]["artifact"], f"sha256:{built.digest}")
+        self.assertEqual(run.plan()["app-a"]["state"], "build")
+        asked = {line.split("/")[3] for line in fake.log if line.startswith("GET /v2/team/")}
+        self.assertEqual(asked, {"core", "app-a", "app-b", "app-c"})
+
+    def test_against_refuses_a_placeholder_outside_an_oci_repository(self) -> None:
+        for target in ("dir:///srv/{image}", "github-release://example/{image}@v1", "oci://{image}.example.com/x"):
+            with self.subTest(target):
+                run = self.run_plan("--snapshot", FIRST_ID, "--against", target)
+                self.assertEqual(run.code, 2)
+                self.assertIn("{image} belongs in the repository of an oci:// target", run.err)
+
     def test_against_a_tag_without_a_release_builds_too(self) -> None:
         with fake_github.running(GithubFake()) as api, fake_github.environment(api):
             run = self.run_plan("--snapshot", FIRST_ID, "--against", "github-release://example/images@v1")

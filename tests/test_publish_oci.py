@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Final
 
 from debian_image_factory import cli, commands, oci, ocilayout, publish, published, registry, targets
-from debian_image_factory.published import OciTarget, ReleaseTarget
+from debian_image_factory.published import OciTarget, ReleaseTarget, Target
 from tests.support import fake_registry
 from tests.support.fake_registry import Fake
 from tests.support.oci_fixtures import IDENTITY, make_core_file, make_image, result_line, tiny_layer
@@ -348,13 +348,12 @@ class TargetsTest(unittest.TestCase):
         self.assertFalse((self.root / "dir").exists())
 
     def test_plan_reads_oci_and_release_targets(self) -> None:
-        self.assertEqual(
-            commands.parse_targets(["oci://127.0.0.1:5000/team/app"]), [OciTarget("127.0.0.1:5000", "team/app")]
-        )
-        self.assertEqual(commands.parse_targets(["oci://[::1]:5000/team/app"]), [OciTarget("[::1]:5000", "team/app")])
-        self.assertEqual(
-            commands.parse_targets(["github-release://example/images@v1"]), [ReleaseTarget("example", "images", "v1")]
-        )
+        def parsed(*texts: str) -> list[Target]:
+            return [one.target for one in commands.parse_targets(texts)]
+
+        self.assertEqual(parsed("oci://127.0.0.1:5000/team/app"), [OciTarget("127.0.0.1:5000", "team/app")])
+        self.assertEqual(parsed("oci://[::1]:5000/team/app"), [OciTarget("[::1]:5000", "team/app")])
+        self.assertEqual(parsed("github-release://example/images@v1"), [ReleaseTarget("example", "images", "v1")])
         with self.assertRaises(commands.Usage):
             commands.parse_targets(["github-release://example/images"])
 

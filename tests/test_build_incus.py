@@ -458,7 +458,7 @@ class LocateTest(TemporaryTest):
             built=built or {},
             out_dir=out or self.out,
             directories=directories,
-            registries=registries,
+            registries=[published.parse_template(published.format_target(one)) for one in registries],
             pull=refuse_pull,
             scratch=self.dir / "pulled",
         )

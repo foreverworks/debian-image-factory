@@ -135,8 +135,9 @@ class Effects:
     """Parent artifacts outside OUT, for `ancestry` of an OS or installer child (`test --parent`)."""
     twins: tuple[Path, ...] = ()
     """Output directories of other builds of the same plan, for `byte-equal` (`test --twin`)."""
-    parent_registries: tuple[published.OciTarget, ...] = ()
-    """Registries holding an OCI parent that is not in OUT, for its layers in `ancestry` (`test --parents`)."""
+    parent_registries: tuple[published.TargetTemplate, ...] = ()
+    """Registries holding an OCI parent that is not in OUT, for its layers in `ancestry` (`test --parents`);
+    a `{image}` repository is the parent's own."""
     parent_layers: ParentLayers = registry_layers
     vm: vmrun.Vm = vmrun.VM
     boot_installer: BootInstaller = vmrun.boot_installer
@@ -378,7 +379,8 @@ def find_parent(
     the same image has several, the one the manifest's `base.digest` names. A parent not in the output is
     known by the digest the plan names for it: for a core parent that is its first layer's digest, which
     is all `ancestry` needs; for an OCI parent its layers are read from the manifest the first of
-    `effects.parent_registries` holds, and stay unknown (the check is not run) when none is given.
+    `effects.parent_registries` (resolved for the parent) holds, and stay unknown (the check is not run) when
+    none is given.
     """
     entry = plan["images"][found.image]
     parent = entry["parent"]
@@ -400,10 +402,10 @@ def find_parent(
     if not effects.parent_registries:
         return ancestry.Parent(digest, None)
     reasons: list[str] = []
-    for target in effects.parent_registries:
+    for template in effects.parent_registries:
         try:
-            return ancestry.Parent(digest, effects.parent_layers(target, digest))
-        except OSError as error:
+            return ancestry.Parent(digest, effects.parent_layers(published.resolve_registry(template, parent), digest))
+        except (OSError, ValueError) as error:
             reasons.append(str(error))
     return (
         f"the parent {parent} (sha256:{digest}) is not in the output and its manifest could not be read: "

@@ -217,6 +217,12 @@ oci://ghcr.io/example/debian` sends only the image `debian` (repeat `--image` fo
 hold is refused), and `{image}` in an `oci://` repository is replaced by each image's name, so `publish out/ --to
 oci://ghcr.io/example/{image}` sends `debian` to `ghcr.io/example/debian` and `node-26` to `ghcr.io/example/node-26`.
 
+`{image}` means the same in every command that takes a target, so you can give the same string to all of them:
+`plan --against oci://ghcr.io/example/{image}` looks each image up in the repository named for it, `build --parents`
+and `test --parents` read a parent image from the repository named for the parent, and `prune --against` judges each
+image of your definition in its own repository. `{image}` is refused anywhere but in the repository of an `oci://`
+target.
+
 A night on which only Node moved builds only the Node images: their Debian-built parent is reused from the registry,
 so `test` does not find it in `out/`. `test out/ --parents oci://ghcr.io/example/debian` reads the parent's manifest
 from there, so the child's `ancestry` check runs and passes instead of staying unrun, which would leave the new
