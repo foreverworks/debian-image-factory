@@ -800,7 +800,10 @@ def prepare_incus_work(work: Path, run: Run, image: str, parent: parents.ParentA
     (work / LAYER_PROGRAM).write_text(
         resources.files("debian_image_factory.build").joinpath(LAYER_PROGRAM).read_text(encoding="utf-8")
     )
-    devices = device_lines(parent)
+    try:
+        devices = device_lines(parent)
+    except ValueError as error:
+        raise commands.Failed(f"images.{image}: {error}") from None
     (work / Path(incus_build.DEVICES_PSEUDO).name).write_text("".join(devices))
     (work / Path(incus_build.DEVICES_LIST).name).write_text(
         "".join(line.split(" ", 1)[0].lstrip("/") + "\n" for line in devices)

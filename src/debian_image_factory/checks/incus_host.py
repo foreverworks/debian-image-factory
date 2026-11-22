@@ -259,7 +259,12 @@ def addresses(name: str, run: Runner, sleep: Sleep) -> tuple[str, ...]:
 
 
 def read_boot(name: str, run: Runner, sleep: Sleep) -> Reading:
-    status = in_instance(name, "cloud-init status --wait --long", run, BOOT_TIMEOUT)
+    """What the instance says about its boot. A cloud-init that does not finish within BOOT_TIMEOUT is the
+    image's fault, so it is read as a failure (no exit status), never as a check that could not run."""
+    try:
+        status = in_instance(name, "cloud-init status --wait --long", run, BOOT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        status = subprocess.CompletedProcess([], -1, "", f"cloud-init did not finish within {BOOT_TIMEOUT:.0f} s")
     detail = " ".join(
         line.split(":", 1)[1].strip()
         for line in status.stdout.splitlines()

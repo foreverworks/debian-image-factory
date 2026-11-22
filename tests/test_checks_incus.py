@@ -575,10 +575,11 @@ class IncusBootTest(Scratch):
         self.assertEqual(got.check, INCUS_BOOT)
         self.assertTrue(got.reason.startswith("incus failed: "))
 
-    def test_a_command_that_times_out_is_not_run_and_the_instances_are_deleted(self) -> None:
+    def test_a_cloud_init_that_never_finishes_fails_and_the_instances_are_deleted(self) -> None:
         self.host.raises = ("cloud-init status", subprocess.TimeoutExpired("incus", 1200))
-        got = not_run(self.boot())
-        self.assertTrue(got.reason.startswith("incus failed: "))
+        got = ran(self.boot())
+        self.assertEqual(got.outcome, "FAILED")
+        self.assertIn("cloud-init did not finish within 1200 s", " ".join(got.failed))
         self.assertEqual(self.host.instances, {})
         self.assertEqual(len(self.deleted()), 2)
 
@@ -908,9 +909,10 @@ class ParentNamedTest(Base):
         bare = write_image(self.out.root, "incus-bare", BASE_IDENTITY, incusimage.fixture("scan"))
         self.assertIsNone(self.named(bare))
 
-    def test_two_provenance_records_about_the_artifact_name_no_parent(self) -> None:
+    def test_two_provenance_records_that_agree_name_their_parent(self) -> None:
         text = self.out.app.records.read_text()
-        self.assertIsNone(command.parent_named(text + text.splitlines(keepends=True)[0], self.out.app.fingerprint))
+        named = command.parent_named(text + text.splitlines(keepends=True)[0], self.out.app.fingerprint)
+        self.assertEqual(named, self.out.base.fingerprint)
 
     def test_the_provenance_is_found_by_any_of_its_three_subjects(self) -> None:
         meta = hashlib.sha256(self.out.app.metadata.read_bytes()).hexdigest()

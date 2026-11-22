@@ -408,8 +408,8 @@ def file_parent(found: Found, plan: Plan, others: Sequence[Found]) -> Found | st
 
 
 def parent_named(records_text: str | None, digest: str) -> str | None:
-    """The parent digest the artifact's provenance names (its `parent: <image>` dependency), when it has
-    exactly one readable provenance that names one."""
+    """The parent digest the artifact's provenance names (its `parent: <image>` dependency), when its
+    provenance records (several, after a rebuild of the same bytes) are readable and all name the same one."""
     if records_text is None:
         return None
     try:
@@ -420,9 +420,8 @@ def parent_named(records_text: str | None, digest: str) -> str | None:
         ]
     except published.RecordsError:
         return None
-    if len(builds) != 1 or not builds[0].ancestors:
-        return None
-    return builds[0].ancestors[0][1]
+    parents = {build.ancestors[0][1] if build.ancestors else None for build in builds}
+    return parents.pop() if len(parents) == 1 else None  # every record of a rebuild must agree
 
 
 def scan_parent(parent: Found, wanted: frozenset[str]) -> tarball.Scan:
@@ -553,7 +552,8 @@ def test_command(
     effects: Effects = Effects(),
     url: str = "",
 ) -> int:
-    """Run the plan's required checks (or only `requested`) on every core tarball and OCI image layout in `out_dir`.
+    """Run the plan's required checks (or only `requested`) on every core tarball, OCI image layout and Incus
+    image in `out_dir`.
 
     Returns 1 when any check FAILED, else 0; raises Usage for a name that is not a check of core or oci and
     Failed when plan.json or an artifact cannot be read.
@@ -561,7 +561,9 @@ def test_command(
     known = sorted({name for names in CHECKS_OF_KIND.values() for name in names})
     unknown = sorted(set(requested) - set(known))
     if unknown:
-        raise Usage(f"--check {', '.join(unknown)}: not a check of a core or OCI image (one of {', '.join(known)})")
+        raise Usage(
+            f"--check {', '.join(unknown)}: not a check of a core, OCI or Incus image (one of {', '.join(known)})"
+        )
     try:
         plan = read_plan(out_dir / "plan.json")
         found, skipped = find_artifacts(out_dir, plan)

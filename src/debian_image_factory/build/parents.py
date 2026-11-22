@@ -146,12 +146,17 @@ def incus_lineage(parent: ParentArtifact) -> list[records_module.Parent]:
         statements = published.parse_envelopes(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, published.RecordsError) as error:
         raise commands.Failed(f"{path.name}: the records of {parent.name} cannot be read ({error})") from None
-    builds = [
-        one for one in statements if one.build is not None and any(s.sha256 == parent.digest for s in one.subjects)
-    ]
-    if len(builds) != 1 or builds[0].build is None:
-        raise commands.Failed(f"{path.name}: {len(builds)} provenance records name {parent.name}, not one")
-    chain.extend(records_module.Parent(name, digest) for name, digest in builds[0].build.ancestors)
+    lines = {
+        one.build.ancestors
+        for one in statements
+        if one.build is not None and any(s.sha256 == parent.digest for s in one.subjects)
+    }
+    if len(lines) != 1:
+        # a rebuild of the same bytes adds a provenance record; all of them must name the same ancestors
+        raise commands.Failed(
+            f"{path.name}: the provenance records of {parent.name} name {len(lines)} ancestries, not one"
+        )
+    chain.extend(records_module.Parent(name, digest) for name, digest in next(iter(lines)))
     return chain
 
 

@@ -6,6 +6,7 @@ artifact by itself, and is listed only with its metadata tarball.
 """
 
 import hashlib
+import itertools
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,7 +44,7 @@ def sha256_of(path: Path) -> str:
 
 def fingerprint_of(metadata: Path, rootfs: Path) -> str:
     """The Incus fingerprint of a split image on disk."""
-    return incus.fingerprint((*chunks(metadata), *chunks(rootfs)))
+    return incus.fingerprint(itertools.chain(chunks(metadata), chunks(rootfs)))
 
 
 def is_companion(parts: ArtifactName) -> bool:

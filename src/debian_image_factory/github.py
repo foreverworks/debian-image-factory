@@ -237,8 +237,8 @@ def _opener(url: str) -> urllib.request.OpenerDirector:
 
 def _trusted(client: Client, url: str, upload_host: str | None) -> bool:
     """Whether the token may go to `url`: the API host, or the upload host the API returned."""
-    host = urllib.parse.urlsplit(url).netloc
-    return host in (urllib.parse.urlsplit(client.api).netloc, upload_host)
+    parts, api = urllib.parse.urlsplit(url), urllib.parse.urlsplit(client.api)
+    return parts.scheme == api.scheme and parts.netloc in (api.netloc, upload_host)
 
 
 def _open(
@@ -379,7 +379,11 @@ def list_assets(client: Client, release: Release) -> list[Asset]:
         found.extend(page)
         following = next_link(response.headers.get("link"))
         url = None if following is None else urllib.parse.urljoin(url, following)
-        if url is not None and urllib.parse.urlsplit(url).netloc != urllib.parse.urlsplit(client.api).netloc:
+        api = urllib.parse.urlsplit(client.api)
+        if url is not None and (urllib.parse.urlsplit(url).netloc, urllib.parse.urlsplit(url).scheme) != (
+            api.netloc,
+            api.scheme,
+        ):
             raise GitHubError(f"{client.name}: its listing points to another host")
     raise GitHubError(f"{client.name}: the asset listing has more than {MAX_PAGES} pages")
 

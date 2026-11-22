@@ -421,15 +421,17 @@ class LineageTest(TemporaryTest):
         found = described(self.app)
         lines = self.app.records.read_text().splitlines(keepends=True)
         self.app.records.write_text("".join(lines[1:]))  # the SBOM only
-        with self.assertRaisesRegex(commands.Failed, "0 provenance records name incus-app-trixie.*, not one"):
+        with self.assertRaisesRegex(
+            commands.Failed, "provenance records of incus-app-trixie.* name 0 ancestries, not one"
+        ):
             parents.incus_lineage(found)
 
-    def test_two_provenance_records_about_the_parent_fail(self) -> None:
+    def test_two_provenance_records_that_agree_are_one_lineage(self) -> None:
         found = described(self.app)
         text = self.app.records.read_text()
-        self.app.records.write_text(text + text.splitlines(keepends=True)[0])
-        with self.assertRaisesRegex(commands.Failed, "2 provenance records name incus-app-trixie.*, not one"):
-            parents.incus_lineage(found)
+        once = parents.incus_lineage(found)
+        self.app.records.write_text(text + text.splitlines(keepends=True)[0])  # a rebuild of the same bytes
+        self.assertEqual(parents.incus_lineage(found), once)
 
 
 class LocateTest(TemporaryTest):
