@@ -193,8 +193,10 @@ OCI images publish to a registry instead: `publish out/ --to oci://ghcr.io/examp
 each image under the tag `identity-<identity>` and attaches its records as referrers, and `plan
 --against` the same address finds it again. `debian-image-factory verify REF` checks an artifact
 (an `oci://` reference, a layout directory or a file) against its records. Credentials come from your
-Docker config. The later milestones add Incus, installer and OS images and the `github-release://`
-target.
+Docker config. Files publish to a GitHub release too: `publish out/ --to github-release://example/images@v1`
+uploads them as assets (creating the release when the tag has none), and `plan --against` the same address
+reads them back. It uses `GITHUB_TOKEN`, else `GH_TOKEN`, and `GITHUB_API_URL` when it is set. The later
+milestones add installer and OS images.
 
 In GitHub Actions, one step runs the same thing nightly, and reports `changed=false` on the nights
 when there is nothing to do. The planned interface is in [DESIGN.md, section 9](DESIGN.md#9-running-it).

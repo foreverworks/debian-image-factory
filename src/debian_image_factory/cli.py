@@ -1,7 +1,8 @@
 """The command line (DESIGN 9.1). Exit codes: 0 done, 1 a check or validation failed, 2 usage.
 
 This release has `lock check`, `lock snapshot`, `lock baseline`, `plan`, `fetch`, `build` (core and oci),
-`test`, `publish` (to `dir://` and `oci://`) and `verify`; the other kinds and targets arrive in later releases.
+`test`, `publish` (to `dir://`, `oci://` and `github-release://`) and `verify`; the other kinds and targets
+arrive in later releases.
 """
 
 import argparse
@@ -129,7 +130,11 @@ def parser() -> argparse.ArgumentParser:
     publish_ = commands_.add_parser("publish", help="copy artifacts and their records to targets")
     publish_.add_argument("out_dir", type=Path, metavar="OUT", help="the directory build wrote")
     publish_.add_argument(
-        "--to", action="append", default=[], metavar="TARGET", help="dir://PATH or oci://REGISTRY/REPOSITORY (repeat)"
+        "--to",
+        action="append",
+        default=[],
+        metavar="TARGET",
+        help="dir://PATH, oci://REGISTRY/REPOSITORY or github-release://OWNER/REPO@TAG (repeat)",
     )
     publish_.add_argument(
         "--sign", default="none", metavar="none", help="signing arrives in a later release; only none for now"
