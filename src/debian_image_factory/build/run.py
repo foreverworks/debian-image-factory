@@ -1092,6 +1092,7 @@ def build_command(
         return 0
     for image in chosen:
         verify_identity(lock, loaded, plan, image, params)
+        fetch.reverify_vouched(image, plan["images"][image], plan["debian"]["architecture"], sources.cache)
     mirror = fetch.mirror_dir(sources.cache, plan["snapshot"])
     releases = in_releases(mirror, plan)
     builder_ = open_builder(builder_image)

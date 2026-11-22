@@ -277,6 +277,59 @@ class FetchCommandTest(FetchCase):
         with self.assertRaisesRegex(commands.Failed, r"trust.node-26.sums_url must be an https://"):
             fetch.fetch_plan(planfile.read_plan(plan))
 
+    def fetched(self) -> tuple[Path, planfile.ImageEntry]:
+        """A node plan fetched into a new cache: the cache, and the plan's entry for `core`."""
+        cache = self.new_cache()
+        plan = self.node_plan()
+        self.fetch(plan, cache, self.reader(signing.clearsign(self.signer, listing())))
+        return cache, planfile.read_plan(plan)["images"]["core"]
+
+    def reverified(self, cache: Path, entry: planfile.ImageEntry) -> None:
+        fetch.reverify_vouched("core", entry, "amd64", cache)
+
+    def test_a_build_verifies_the_signed_list_again_from_the_cache(self) -> None:
+        cache, entry = self.fetched()
+        self.reverified(cache, entry)  # reads nothing: it has no way to
+
+    def test_a_note_alone_is_not_trusted(self) -> None:
+        cache, entry = self.fetched()
+        (note,) = fetch.vouched_by(cache, sha256(TARBALL))
+        stranger = signing.make_signer("Other <other@example.com>")
+        self.addCleanup(signing.close, stranger)
+        forged = signing.clearsign(stranger, listing())
+        archive.cache_path(cache, note.sha256).write_bytes(forged)  # the cached list is no longer the one noted
+        with self.assertRaisesRegex(commands.Failed, f"{SUMS_URL}: `fetch` has not verified the signed list"):
+            self.reverified(cache, entry)
+        fetch.write_note(cache, sha256(TARBALL), {"list": (SUMS_URL, forged)})  # a note that names the forgery
+        with self.assertRaisesRegex(commands.Failed, f"{SUMS_URL}: .*signature does not verify"):
+            self.reverified(cache, entry)
+
+    def test_a_list_that_no_longer_agrees_with_the_lock_fails_the_build(self) -> None:
+        cache, entry = self.fetched()
+        other = signing.clearsign(self.signer, listing(digest="d" * 64))  # signed by the right key, another file
+        fetch.write_note(cache, sha256(TARBALL), {"list": (SUMS_URL, other)})
+        with self.assertRaisesRegex(commands.Failed, f"{SUMS_URL}: the signed list and the lock disagree"):
+            self.reverified(cache, entry)
+
+    def test_a_keyring_that_does_not_hash_to_its_lock_fails_the_build(self) -> None:
+        cache, entry = self.fetched()
+        archive.cache_path(cache, sha256(self.signer.keyring)).write_bytes(b"other bytes")
+        with self.assertRaisesRegex(commands.Failed, "the keyring is not in the cache"):
+            self.reverified(cache, entry)
+
+    def test_a_missing_note_or_input_fails_the_build_and_names_fetch(self) -> None:
+        cache, entry = self.fetched()
+        fetch.note_path(cache, sha256(TARBALL)).unlink()
+        with self.assertRaisesRegex(commands.Failed, "`fetch` has not verified the signed list of node-26"):
+            self.reverified(cache, entry)
+        archive.cache_path(cache, sha256(TARBALL)).unlink()
+        with self.assertRaisesRegex(commands.Failed, "run `fetch`"):
+            self.reverified(cache, entry)
+
+    def test_an_image_without_signed_lists_has_nothing_to_verify(self) -> None:
+        plan = self.node_plan({})
+        fetch.reverify_vouched("core", planfile.read_plan(plan)["images"]["core"], "amd64", self.new_cache())
+
     def test_an_apt_entry_signed_by_a_keyring_is_left_to_the_deb_module(self) -> None:
         plan = fetch.fetch_plan(planfile.read_plan(self.node_plan({"node-26": {"signed_by": "node-release-keys"}})))
         self.assertEqual(plan.vouched, ())

@@ -502,7 +502,8 @@ module: mmdebstrap builds core, and `plan` names the image.
   again from the plan alone (the plan's `debs` names each entry's package, version and repository), with
   the keyring from the cache, keeps the signed file and the index in the content cache with a note keyed
   by the `.deb`'s sha256, as for Node's list, and a later fetch verifies the cached copies again. Provenance
-  names the `InRelease` and the index as resolved dependencies.
+  names the `InRelease` and the index as resolved dependencies. `build` walks the chain once more,
+  from the cache alone, before it builds the image (section 15, decision 8).
 - *Resolution.* The verified stanza is offered to the image that installs it and to no other: its
   resolution runs in an apt root of its own, which also holds a local flat repository with the verified
   stanzas (`[trusted=yes]`, since apt has nothing to check there: every stanza in it was verified as
@@ -1133,7 +1134,8 @@ the definition again. Each later command arrives with its milestone, `fetch --bu
 `build` reads the plan, and also the lock and the definition (`--lock`, `--definition`, as `plan`
 does): hooks and file trees live beside the definition, and provenance names the lock. Before it
 builds an image it recomputes the identity from them with the plan's package set and refuses a
-plan they no longer match, so records always describe what was built. `--builder-image REF` names
+plan they no longer match, so records always describe what was built, and it verifies again, from the
+cache alone, every signed checksum list or vendor chain the image's inputs rely on (15.8). `--builder-image REF` names
 the builder; the default is the tag `scripts/builder build` gives, until a release pins the
 published builder by digest. A child whose parent this run does not build reads it from `out/` (by
 artifact name: the identity prefix and the digest the plan names), then from each `--parents TARGET`
@@ -1459,7 +1461,14 @@ M3, M4 and M5 are independent once M2 lands and can run side by side.
 7. **Fetch, then build offline.** Hooks run with no network and receive verified files. A build can
    only consume what the lock and the snapshot named, and a replay is the same code path.
 8. **The cache is a performance layer, never an authority.** Content is accepted only by signed
-   index or lock checksum.
+   index or lock checksum. That holds at the build too: `fetch`'s notes about what it verified are
+   not trusted, and before it builds an image `build` verifies every signed list the image's inputs
+   rely on again, from the cache alone (no network): each noted file (a Node-style checksum list and
+   its detached signature, or a vendor repository's `InRelease` and `Packages` index) with `gpgv`
+   against the keyring entry the plan's `trust` names, itself checked against its locked checksum, and
+   against the locked sha256 of the input. A build whose lists do not verify fails before anything is
+   built, naming each file. A vendor Release's Valid-Until is judged at the time of the build, so a
+   cache older than that needs `fetch` again.
 9. **Children build in a chroot from their parent's exact filesystem.** Shared ancestry is real and
    provable, and nothing needs a running instance or root on the host.
 10. **A pinned builder from the first milestone**, so identities computed in M1 already include the

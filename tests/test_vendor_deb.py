@@ -6,6 +6,7 @@ past its Valid-Until, a Packages file that is not the one the Release lists, a s
 lock's, a keyring that is not the one the lock pins.
 """
 
+import datetime
 import io
 import json
 import tempfile
@@ -256,6 +257,45 @@ class FetchTest(VendorCase):
             root / "plan.json", self.vendor_sources(self.repo.files, cache), bundle=False, out=io.StringIO()
         )
         self.assertEqual(self.read_urls, [], "a second fetch verifies the cached chain again and reads nothing")
+
+    def fetched(self) -> tuple[Path, planfile.ImageEntry]:
+        """A vendor workspace fetched into a new cache: the cache and the plan's entry of the image with the .deb."""
+        root = self.deb_workspace()
+        images = self.run_plan(root)
+        deb_image = next(name for name, entry in images.items() if entry["debs"])
+        cache = Path(tempfile.mkdtemp(dir=self.tmp))
+        fetch.fetch_command(
+            root / "plan.json", self.vendor_sources(self.repo.files, cache), bundle=False, out=io.StringIO()
+        )
+        return cache, planfile.read_plan(root / "plan.json")["images"][deb_image]
+
+    def test_a_build_walks_the_vendors_signed_chain_again_from_the_cache(self) -> None:
+        cache, entry = self.fetched()
+        self.read_urls.clear()
+        fetch.reverify_vouched("app-b", entry, "amd64", cache)
+        self.assertEqual(self.read_urls, [], "it reads the cache only")
+
+    def test_a_cached_chain_that_is_not_signed_by_the_pinned_key_fails_the_build(self) -> None:
+        cache, entry = self.fetched()
+        resigned = vendor_repo.build_repo(self.signer, self.deb, signed_by=self.stranger)
+        noted = fetch.vouched_by(cache, vendor_repo.sha256(self.deb))
+        files = {"list": (noted[0].uri, resigned.files[vendor_repo.IN_RELEASE])}
+        files["index"] = (noted[1].uri, resigned.files[vendor_repo.PACKAGES])
+        fetch.write_note(cache, vendor_repo.sha256(self.deb), files)  # a note that names the forgery
+        with self.assertRaisesRegex(commands.Failed, f"{vendor_repo.IN_RELEASE}: the signature does not verify"):
+            fetch.reverify_vouched("app-b", entry, "amd64", cache)
+
+    def test_a_release_past_its_valid_until_fails_the_build(self) -> None:
+        cache, entry = self.fetched()
+        later = datetime.datetime(2099, 1, 1, tzinfo=datetime.UTC)
+        with self.assertRaisesRegex(commands.Failed, "example-tool: .*(expired|Valid-Until)"):
+            fetch.reverify_vouched("app-b", entry, "amd64", cache, later)
+
+    def test_a_deb_that_left_the_cache_fails_the_build(self) -> None:
+        cache, entry = self.fetched()
+        archive.cache_path(cache, vendor_repo.sha256(self.deb)).unlink()
+        with self.assertRaisesRegex(commands.Failed, "run `fetch`"):
+            fetch.reverify_vouched("app-b", entry, "amd64", cache)
 
     def test_fetch_fails_closed_when_the_repository_changed_since_the_plan(self) -> None:
         root = self.deb_workspace()

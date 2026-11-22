@@ -419,6 +419,84 @@ def check_vouched(item: Vouched, sources: Sources) -> bool:
     return True
 
 
+def reverify_list(item: Vouched, cache: Path) -> str | None:
+    """Why the signed list the cache holds for `item` does not vouch for it now; None when it does. Reads the
+    cache only: the noted list (and detached signature) must be the item's `sums_url` (and `sums_sig_url`),
+    verify with the keyring entry the plan's trust names, and agree with the locked checksums."""
+    keyring_file = archive.cached(cache, item.keyring.sha256)
+    if keyring_file is None:
+        return f"{item.keyring.url}: the keyring is not in the cache {cache}, or no longer hashes to the lock's sha256"
+    try:
+        ring = dearmor(keyring_file.read_bytes())
+    except ValueError as error:
+        return f"{item.keyring.url}: {error}"
+    noted = vouched_by(cache, item.entry.sha256)
+    wanted = [item.sums_url] if item.sums_sig_url is None else [item.sums_url, item.sums_sig_url]
+    if [one.uri for one in noted] != wanted:
+        return f"{item.sums_url}: `fetch` has not verified the signed list of {item.entry.name} (not in the cache)"
+    blobs = [path.read_bytes() for one in noted if (path := archive.cached(cache, one.sha256)) is not None]
+    if len(blobs) != len(noted):
+        return f"{item.sums_url}: the signed list is not in the cache"
+    try:
+        judged(item, ring, blobs[0], blobs[1] if len(blobs) > 1 else None)
+    except Failed as error:
+        return str(error)
+    return None
+
+
+def reverify_apt(item: AptVouched, cache: Path, now: datetime.datetime) -> str | None:
+    """As `reverify_list`, for a vendor .deb: the whole chain (InRelease, its Packages index, the .deb's
+    stanza), from the files the note names."""
+    keyring_file = archive.cached(cache, item.keyring.sha256)
+    if keyring_file is None:
+        return f"{item.keyring.url}: the keyring is not in the cache {cache}, or no longer hashes to the lock's sha256"
+    try:
+        ring = vendordeb.checked_keyring(item.keyring.url, keyring_file.read_bytes(), dict(item.keyring.checksums))
+    except vendordeb.VendorError as error:
+        return str(error)
+    noted = vouched_by(cache, item.entry.sha256)
+    if not noted:
+        return f"{item.entry.name}: `fetch` has not verified its repository's signed chain (not in the cache)"
+    try:
+        vendordeb.verify(item.pin, ring, cached_reader(cache, noted), now, item.architecture)
+    except vendordeb.VendorError as error:
+        return f"{item.entry.name}: {error}"
+    return None
+
+
+def absent_or_changed(item: LockedInput, cache: Path) -> list[str]:
+    """The input's own file must be in the cache and still hash to the lock's sha256."""
+    if archive.cached(cache, item.sha256) is None:
+        return [f"{item.url}: not in the cache {cache} (or no longer sha256:{item.sha256}): run `fetch`"]
+    return []
+
+
+def reverify_vouched(
+    image: str, entry: ImageEntry, architecture: str, cache: Path, now: datetime.datetime | None = None
+) -> None:
+    """Before a build: every signed list the image's inputs rely on verifies again, from the cache alone.
+
+    `fetch` verified them and left a note, but a cache is never an authority (DESIGN 15.8): each noted file
+    is checked with gpgv against the keyring entry the plan's trust names (itself checked against its locked
+    checksum), and must still vouch for the locked checksums, as `fetch` checks them; a vendor .deb's chain
+    is walked again, its Release's Valid-Until judged at `now` (default: the present). A locked input whose
+    file is not in the cache, or no longer hashes to its lock, fails too. Raises Failed naming every problem."""
+    moment = now or datetime.datetime.now(datetime.UTC)
+    problems: list[str] = []
+    for item in vouched_inputs(image, entry):
+        problems.extend(absent_or_changed(item.entry, cache))
+        problem = reverify_list(item, cache)
+        if problem is not None:
+            problems.append(problem)
+    for apt in apt_inputs(image, entry, architecture):
+        problems.extend(absent_or_changed(apt.entry, cache))
+        problem = reverify_apt(apt, cache, moment)
+        if problem is not None:
+            problems.append(problem)
+    if problems:
+        raise Failed(f"images.{image}: the signed lists its inputs rely on do not verify:\n" + "\n".join(problems))
+
+
 def write_note(cache: Path, sha256: str, files: Mapping[str, tuple[str, bytes]]) -> None:
     """Store every file in the cache and the note naming them (`NOTED` keys to (URL, bytes))."""
     note = {key: {"uri": url, "sha256": archive.store(cache, data).name} for key, (url, data) in files.items()}
