@@ -359,7 +359,8 @@ def image_annotations(
 ) -> dict[str, str]:
     """DESIGN 8.1's annotations. `base_digest` is the parent artifact's digest in hex (core's tarball
     sha256, or an OCI parent's manifest digest) and `base_name` its artifact name; `source` and
-    `revision` are the definition's repository and commit, when it has them."""
+    `revision` are the definition's repository and commit, when it has them. The commit is a byte input
+    but not an identity input (DESIGN 5.3): an image reused for a later commit keeps the commit that built it."""
     found = {IDENTITY: identity}
     if base_digest is not None:
         found[BASE_DIGEST] = digest_text(base_digest)

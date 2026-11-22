@@ -160,6 +160,18 @@ own requirements.
   writer is a standard-library Python program run by the builder's own python3. An image that only
   sets `oci` config adds no layer and runs no container; when its parent is core, the base layer is
   core's tarball itself, so an image's first layer digest is the tarball's sha256.
+- **The definition's commit is a byte input, not an identity input.** An OCI image's manifest
+  carries `org.opencontainers.image.source` and `org.opencontainers.image.revision` (8.1), read at the
+  build from the definition's git checkout when it is clean and has a remote (otherwise the
+  annotations are left out), so the commit is in the manifest's bytes and in the image's digest. The
+  identity holds no commit (7.1): the definition enters it parsed, so a new commit that changes
+  nothing the identity reads rebuilds nothing, and `plan` reuses the artifact an earlier commit
+  built, whose annotation names that earlier commit. The annotation therefore says which commit
+  built the artifact, never which commits could have. It follows that two builds are byte-equal only
+  when built from one commit (or with the two annotations set aside), which is how every byte
+  comparison here is made: the `byte-equal` check (11) builds twice in one run, and the engine
+  revision guard (12) is of core. Core, Incus, installer and OS artifacts hold no commit in their
+  bytes; for them it is only in provenance (8.2).
 - **Installer and os children build as an OCI child does**, on a filesystem that is one file: a core
   or os parent's tarball, unpacked as a single layer, or an installer parent's `initrd.img`. A kernel
   package's postinst runs in the chroot with proc and the minimal `/dev` mounted, so initramfs-tools
@@ -599,6 +611,10 @@ recipe digest = sha256(canonical_json({
 - **The engine revision, not the release version.** A factory release that only touches the
   command line, publishing or documentation rebuilds nothing. A change that can alter the bytes the
   factory writes raises the engine revision, and the tests enforce it (section 12).
+- **The definition's commit is not an input.** A commit of the repository that holds the definition
+  changes the identity only through what the definition says and the files it references (the
+  `files` and `image` fields above). The commit itself is written into an OCI manifest's annotations
+  (5.3), so it is a byte input and never an identity input.
 - **The build snapshot is not an input.** It decides which versions the resolver picks, and those
   versions are in `packages`. It never reaches the bytes (5.3, 6.2), so it has no reason to be in
   the identity.
@@ -778,6 +794,7 @@ newest completed ID.
 | A hook file's content | that image and its children |
 | `factory.toml` reformatted, comments edited, keys reordered | nothing |
 | A parameter flipped | the images that read it and their children |
+| A new commit of the definition's repository that changes nothing the identity reads | nothing: the artifact an earlier commit built is reused, and its `org.opencontainers.image.revision` names that commit (5.3) |
 | A factory release without an engine change, a new oras or cosign | nothing |
 | An engine revision raised, or a new version of a byte-writing builder tool | everything, once |
 | A core rebuilt with the same inputs gets a new digest | nothing: a digest is not an input |
@@ -833,9 +850,10 @@ regenerates it.
 
 An OCI image carries standard annotations: `org.opencontainers.image.base.digest` and
 `org.opencontainers.image.base.name` (its parent), `org.opencontainers.image.source` and
-`org.opencontainers.image.revision` (the definition's repository and commit), and
-`io.github.foreverworks.debian-image-factory.identity` (its input identity). The image config
-carries no build time.
+`org.opencontainers.image.revision` (the definition's repository and commit, when its checkout is
+clean and has a remote), and `io.github.foreverworks.debian-image-factory.identity` (its input
+identity). The image config carries no build time. The commit is a byte input but not an identity
+input (5.3): an image reused for a later commit keeps the annotation of the commit that built it.
 
 An OCI image is its parent's layers and, when it changes the filesystem, exactly one added layer. A
 core parent's base layer is core's tarball byte for byte: its digest is the tarball's sha256 and its
@@ -1281,7 +1299,7 @@ Each runs on the exact artifact and emits one test result.
 | `ancestry` | children | the parent's filesystem is the base: for OCI, the parent's layers are the first layers by digest; elsewhere (Incus, OS root, installer kit), the parent's files are present unless the child's own records say it removed them (its provenance lists them, `removedFromParent`, written by the build from a comparison of the two roots), and the provenance names the parent |
 | `same-resolution` | core | a second resolution of the same lock gives the same package set |
 | `no-build-snapshot` | all | the build snapshot ID appears nowhere in the artifact's bytes, including the build-time `file://` source, which the `apt_sources` rendering replaces before the image is packed; skipped with a note when the baseline ID equals the build ID. A release test also builds one package set at two different build snapshots and compares the bytes |
-| `byte-equal` | all, optional | two builds from the same inputs give the same digest; WARNED, never FAILED, when they differ |
+| `byte-equal` | all, optional | two builds from the same inputs, in one run (so of one definition commit, which an OCI manifest's annotations carry, 5.3), give the same digest; WARNED, never FAILED, when they differ |
 | `oci-run` | oci | runs under rootless Docker: declared user and entrypoint, `cmd` exits 0 |
 | `incus-boot` | incus | in an Incus host inside a VM: cloud-init finishes through NoCloud from both `cloud-init.user-data` and `user.user-data`, creates the user, runs commands, an IPv4 address is reported, all still true after a restart |
 | `installer-boot` | installer | kit.json matches the kit's files; QEMU boots `vmlinuz` with `initrd.img` from RAM (`console=ttyS0`) to a serial report; the running kernel is kit.json's |
@@ -1366,7 +1384,9 @@ identities of the images that install it, and nothing else.
   the tag schema).
 - **The engine revision guard.** For every kind whose fixture build is byte-equal, the expected
   digest is recorded beside the engine revision. A change that alters those bytes without raising
-  the revision fails here. A kind not yet byte-equal relies on review: any change to its build code
+  the revision fails here. Only core is guarded today, and its bytes hold no commit; the day an OCI
+  image's digest is guarded, its fixture is built from a definition with no git remote, so the
+  expected digest does not move with the repository's HEAD (5.3). A kind not yet byte-equal relies on review: any change to its build code
   raises the revision.
 - QEMU with KVM: `installer-boot`, `os-boot`, `two-clones` for the installer and OS, and
   `incus-boot` in a Debian 13 VM with Incus from the same snapshot (6.0.4 in Debian 13). QEMU runs in
