@@ -1,6 +1,7 @@
-# The boot checks' integration tests on demand: a small OS root and installer kit built with mmdebstrap,
-# booted in QEMU (installer-boot, os-boot, two-clones). Run by hand from the Actions tab; a release runs
-# the same tests in its integration tier (release.yml).
+# The tests that boot images, on demand: the boot checks' (a small OS root and installer kit built with
+# mmdebstrap) and M5's acceptance (the example's installer and OS, built with a signed vendor .deb, a
+# feature flag and a moved baseline), booted in QEMU (installer-boot, os-boot, two-clones). Run by hand
+# from the Actions tab; a release runs the same tests in its integration tier (release.yml).
 #
 # Where it runs: while the repository is private, on the project's own self-hosted runners with the
 # capability label debian-image-factory-kvm (they can boot a VM with KVM); once it is public, on GitHub's
@@ -18,7 +19,7 @@ jobs:
     name: boot checks (QEMU)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ github.event.repository.private && 'debian-image-factory-kvm' || 'ubuntu-26.04' }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: System packages a bare runner lacks (git, gpgv and more)
         run: |
@@ -44,5 +45,5 @@ jobs:
           python-version: "3.15"
           activate-environment: true
 
-      - name: Boot checks' integration tests (docker, QEMU and the network)
+      - name: The tests that boot images (docker, QEMU and the network)
         run: scripts/test boot

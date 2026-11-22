@@ -177,8 +177,8 @@ Then build the core image and check it:
 ```sh
 scripts/builder build                      # the pinned builder image, from the factory's own snapshot
 debian-image-factory fetch plan.json       # every index and package the plan names, verified, in the cache
-debian-image-factory build plan.json --out out/    # core and OCI images, offline, in the builder container
-debian-image-factory test out/             # the core checks, recorded beside the artifact
+debian-image-factory build plan.json --out out/    # every kind, offline, in the builder container
+debian-image-factory test out/             # each kind's checks, recorded beside the artifact
 debian-image-factory publish out/ --to dir:///srv/images
 ```
 
@@ -205,6 +205,24 @@ its first boot. `test` proves that on an Incus host: `incus-boot` launches it wi
 `two-clones` launches two and compares their identities. Where no Incus host answers, both are reported
 as not run, never as passed; `scripts/incus-vm -- <command>` runs a command on an Incus host in a
 throwaway Debian 13 VM (KVM when the machine has it, emulated otherwise).
+
+An installer is a kit, `<name>.tar`, holding `kit.json` (its kernel version and the files' sizes and
+checksums), `vmlinuz` and `initrd.img`: the whole root as a RAM disk, for PXE or kexec. An OS image is a
+root filesystem tarball, `<name>.tar.gz`, with its kernel and initrd in `/boot`, for your installer to lay
+on a disk. Neither holds a machine ID or SSH host keys: both are made at the first boot. An OS image's
+own apt sources come from `apt_sources` (`baseline-except-security` points main and updates at the
+baseline and leaves security live), so moving the baseline rebuilds the OS images and nothing else.
+`scripts/builder vm` gives the image `test` boots them in: `installer-boot` boots the kit's kernel and
+initrd, `os-boot` the root on a disk by UEFI, and `two-clones` boots each twice and compares their
+identities, all in QEMU (KVM when `/dev/kvm` opens, emulated otherwise).
+
+Two more modules put files from the lock into images. `builtin:deb` installs a vendor's `.deb` with its
+dependencies from the snapshot, after checking the vendor repository's signed `InRelease` against a
+keyring the lock pins; the vendor's repository never enters the image's apt sources. `builtin:file`
+places any locked download at a path, or unpacks a tarball there. A module with `enabled_by = "<param>"`
+follows a flag of `[params]`: switched off, its entries leave every image and every identity. When a
+vendor's version moves, `debian-image-factory lock checksums --entry <name>` fills its checksum from the
+vendor's signed index.
 
 In GitHub Actions, one step runs the same thing nightly, and reports `changed=false` on the nights
 when there is nothing to do. The planned interface is in [DESIGN.md, section 9](DESIGN.md#9-running-it).
@@ -269,12 +287,14 @@ its partial mirror, an offline core build that gives the same bytes from the sam
 and provenance, the core checks behind `test`, and the `dir://` target. The third builds OCI images
 with one added layer per child, publishes them to registries with their records as referrers, and
 adds `verify`. The fourth builds Incus images and their children, boots them on an Incus host in
-`test`, and publishes files to GitHub releases. Installer and OS images come next, then the nightly
-"rebuild only what changed" loop. The milestones are in
+`test`, and publishes files to GitHub releases. The fifth builds installer kits and OS root filesystems
+and boots both in QEMU in `test`, with the `deb` and `file` modules, feature flags and `lock checksums`.
+The nightly "rebuild only what changed" loop comes next. The milestones are in
 [DESIGN.md, section 14](DESIGN.md#14-milestones).
 
 `scripts/test static`, `scripts/test unit` and `scripts/test integration` run the same checks CI
-does (the last needs Docker and network access to snapshot.debian.org). Issues and questions are
+does (the last needs Docker and network access to snapshot.debian.org); `scripts/test boot` runs only
+the tests that boot images, and `scripts/test matrix` the unit tier on the oldest and newest Python. Issues and questions are
 welcome.
 
 ## License

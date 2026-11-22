@@ -4,7 +4,8 @@
 #   scripts/test static        ruff, ruff format, mypy, check-ignores, shellcheck
 #   scripts/test unit          the unit tests (seconds, no network, no root)
 #   scripts/test integration   the slow tests, DIF_INTEGRATION=1 (network, docker)
-#   scripts/test boot          only the boot checks' integration tests (QEMU; KVM when /dev/kvm opens)
+#   scripts/test boot          only the tests that boot images: the boot checks' and M5's acceptance (QEMU;
+#                              KVM when /dev/kvm opens)
 #   scripts/test matrix        the unit tier in docker on the Python floor and on the newest stable
 #   scripts/test all           static, unit and matrix (add integration by naming it)
 #
@@ -103,7 +104,7 @@ case "$tier" in
 static) static ;;
 unit) unit_like unit ;;
 integration) unit_like integration DIF_INTEGRATION=1 ;;
-boot) UNITTEST_MODULES=tests.integration.test_boot_checks unit_like boot DIF_INTEGRATION=1 ;;
+boot) UNITTEST_MODULES="tests.integration.test_boot_checks tests.integration.test_m5_acceptance" unit_like boot DIF_INTEGRATION=1 ;;
 matrix) matrix ;;
 all)
     static
