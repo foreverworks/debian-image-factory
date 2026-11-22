@@ -18,7 +18,18 @@ from debian_image_factory.commands import Sources
 from debian_image_factory.planfile import read_plan
 from tests.support import newc
 from tests.support.ocimage import entry, plan_json
-from tests.support.rootfs import ARCH, BASE, IDENTITY, SUITE, Entry, clean_files, rootfs, sbom_line, write_artifact
+from tests.support.rootfs import (
+    ARCH,
+    BASE,
+    IDENTITY,
+    SUITE,
+    Entry,
+    clean_files,
+    provenance_line,
+    rootfs,
+    sbom_line,
+    write_artifact,
+)
 
 KERNEL = "6.12.0-1-amd64"
 OS_IDENTITY = "12" * 32
@@ -132,16 +143,15 @@ class Out:
         }
         (root / "plan.json").write_text(plan_json(images))
         self.core_path = core_path
+        # The build records no removal: the good child holds every file of the parent.
+        kit_files = [("vmlinuz", sums["vmlinuz"]), ("initrd.img", sums["initrd.img"])]
         (root / published.records_name_for(self.os_digest)).write_text(
-            sbom_line(self.os_path.name, self.os_digest, BOOT_PACKAGES)
+            provenance_line(self.os_path.name, self.os_digest, self.core_digest)
+            + sbom_line(self.os_path.name, self.os_digest, BOOT_PACKAGES)
         )
         (root / published.records_name_for(self.kit_digest)).write_text(
-            sbom_line(
-                self.kit_path.name,
-                self.kit_digest,
-                BOOT_PACKAGES,
-                more_subjects=[("vmlinuz", sums["vmlinuz"]), ("initrd.img", sums["initrd.img"])],
-            )
+            provenance_line(self.kit_path.name, self.kit_digest, self.core_digest, more_subjects=kit_files)
+            + sbom_line(self.kit_path.name, self.kit_digest, BOOT_PACKAGES, more_subjects=kit_files)
         )
 
     def run(self, boots: Boots, requested: Sequence[str] = (), parents: tuple[Path, ...] = ()) -> tuple[int, str]:
@@ -187,7 +197,7 @@ class BootKindsTest(unittest.TestCase):
         self.assertEqual(status, 0, text)
         self.assertEqual(sorted(boots.calls), sorted([(out.os_path.name, 2), (out.kit_path.name, 2)]))
         recorded = (out.root / f"{out.kit_digest}.intoto.jsonl").read_text()
-        self.assertEqual(len(records.decode_statements(recorded)), 1 + len(INSTALLER_CHECKS))
+        self.assertEqual(len(records.decode_statements(recorded)), 2 + len(INSTALLER_CHECKS))  # provenance, SBOM
 
     def test_one_boot_serves_the_boot_check_alone(self) -> None:
         out = Out(Path(self.tmp.name))

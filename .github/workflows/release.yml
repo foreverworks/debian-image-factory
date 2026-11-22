@@ -49,8 +49,9 @@ jobs:
   integration:
     name: integration tier
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ github.event.repository.private && 'debian-image-factory' || 'ubuntu-26.04' }}
-    timeout-minutes: 60
+    # the tier boots images in QEMU (installer, OS): a runner with KVM, as boot.yml uses
+    runs-on: ${{ github.event.repository.private && 'debian-image-factory-kvm' || 'ubuntu-26.04' }}
+    timeout-minutes: 120
     steps:
       - name: System packages a bare runner lacks (git, gpgv and more)
         run: |
@@ -62,6 +63,10 @@ jobs:
           command -v docker >/dev/null || sudo apt-get install -y -q --no-install-recommends docker.io
           docker info >/dev/null 2>&1 || sudo systemctl start docker >/dev/null 2>&1 || true
           docker info >/dev/null 2>&1 || sudo chmod 666 /var/run/docker.sock
+
+      - name: KVM for the runner's user, when the machine has it
+        run: |
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; else echo "no /dev/kvm: the boots run under TCG"; fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

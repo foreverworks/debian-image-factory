@@ -179,12 +179,17 @@ the digest the plan names for it (`artifact`), which is all the first layer need
 in OUT cannot be compared layer by layer, and neither can an image whose plan names no artifact for its
 parent: the check is then not run, with that reason, and never passed.
 
-For an OS root and an installer kit (whose root is its initrd) the test is `parent-files-present`: every
-path of the parent's root is in the child's, except the files of packages the child no longer installs
-(the parent's own dpkg file lists name them) and what every build cleans: device nodes, `/run`, `/tmp`,
-logs, apt's lists and caches, ldconfig's cache, dpkg's pending triggers, the apt sources each image
-renders for itself, and the machine identity files. The parent is the plan's parent image in OUT, or a
-file given with `test --parent`; when there are several, the one the plan names.
+For an OS root and an installer kit (whose root is its initrd) it reports two tests:
+
+- `parent-files-present`: every path of the parent's root is in the child's, except the ones the child's
+  provenance records as removed (`removedFromParent`, docs/build-type-v1.md). The build writes that list
+  by comparing the two roots, so whatever took a path (a package the child removed, the identity cleanup
+  every build runs, a hook that trims documentation) is named in the record a reviewer reads. A child
+  whose bytes no longer match its record fails, and so does one without the record.
+- `provenance-names-parent`: the child's provenance names this parent by digest.
+
+The parent is the plan's parent image in OUT, or a file given with `test --parent`; when there are
+several, the one the plan names.
 
 ## same-resolution
 

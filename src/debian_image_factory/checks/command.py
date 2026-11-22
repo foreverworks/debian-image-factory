@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import subprocess
 import tarfile
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -570,7 +571,9 @@ def parent_candidates(parent: str, plan: Plan, others: Sequence[Found], given: S
     return found
 
 
-def root_parent(found: Found, plan: Plan, others: Sequence[Found], given: Sequence[Path]) -> ancestry.ParentRoot | str:
+def root_parent(
+    found: Found, plan: Plan, others: Sequence[Found], given: Sequence[Path]
+) -> tuple[str, tuple[tarball.Member, ...]] | str:
     """The parent's root filesystem for `ancestry` of an OS root or an installer kit, or why it is not
     available. When there are several artifacts of the parent image, the one the plan names is taken."""
     parent = plan["images"][found.image]["parent"]
@@ -585,8 +588,40 @@ def root_parent(found: Found, plan: Plan, others: Sequence[Found], given: Sequen
         if candidates:
             return f"there are {len(candidates)} artifacts of the parent {parent} and the plan names none of them"
         return f"the parent {parent} is not in the output and not given with --parent"
-    scanned = scan_root(chosen.path, chosen.kind, frozenset(), None, False, ancestry.is_file_list)
-    return ancestry.ParentRoot(chosen.digest, scanned.members, scanned.contents)
+    scanned = scan_root(chosen.path, chosen.kind, frozenset(), None, False, tarball.keep_none)
+    return chosen.digest, scanned.members
+
+
+def recorded_removals(records_text: str | None, digest: str) -> list[str] | str:
+    """The paths the artifact's provenance says its build removed from the parent (`removedFromParent`), or
+    why they cannot be read. Several provenance records (a rebuild of the same bytes) must agree."""
+    if records_text is None:
+        return "there is no records file for this artifact"
+    try:
+        statements = records.decode_statements(records_text)
+    except records.RecordsError as error:
+        return f"the records file cannot be read: {error}"
+    found: list[list[str]] = []
+    for one in statements:
+        subjects, predicate = one.get("subject"), one.get("predicate")
+        if one.get("predicateType") != rec.PROVENANCE_PREDICATE or not isinstance(predicate, dict):
+            continue
+        if not isinstance(subjects, list) or not any(
+            isinstance(s, dict) and isinstance(s.get("digest"), dict) and s["digest"].get("sha256") == digest
+            for s in subjects
+        ):
+            continue
+        definition_ = predicate.get("buildDefinition")
+        internal = definition_.get("internalParameters") if isinstance(definition_, dict) else None
+        paths = internal.get("removedFromParent") if isinstance(internal, dict) else None
+        if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+            return "the provenance records no removedFromParent list"
+        found.append([str(path) for path in paths])
+    if not found:
+        return "there is no provenance for this artifact"
+    if any(paths != found[0] for paths in found):
+        return "the provenance records disagree on what the build removed from the parent"
+    return found[0]
 
 
 def uses_module_probes(entry: ImageEntry) -> bool:
@@ -713,11 +748,15 @@ def run_boot_kind_checks(
         elif name == NO_BUILD_SNAPSHOT:
             outcomes.append(snapshot.no_build_snapshot(plan["snapshot"], plan["baseline"], scanned.needle_hits))
         elif name == ANCESTRY:
-            installed = packages.installed(status)
-            names_installed = installed if isinstance(installed, str) else {p[0] for p in installed}
+            parent_root = root_parent(found, plan, others, effects.parents)
+            digest, members = ("", ()) if isinstance(parent_root, str) else parent_root
             outcomes.append(
                 ancestry.root_ancestry(
-                    scanned.members, names_installed, root_parent(found, plan, others, effects.parents)
+                    scanned.members,
+                    parent_root if isinstance(parent_root, str) else members,
+                    digest,
+                    parent_named(records_text, found.digest),
+                    recorded_removals(records_text, found.digest),
                 )
             )
         elif name == LOCKED_INPUTS:
@@ -820,7 +859,7 @@ def test_command(
             records_text = records_path.read_text(encoding="utf-8") if records_path.exists() else None
             outcomes = run_checks(one, names, plan, records_text, sources, effects, found)
             append_records(records_path, [test_result_line(one, o, url) for o in outcomes if isinstance(o, Result)])
-        except (OSError, EOFError, UnicodeDecodeError) as error:
+        except (OSError, EOFError, UnicodeDecodeError, zlib.error) as error:
             raise Failed(f"{one.path.name}: cannot be tested: {error}") from None
         except tarfile.TarError as error:
             raise Failed(f"{one.path.name}: is not a readable tarball: {error}") from None

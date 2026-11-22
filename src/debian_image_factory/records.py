@@ -297,6 +297,7 @@ def provenance_statement(
     version: str,
     started_on: str,
     finished_on: str,
+    removed_from_parent: Sequence[str] | None = None,
 ) -> Statement:
     """The SLSA v1 provenance of one artifact, as an in-toto Statement (DESIGN 8.2, docs/build-type-v1.md).
 
@@ -304,7 +305,9 @@ def provenance_statement(
     download of `entries`, `recipe of <image>`, each InRelease, the builder image, then the ancestors,
     nearest first: `parent: <name>` for the first, `ancestor: <name>` for each further one up to core (none
     for core itself). `reason` is recorded only when there is one. Every value is the caller's: nothing here
-    reads a clock, an environment or a file."""
+    reads a clock, an environment or a file. `removed_from_parent`, for an OS root or an installer kit, is
+    the parent's paths the artifact does not hold, sorted (internalParameters `removedFromParent`), which
+    `ancestry` holds the artifact to."""
     external: dict[str, JsonValue] = {"image": image}
     dependencies: list[ResourceDescriptor] = []
     if definition is not None:
@@ -321,6 +324,9 @@ def provenance_statement(
     }
     if reason:
         internal["reason"] = reason
+    if removed_from_parent is not None:
+        removed: list[JsonValue] = [str(path) for path in sorted(removed_from_parent)]
+        internal["removedFromParent"] = removed
     dependencies.extend(lock_dependencies(lock, entries))
     dependencies.append({"name": f"recipe of {image}", "digest": _sha256_of(recipe_digest, "the recipe digest")})
     dependencies.extend({"uri": one.uri, "digest": _sha256_of(one.sha256, one.uri)} for one in in_releases)

@@ -9,8 +9,7 @@ parent artifact's digest. Digests are sha256 in hex throughout.
 """
 
 import fnmatch
-import posixpath
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -88,129 +87,75 @@ def ancestry(layers: Sequence[str], annotations: Mapping[str, str], parent: Pare
     return result(ANCESTRY, [*ok_layers, *ok_base], failed=[*bad_layers, *bad_base])
 
 
+def parent_files(
+    child: Sequence[Member], parent: Sequence[Member], excused: Callable[[str], bool], describe: Callable[[str], str]
+) -> tuple[list[str], list[str]]:
+    """The one test both root ancestries share: (passed, failed) of `parent-files-present`, every path of
+    `parent` is in `child` but for the ones `excused` names. `describe` words a missing path."""
+    present = {member.path for member in child}
+    missing = sorted(member.path for member in parent if member.path not in present and not excused(member.path))
+    return split(PARENT_FILES, [describe(path) for path in missing])
+
+
+def names_parent(named: str | None, parent_digest: str) -> tuple[list[str], list[str]]:
+    """(passed, failed) of `provenance-names-parent`: the provenance names the parent artifact by digest."""
+    if named == parent_digest:
+        return [PROVENANCE_PARENT], []
+    return [], [f"{PROVENANCE_PARENT}: the provenance names {named or 'no parent'}, the parent is {parent_digest}"]
+
+
+def removed_by_every_build(path: str) -> bool:
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in REMOVED_BY_EVERY_BUILD)
+
+
 def files_ancestry(
     members: Sequence[Member], parent_members: Sequence[Member], parent_digest: str, named: str | None
 ) -> CheckOutcome:
     """`members` are the image's, `parent_members` its parent artifact's (digest `parent_digest`), and
     `named` the parent digest the image's provenance names. Every path of the parent is in the image,
     but what every build removes; the provenance names this parent."""
-    held = {member.path for member in members}
-    missing = sorted(
-        member.path
-        for member in parent_members
-        if member.path not in held
-        and not any(fnmatch.fnmatchcase(member.path, pattern) for pattern in REMOVED_BY_EVERY_BUILD)
+    ok_files, bad_files = parent_files(
+        members, parent_members, removed_by_every_build, lambda path: f"{path} is the parent's and not the image's"
     )
-    ok_files, bad_files = split(PARENT_FILES, [f"{path} is the parent's and not the image's" for path in missing])
-    if named == parent_digest:
-        ok_named, bad_named = [PROVENANCE_PARENT], []
-    else:
-        ok_named = []
-        bad_named = [f"{PROVENANCE_PARENT}: the provenance names {named or 'no parent'}, the parent is {parent_digest}"]
+    ok_named, bad_named = names_parent(named, parent_digest)
     return result(ANCESTRY, [*ok_files, *ok_named], failed=[*bad_files, *bad_named])
 
 
 # ---- root filesystems ------------------------------------------------------------------------------
 
-DPKG_INFO: Final = "/var/lib/dpkg/info/"
-
-CLEANED: Final = (
-    "/dev/",
-    "/run/",
-    "/tmp/",
-    "/var/tmp/",
-    "/var/log/",
-    "/var/cache/apt/",
-    "/var/cache/ldconfig/",
-    "/var/lib/apt/lists/",
-    "/var/lib/dpkg/triggers/",
-    "/var/lib/dpkg/updates/",
-    "/etc/apt/sources.list.d/",
-)
-"""Trees whose content a child's build replaces as a matter of course (DESIGN 5.3): device nodes (the booted
-system mounts devtmpfs), run and temporary files, logs, apt's and ldconfig's caches and lists, dpkg's
-pending triggers and updates, and the apt sources each image renders for itself (`apt_sources`)."""
-CLEANED_FILES: Final = frozenset(
-    (
-        "/etc/apt/sources.list",
-        "/etc/hostname",
-        "/etc/resolv.conf",
-        "/var/lib/dbus/machine-id",
-        "/var/lib/systemd/random-seed",
-        "/var/lib/urandom/random-seed",
-    )
-)
-"""Files the identity cleanup removes from every image (DESIGN 5.3), and the sources file `apt_sources`
-renders."""
-SSH_HOST_KEY_PREFIX: Final = "/etc/ssh/ssh_host_"
+ROOT: Final = "/"
+"""The root directory: always there, and not a member of a layer-style tarball (layer.py writes none)."""
 
 
-@dataclass(frozen=True, slots=True)
-class ParentRoot:
-    """A parent's root filesystem as far as `ancestry` needs it: its digest, every member, and the content of
-    its dpkg file lists (`/var/lib/dpkg/info/<package>[:<arch>].list`) by path."""
-
-    digest: str
-    members: tuple[Member, ...]
-    lists: Mapping[str, bytes]
+def removed_from_parent(child: Sequence[Member], parent: Sequence[Member]) -> list[str]:
+    """The parent's paths the child does not hold, sorted: what the build records it removed (its provenance's
+    `removedFromParent`), whether a package's removal, the identity cleanup or a hook took them."""
+    present = {member.path for member in child}
+    return sorted({member.path for member in parent if member.path != ROOT and member.path not in present})
 
 
-def is_file_list(path: str) -> bool:
-    return path.startswith(DPKG_INFO) and path.endswith(".list") and "/" not in path[len(DPKG_INFO) :]
-
-
-def package_of(info_path: str) -> str:
-    """The package a `/var/lib/dpkg/info/<package>[:<arch>].<suffix>` file belongs to."""
-    base = posixpath.basename(info_path)
-    return base.rsplit(".", 1)[0].split(":", 1)[0]
-
-
-def listed_paths(list_text: bytes) -> set[str]:
-    """The paths of one dpkg file list (`/.` is the root)."""
-    found = set()
-    for line in list_text.decode("utf-8", "surrogateescape").splitlines():
-        if line.startswith("/"):
-            found.add(posixpath.normpath(line))
-    return found
-
-
-def cleaned(path: str) -> bool:
-    return (
-        path in CLEANED_FILES
-        or path.startswith(CLEANED)
-        or path.startswith(SSH_HOST_KEY_PREFIX)
-        or path + "/" in CLEANED
-    )
-
-
-def removed_by_packages(parent: ParentRoot, installed: Collection[str]) -> set[str]:
-    """The parent's paths that belong to packages the child no longer installs: what each one's file list
-    names, and the package's own dpkg info files."""
-    gone: set[str] = set()
-    for path, text in parent.lists.items():
-        if package_of(path) not in installed:
-            gone |= listed_paths(text)
-    gone |= {m.path for m in parent.members if m.path.startswith(DPKG_INFO) and package_of(m.path) not in installed}
-    return gone
-
-
-def root_ancestry(child: Sequence[Member], installed: Collection[str] | str, parent: ParentRoot | str) -> CheckOutcome:
-    """Every path of the parent's root is in the child's, but for paths of packages the child no longer
-    installs (`installed` is the child's installed package names, from its dpkg status, which `package-set`
-    and `sbom-complete` hold to its plan and its records; or why they cannot be read) and the trees every
-    build cleans (CLEANED). A parent that is not here is not run, never passed."""
+def root_ancestry(
+    child: Sequence[Member],
+    parent: Sequence[Member] | str,
+    parent_digest: str,
+    named: str | None,
+    recorded: Collection[str] | str,
+) -> CheckOutcome:
+    """`ancestry` of an OS root or an installer kit's root. `parent` is the parent artifact's members (or why
+    they cannot be read), `named` the parent digest the child's provenance names, `recorded` the paths its
+    provenance says the build removed from the parent (or why they cannot be read). Every path of the parent
+    is in the child but for the recorded ones, and the provenance names this parent. A parent that is not
+    here is not run, never passed."""
     if isinstance(parent, str):
         return NotRun(ANCESTRY, parent)
-    if isinstance(installed, str):
-        return result(ANCESTRY, [], failed=[f"dpkg-status-readable: {installed}"])
-    present = {member.path for member in child}
-    removed = removed_by_packages(parent, installed)
-    missing = sorted(
-        member.path
-        for member in parent.members
-        if member.path not in present and member.path not in removed and not cleaned(member.path)
+    if isinstance(recorded, str):
+        return result(ANCESTRY, [], failed=[f"{PARENT_FILES}: {recorded}"])
+    excused = set(recorded)
+    ok_files, bad_files = parent_files(
+        child,
+        parent,
+        lambda path: path == ROOT or path in excused,
+        lambda path: f"{path} is in the parent sha256:{parent_digest[:12]}, not here and not recorded as removed",
     )
-    ok, bad = split(
-        PARENT_FILES, [f"{path} is in the parent sha256:{parent.digest[:12]} and not here" for path in missing]
-    )
-    return result(ANCESTRY, ["dpkg-status-readable", *ok], failed=bad)
+    ok_named, bad_named = names_parent(named, parent_digest)
+    return result(ANCESTRY, [*ok_files, *ok_named], failed=[*bad_files, *bad_named])

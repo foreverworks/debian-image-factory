@@ -17,6 +17,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,6 +51,7 @@ from .. import (
 )
 from .. import plan as plan_module
 from .. import tools as builder
+from ..checks import ancestry, kit, tarball
 from ..identity import FileFact
 from ..published import artifact_name, records_name_for
 from . import boot, booting, core, initrd, parents
@@ -365,7 +367,7 @@ def check_gzip(path: Path) -> None:
         with gzip.open(path, "rb") as handle:
             while handle.read(1 << 20):
                 pass
-    except (OSError, EOFError) as error:
+    except (OSError, EOFError, zlib.error) as error:
         raise commands.Failed(f"{path.name}: the builder's output is not a complete gzip stream: {error}") from None
 
 
@@ -464,6 +466,7 @@ def image_records(
     finished: str,
     ancestors: Sequence[records.Parent] = (),
     files: Sequence[tuple[str, str]] = (),
+    removed_from_parent: Sequence[str] | None = None,
 ) -> list[Statement]:
     """Provenance and SBOM of one artifact (DESIGN 8.2). `ancestors` are the images it descends from,
     nearest first (none for core). The artifact is the first subject, under `name` and `digest`; `files`
@@ -494,6 +497,7 @@ def image_records(
         version=__version__,
         started_on=started,
         finished_on=finished,
+        removed_from_parent=removed_from_parent,
     )
     sbom = records.sbom(
         image=image,
@@ -938,7 +942,7 @@ def kit_subjects(kit: Path) -> tuple[str, list[tuple[str, str]]]:
     and `initrd.img` by sha256, once the kit's layout and every digest kit.json names are checked."""
     try:
         described = initrd.read_kit(str(kit))
-    except (initrd.InitrdError, OSError, tarfile.TarError) as error:
+    except (initrd.InitrdError, OSError, tarfile.TarError, EOFError, zlib.error) as error:
         raise commands.Failed(f"the builder's kit is not one: {error}") from None
     files = described["files"]
     kernel = described.get("kernel")
@@ -948,6 +952,20 @@ def kit_subjects(kit: Path) -> tuple[str, list[tuple[str, str]]]:
     return kernel, [(name, str(files[name]["sha256"])) for name in initrd.KIT_MEMBERS[1:]]
 
 
+def root_members(path: Path, kind: str) -> tuple[tarball.Member, ...]:
+    """Every member of the root filesystem an artifact holds: an installer kit's initrd, or a tarball's."""
+    if kind == "installer":
+        return kit.scan_kit(path, frozenset(), None, False, tarball.keep_none).members
+    return tarball.scan_tarball(path, frozenset(), None, False, tarball.keep_none).members
+
+
+def removed_from(parent: parents.ParentArtifact, packed: Path, kind: str) -> list[str]:
+    """The parent's paths the new root does not hold, for its provenance (DESIGN 11, `ancestry`)."""
+    if parent.path is None:
+        raise commands.Failed(f"the parent {parent.image} of a booting image has no artifact file here")
+    return ancestry.removed_from_parent(root_members(packed, kind), root_members(parent.path, parent.kind))
+
+
 def build_booting(run: Run, image: str, scratch: Path, built: Mapping[str, parents.ParentArtifact]) -> Result:
     """One installer or os image: its parent's filesystem, the child build, then the kit or the root
     filesystem tarball and its records (DESIGN 5.3, 8.1)."""
@@ -955,7 +973,7 @@ def build_booting(run: Run, image: str, scratch: Path, built: Mapping[str, paren
     kind = entry["kind"]
     debian_ = run.plan["debian"]
     parent = find_parent(run, image, scratch, built)
-    ancestors = parents.file_ancestors(parent, find_by_name(run, built))
+    ancestors = parents.ancestry(parent, find_by_name(run, built))
     work = scratch / "factory"
     prepare_work(
         work,
@@ -996,6 +1014,7 @@ def build_booting(run: Run, image: str, scratch: Path, built: Mapping[str, paren
         finished=finished,
         ancestors=ancestors,
         files=also,
+        removed_from_parent=removed_from(parent, packed, kind),
     )
     # Records first, as for core.
     (run.out_dir / records_name_for(digest)).write_text(records.record_lines(statements))

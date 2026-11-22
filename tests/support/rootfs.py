@@ -113,6 +113,30 @@ def plan_text(
     return json.dumps(plan)
 
 
+def provenance_line(
+    name: str,
+    digest: str,
+    parent_digest: str,
+    removed: Sequence[str] = (),
+    more_subjects: Sequence[tuple[str, str]] = (),
+) -> str:
+    """One records line: an OS root's or an installer kit's provenance as far as `ancestry` reads it, naming the
+    parent core by digest and the parent paths the build removed (`removedFromParent`)."""
+    build = rec.statement(
+        [rec.subject(name, digest), *(rec.subject(one, sha256) for one, sha256 in more_subjects)],
+        rec.PROVENANCE_PREDICATE,
+        rec.provenance(
+            "https://example.com/build-type",
+            {"image": name},
+            [{"name": "parent: core", "digest": {"sha256": parent_digest}}],
+            "https://example.com/builder",
+            internal_parameters={"identity": "0" * 64, "removedFromParent": [str(path) for path in removed]},
+            metadata={"finishedOn": "2026-11-21T02:19:41Z"},
+        ),
+    )
+    return rec.jsonl([rec.envelope(build)])
+
+
 def sbom_line(
     name: str,
     digest: str,

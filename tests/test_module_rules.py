@@ -196,7 +196,7 @@ class InstallLinesTest(unittest.TestCase):
         )
         self.assertEqual(
             lines[1],
-            f'python3 {core.WORK}/file_install.py "$root" '
+            f'python3 -I {core.WORK}/file_install.py "$root" '
             "/factory/run/inputs/blob/tool-3.1.tar.gz /opt/tool 9 --mode 0755",
         )
 
@@ -235,9 +235,14 @@ class AptLinesTest(unittest.TestCase):
                 "/run/factory/debs/example-tool_2.4.0-1_amd64.deb"
             ],
         )
-        self.assertIn(f'install -m 0644 {DEB_PATH} "$root/run/factory/debs/example-tool_2.4.0-1_amd64.deb"', lines)
+        self.assertIn(f'install -m 0644 {DEB_PATH} "$root"/run/factory/debs/example-tool_2.4.0-1_amd64.deb', lines)
         self.assertLess(lines.index('mkdir -p "$root/run/factory/debs"'), lines.index(installs[0]))
         self.assertEqual(lines[-1], 'rm -rf "$root/run/factory/debs"')
+
+    def test_a_deb_name_reaches_the_shell_quoted(self) -> None:
+        lines = oci_build.install_lines(["aa"], ["/factory/run/inputs/x/a$(id).deb"])
+        quoted = "install -m 0644 '/factory/run/inputs/x/a$(id).deb' \"$root\"'/run/factory/debs/a$(id).deb'"
+        self.assertIn(quoted, lines)
 
     def test_without_debs_the_lines_are_as_before(self) -> None:
         self.assertEqual(

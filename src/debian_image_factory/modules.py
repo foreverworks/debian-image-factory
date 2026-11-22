@@ -129,7 +129,7 @@ def file_lines(module: Module, entries: Mapping[str, Fields], *, inputs: str, so
     verb = "unpacked into" if filemodule.unpacks(module.table) else "placed at"
     return [
         f"# {module.name}: {name} {verb} {path}, by the builder's python3 (the image may have no tar or python)",
-        f'python3 {core.WORK}/{FILE_INSTALL} "$root" {arguments}',
+        f'python3 -I {core.WORK}/{FILE_INSTALL} "$root" {arguments}',
     ]
 
 

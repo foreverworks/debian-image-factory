@@ -44,6 +44,7 @@ These are values the factory worked out. They explain the build; a verifier does
 | `buildSnapshot` | The Debian archive snapshot the package versions were resolved against, as a `snapshot.debian.org` timestamp. |
 | `architecture` | The CPU architecture, as Debian names it (`amd64`). |
 | `reason` | Why this build happened when the identity alone does not say, for example a package version that moved. Present only when there is one. |
+| `removedFromParent` | For an OS root and an installer kit: the absolute paths of the parent's root that this artifact's root does not hold, sorted (the root directory itself is never listed). Packages the child removed, the identity cleanup and the child's hooks all show here. The `ancestry` check holds the artifact to it. |
 
 **The build snapshot is recorded here and nowhere else.** It decides which versions were picked,
 and the picked versions are in the package list, so it is not an input and it is not in the
