@@ -19,7 +19,7 @@ import tempfile
 import time
 import zlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
@@ -46,6 +46,7 @@ from .. import (
     published,
     records,
     registry,
+    replay,
     resolve,
     squashfs,
 )
@@ -1039,8 +1040,12 @@ def build_booting(run: Run, image: str, scratch: Path, built: Mapping[str, paren
     return Result(parents.ParentArtifact(image, kind, name, digest, run.out_dir / name), len(packages))
 
 
-def split_parent_targets(texts: Sequence[str]) -> tuple[list[Path], list[published.OciTarget]]:
-    """The `--parents` targets: where parents not built in this run may be, `dir://` and `oci://`."""
+def split_parent_targets(
+    texts: Sequence[str], *, offline: bool = False
+) -> tuple[list[Path], list[published.OciTarget]]:
+    """The `--parents` targets: where parents not built in this run may be, `dir://` and `oci://`.
+
+    Offline, a registry is refused: nothing may pull, so the parent must be given as a local `dir://`."""
     directories: list[Path] = []
     registries: list[published.OciTarget] = []
     for text in texts:
@@ -1051,14 +1056,25 @@ def split_parent_targets(texts: Sequence[str]) -> tuple[list[Path], list[publish
         if isinstance(target, published.DirTarget):
             directories.append(Path(target.path))
         elif isinstance(target, published.OciTarget):
+            if offline:
+                raise commands.Usage(
+                    f"--parents {text}: --offline reads nothing from a registry; "
+                    "give the parent as dir://PATH (an .oci layout or its tarball), or build it in this run"
+                )
             registries.append(target)
         else:
             raise commands.Usage(f"--parents {text}: a github-release:// target holds no parents; use dir:// or oci://")
     return directories, registries
 
 
+def offline_read(url: str) -> bytes:
+    """The reader of an offline build: any attempt to read a URL is a hard error, so no code path of the
+    factory process can reach a network while `--offline` holds."""
+    raise commands.Failed(f"--offline: refusing to read {url}: this build may not use the network")
+
+
 def build_command(
-    plan_path: Path,
+    plan_path: Path | None,
     lock_path: Path,
     definition_path: Path,
     sources: commands.Sources,
@@ -1068,10 +1084,54 @@ def build_command(
     builder_image: str,
     out: TextIO,
     parent_targets: Sequence[str] = (),
+    offline: bool = False,
+    bundle: Path | None = None,
 ) -> int:
-    plan_bytes = commands.read_text(plan_path)
+    """`build`. With `bundle`, the build is a replay: the bundle is unpacked as the download cache (in a scratch
+    directory of `out_dir`), checked against its manifest, and the one image it was fetched for is built from
+    its own plan. A replay is offline by definition, so `bundle` implies `offline`."""
+    offline = offline or bundle is not None
+    if offline:
+        sources = replace(sources, read=offline_read)
+    directories, registries = split_parent_targets(parent_targets, offline=offline)
+    if bundle is None:
+        if plan_path is None:
+            raise commands.Usage("build needs the plan (PLAN), or an inputs bundle (--bundle FILE) that carries one")
+        return build_plan(
+            commands.read_text(plan_path), plan_path, lock_path, definition_path, sources,
+            out_dir=out_dir, images=images, builder_image=builder_image, out=out,
+            directories=directories, registries=registries,
+        )  # fmt: skip
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".bundle-", dir=out_dir) as scratch:
+        replay_ = replay.open_replay(bundle, Path(scratch), plan_path)
+        if images and list(images) != [replay_.image]:
+            raise commands.Usage(f"--image {', '.join(images)}: {bundle.name} holds the inputs of {replay_.image} only")
+        return build_plan(
+            replay_.plan.decode("utf-8"), bundle, lock_path, definition_path, replace(sources, cache=replay_.cache),
+            out_dir=out_dir, images=[replay_.image], builder_image=builder_image, out=out,
+            directories=directories, registries=registries,
+        )  # fmt: skip
+
+
+def build_plan(
+    plan_text: str,
+    plan_path: Path,
+    lock_path: Path,
+    definition_path: Path,
+    sources: commands.Sources,
+    *,
+    out_dir: Path,
+    images: Sequence[str],
+    builder_image: str,
+    out: TextIO,
+    directories: Sequence[Path],
+    registries: Sequence[published.OciTarget],
+) -> int:
+    """Build the images of the plan text `plan_text` (read from `plan_path`, or from a bundle) from the cache
+    in `sources`."""
     try:
-        plan = planfile.parse_plan(json.loads(plan_bytes))
+        plan = planfile.parse_plan(json.loads(plan_text))
     except ValueError as error:
         raise commands.Failed(f"{plan_path}: {error}") from None
     loaded = commands.load(lock_path, definition_path)
@@ -1085,7 +1145,6 @@ def build_command(
         )
     except ValueError as error:
         raise commands.Failed(f"{plan_path}: {error}") from None
-    directories, registries = split_parent_targets(parent_targets)
     chosen = selected(plan, images, out)
     if not chosen:
         print("nothing to build", file=out)
@@ -1098,7 +1157,7 @@ def build_command(
     builder_ = open_builder(builder_image)
     source = definition_source(definition_path)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / PLAN_COPY).write_text(plan_bytes)
+    (out_dir / PLAN_COPY).write_text(plan_text)
     run = Run(plan, lock, loaded, sources, mirror, releases, builder_, source, out_dir, directories, registries)
     built: dict[str, parents.ParentArtifact] = {}
     for image in chosen:

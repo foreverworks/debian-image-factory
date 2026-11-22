@@ -8,6 +8,11 @@ as `plan` laid them out, plus the pool files, hard-linked from the cache. Every 
 installs is downloaded the same way, checked against the lock's checksums and stored in the cache by
 sha256 (`input_path` says where).
 
+Only the images whose state is `build` are fetched for: a `reuse` or `wait` image needs nothing, and a child that
+builds needs only the packages it adds to its parent, which is an artifact, not an input. A plan where nothing
+builds fetches nothing. With `--bundle`, one inputs bundle per building image is written (`bundle.py`): the
+signed indices, that image's pool files and its locked inputs, enough to build it with the network cut.
+
 A file that does not match is refused, naming its URL, and never tried from another source: a mirror or
 cache is a performance layer, never an authority (7.7). Reads go through `Sources.read`, so tests and
 `--mirror` use the same code as snapshot.debian.org.
@@ -41,8 +46,8 @@ from input_lock import Package, Value
 from input_lock.fetch import gpgv
 from input_lock.signed import dearmor, listed, sums_name
 
-from . import archive, debian, records, resolve, vendordeb
-from .commands import Failed, Sources, Usage
+from . import archive, bundle, debian, records, resolve, vendordeb
+from .commands import Failed, Sources
 from .planfile import ImageEntry, Plan, read_plan
 
 CHECKSUMS: Final = (("sha256", 64, hashlib.sha256), ("sha512", 128, hashlib.sha512), ("sha1", 40, hashlib.sha1))
@@ -83,6 +88,19 @@ class AptVouched:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageFetch:
+    """What one image that builds needs from the network."""
+
+    image: str
+    identity: str
+    packages: tuple[Package, ...]
+    """What its build installs on top of its parent's filesystem, vendor .deb files left out: the pool files
+    it needs. A parent's own packages come with the parent artifact."""
+    inputs: tuple[LockedInput, ...]
+    """Every locked input the image installs, sorted by name: the build stages each of them."""
+
+
+@dataclass(frozen=True, slots=True)
 class FetchPlan:
     """What `fetch` reads of a plan.json: the snapshot, where to look, and everything to fetch."""
 
@@ -91,13 +109,17 @@ class FetchPlan:
     components: tuple[str, ...]
     architecture: str
     packages: tuple[Package, ...]
-    """The union of every image's resolved set, sorted."""
+    """The union of the pool files every image that builds needs, sorted."""
     inputs: tuple[LockedInput, ...]
-    """Every locked input of every image, once each, sorted."""
+    """Every locked input of every image that builds, once each, sorted."""
     vouched: tuple[Vouched, ...]
-    """Every input with a signed checksum list, once each, sorted."""
+    """Every input of those images with a signed checksum list, once each, sorted."""
     apt: tuple[AptVouched, ...] = ()
-    """Every vendor .deb, once each, sorted."""
+    """Every vendor .deb of those images, once each, sorted."""
+    images: tuple[ImageFetch, ...] = ()
+    """The images whose state is `build`, by name."""
+    skipped: tuple[str, ...] = ()
+    """The images that need nothing from the network (`reuse` and `wait`), by name."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,29 +200,50 @@ def apt_inputs(image: str, entry: ImageEntry, architecture: str) -> list[AptVouc
 
 
 def fetch_plan(plan: Plan) -> FetchPlan:
-    """What fetch needs of a plan: the union of every image's packages and locked inputs. A vendor .deb is a
-    locked input, not a snapshot package: it leaves `packages` (in every image, its descendants included)."""
+    """What fetch needs of a plan: for every image that builds, the packages it adds to its parent's and its locked
+    inputs. A vendor .deb is a locked input, not a snapshot package. An image that is reused or waits is skipped:
+    its artifact exists or is not wanted, so nothing it names is read."""
     packages: set[Package] = set()
     inputs: set[LockedInput] = set()
     vouched: set[Vouched] = set()
     apt: set[AptVouched] = set()
+    images: list[ImageFetch] = []
+    skipped: list[str] = []
     architecture = plan["debian"]["architecture"]
     for image, entry in sorted(plan["images"].items()):
-        packages.update(entry["packages"])
-        inputs.update(locked_input(image, name, fields) for name, fields in sorted(entry["inputs"].items()))
+        if entry["state"] != "build":
+            skipped.append(image)
+            continue
+        parent = plan["images"].get(entry["parent"]) if entry["parent"] is not None else None
+        inherited = set(parent["packages"]) if parent is not None else set()
+        own_apt = apt_inputs(image, entry, architecture)
+        vendor = {(item.pin.package, item.pin.version) for item in own_apt}
+        own = tuple(
+            sorted(package for package in entry["packages"] if package not in inherited and package[:2] not in vendor)
+        )
+        own_inputs = tuple(
+            sorted(
+                (locked_input(image, name, fields) for name, fields in entry["inputs"].items()),
+                key=lambda item: (item.name, item.url, item.checksums),
+            )
+        )
+        images.append(ImageFetch(image, entry["identity"], own, own_inputs))
+        packages.update(own)
+        inputs.update(own_inputs)
         vouched.update(vouched_inputs(image, entry))
-        apt.update(apt_inputs(image, entry, architecture))
-    vendor = {(item.pin.package, item.pin.version) for item in apt}
+        apt.update(own_apt)
     debian_ = plan["debian"]
     return FetchPlan(
         plan["snapshot"],
         debian_["suite"],
         debian_["components"],
         architecture,
-        tuple(sorted(package for package in packages if package[:2] not in vendor)),
+        tuple(sorted(packages)),
         tuple(sorted(inputs, key=lambda item: (item.name, item.url, item.checksums))),
         tuple(sorted(vouched, key=lambda item: (item.entry.name, item.entry.url, item.keyring.name))),
         tuple(sorted(apt, key=lambda item: (item.entry.name, item.entry.url, item.keyring.name))),
+        tuple(images),
+        tuple(skipped),
     )
 
 
@@ -635,11 +678,81 @@ def open_indices(plan: FetchPlan, sources: Sources) -> list[archive.SuiteIndex]:
         raise Failed(str(error)) from None
 
 
-def fetch_command(plan_path: Path, sources: Sources, *, bundle: bool, out: TextIO) -> int:
-    """`fetch`: indices, pool files, locked inputs and the partial mirror. Returns the exit status (0)."""
-    if bundle:
-        raise Usage("inputs bundles arrive in a later release (milestone M6)")
+def cache_relative(cache: Path, path: Path) -> str:
+    return path.relative_to(cache).as_posix()
+
+
+def bundle_files(
+    image: ImageFetch,
+    plan: FetchPlan,
+    indices: Sequence[archive.SuiteIndex],
+    found: Mapping[Package, PoolFile],
+    cache: Path,
+) -> dict[str, Path]:
+    """The files of one image's bundle, by member name (under `cache/`) to the file `fetch` just left in the cache.
+
+    The signed indices of every suite, the pool files of the packages the image adds, and its locked inputs with
+    the signed lists that vouched for them (`vouched_by`: what the build reads for provenance). Nothing else of
+    the cache or the mirror, which may hold other plans' files."""
+    mirror = cache_relative(cache, mirror_dir(cache, plan.snapshot))
+    relative: set[str] = set()
+    for index in indices:
+        dist = f"{mirror}/{archive.archive_name(index.base_url)}/dists/{index.dist}"
+        relative.add(f"{dist}/InRelease")
+        relative.update(f"{dist}/{path}" for path, _local in index.files)
+    for package in image.packages:
+        relative.update(f"{mirror}/{archive_}/{filename}" for archive_, _url, filename in found[package].locations)
+    for item in image.inputs:
+        relative.add(cache_relative(cache, archive.cache_path(cache, item.sha256)))
+        noted = vouched_by(cache, item.sha256)
+        if noted:
+            relative.add(cache_relative(cache, note_path(cache, item.sha256)))
+            relative.update(cache_relative(cache, archive.cache_path(cache, one.sha256)) for one in noted)
+    return {f"{bundle.CACHE}/{name}": cache / name for name in sorted(relative)}
+
+
+def write_bundles(
+    plan: FetchPlan,
+    plan_path: Path,
+    indices: Sequence[archive.SuiteIndex],
+    found: Mapping[Package, PoolFile],
+    cache: Path,
+    directory: Path,
+    out: TextIO,
+) -> None:
+    """One inputs bundle per image that builds, in `directory` (DESIGN 7.7): a bundle holds the plan, its manifest
+    and the files `bundle_files` names. Two fetches of one plan write the same bytes."""
+    for image in plan.images:
+        files = bundle_files(image, plan, indices, found, cache)
+        members = [bundle.hashed(bundle.PLAN, plan_path)] + [bundle.hashed(name, path) for name, path in files.items()]
+        manifest = bundle.manifest_bytes(
+            image=image.image,
+            identity=image.identity,
+            snapshot=plan.snapshot,
+            suite=plan.suite,
+            architecture=plan.architecture,
+            members=members,
+        )
+        target = directory / bundle.bundle_name(image.image, plan.suite, plan.architecture, image.identity)
+        try:
+            bundle.write(target, manifest, members)
+        except OSError as error:
+            raise Failed(f"cannot write the bundle {target}: {error.strerror or error}") from None
+        print(f"bundle: {target} ({len(members)} files, {target.stat().st_size} bytes)", file=out)
+
+
+def fetch_command(
+    plan_path: Path, sources: Sources, *, bundle: bool, out: TextIO, bundle_dir: Path | None = None
+) -> int:
+    """`fetch`: indices, pool files, locked inputs and the partial mirror, for the images that build; with
+    `bundle`, also one inputs bundle per such image in `bundle_dir` (default `bundles/` beside the plan).
+    Returns the exit status (0)."""
     plan = load_plan(plan_path)
+    if not plan.images:
+        print(f"nothing to fetch: no image builds ({len(plan.skipped)} are reused or wait)", file=out)
+        if bundle:
+            print("bundles: none written, no image builds", file=out)
+        return 0
     indices = open_indices(plan, sources)
     try:
         found, problems = pool_files(indices, plan.packages)
@@ -691,6 +804,8 @@ def fetch_command(plan_path: Path, sources: Sources, *, bundle: bool, out: TextI
         lay_out_pool(mirror, sources.cache, found)
     except (archive.ArchiveError, OSError) as error:
         raise Failed(f"cannot lay out the mirror {mirror}: {error}") from None
+    if plan.skipped:
+        print(f"images: {len(plan.images)} build, {len(plan.skipped)} need nothing (reuse or wait)", file=out)
     print(f"suites: {len(indices)} verified at snapshot {plan.snapshot}", file=out)
     print(f"packages: {fetched} fetched, {reused} already cached ({len(found)} in all)", file=out)
     print(f"inputs: {inputs_fetched} fetched, {inputs_reused} already cached ({len(plan.inputs)} in all)", file=out)
@@ -701,4 +816,7 @@ def fetch_command(plan_path: Path, sources: Sources, *, bundle: bool, out: TextI
             file=out,
         )
     print(f"mirror: {mirror}", file=out)
+    if bundle:
+        directory = bundle_dir if bundle_dir is not None else plan_path.resolve().parent / "bundles"
+        write_bundles(plan, plan_path, indices, found, sources.cache, directory, out)
     return 0

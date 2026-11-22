@@ -176,18 +176,26 @@ Then build the core image and check it:
 
 ```sh
 scripts/builder build                      # the pinned builder image, from the factory's own snapshot
-debian-image-factory fetch plan.json       # every index and package the plan names, verified, in the cache
+debian-image-factory fetch plan.json       # the indices, packages and inputs of the images that build, verified, in the cache
 debian-image-factory build plan.json --out out/    # every kind, offline, in the builder container
 debian-image-factory test out/             # each kind's checks, recorded beside the artifact
 debian-image-factory publish out/ --to dir:///srv/images
 ```
 
 `build` needs Docker and nothing from the network: it reads the partial mirror
-`fetch` laid out. Each artifact lands in `out/` with its records in `<digest>.intoto.jsonl`: SLSA
+`fetch` laid out. `fetch` reads only for the images the plan says to build, and for a child only the
+packages it adds to its parent, which is an artifact. Each artifact lands in `out/` with its records in `<digest>.intoto.jsonl`: SLSA
 provenance, an SPDX SBOM and one test result per check. An OCI image lands as a directory
 `<image>-<suite>-<arch>-<identity16>-<digest12>.oci`, an OCI image layout: its parent's layers (for
 core's child, core's tarball itself) and at most one layer of its own. Plan again with `--against
 dir:///srv/images` and the core you just published reads `reuse`.
+
+To keep an image's exact inputs, `fetch plan.json --bundle` writes one `.inputs.tar` per image that
+builds, into `bundles/` beside the plan (or `--bundle-dir DIR`). It holds the signed indices, the
+packages and the locked inputs of that image, and a manifest of every file's sha256; two fetches of
+one plan write the same bytes. `build --offline --bundle FILE --out out/` rebuilds that image from
+the bundle alone, with the factory itself unable to use the network: the bundle carries its plan,
+so the plan argument is optional. A child's parent is found in `out/` or through `--parents dir://`.
 
 OCI images publish to a registry instead: `publish out/ --to oci://ghcr.io/example/debian` pushes
 each image under the tag `identity-<identity>` and attaches its records as referrers, and `plan

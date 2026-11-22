@@ -1,8 +1,8 @@
 """The command line (DESIGN 9.1). Exit codes: 0 done, 1 a check or validation failed, 2 usage.
 
-This release has `lock check`, `lock snapshot`, `lock checksums`, `lock baseline`, `plan`, `fetch`, `build`
-(core, oci, incus, installer and os), `test`, `publish` (to `dir://`, `oci://` and `github-release://`) and
-`verify` and `prune`; the other commands arrive in later releases.
+This release has `lock check`, `lock snapshot`, `lock checksums`, `lock baseline`, `plan`, `fetch` (with inputs
+bundles), `build` (core, oci, incus, installer and os; offline, and replayed from a bundle), `test`, `publish` (to
+`dir://`, `oci://` and `github-release://`), `verify` and `prune`; the other commands arrive in later releases.
 """
 
 import argparse
@@ -93,12 +93,26 @@ def parser() -> argparse.ArgumentParser:
     fetch_ = commands_.add_parser("fetch", help="download what a plan names and lay out the partial mirror")
     fetch_.add_argument("plan", type=Path, metavar="PLAN", help="the plan.json the plan command wrote")
     sources_options(fetch_)
-    fetch_.add_argument("--bundle", action="store_true", help="also write an inputs bundle per image (not yet)")
+    fetch_.add_argument(
+        "--bundle", action="store_true", help="also write one inputs bundle per image that builds, for offline replay"
+    )
+    fetch_.add_argument(
+        "--bundle-dir",
+        type=Path,
+        metavar="DIR",
+        help="where --bundle writes them (default: bundles/ beside the plan)",
+    )
 
     build = commands_.add_parser(
         "build", help="build the images a plan says to build, offline, from what fetch laid out"
     )
-    build.add_argument("plan_file", type=Path, metavar="PLAN", help="the plan.json to build")
+    build.add_argument(
+        "plan_file",
+        type=Path,
+        nargs="?",
+        metavar="PLAN",
+        help="the plan.json to build (optional with --bundle, which carries its own)",
+    )
     build.add_argument("--out", type=Path, required=True, metavar="DIR", help="where artifacts and records go")
     files_options(build)
     sources_options(build)
@@ -112,6 +126,17 @@ def parser() -> argparse.ArgumentParser:
         help=f"the builder container image (default {builder.BUILDER_IMAGE}, from scripts/builder build)",
     )
 
+    build.add_argument(
+        "--offline",
+        action="store_true",
+        help="the factory may use no network at all: no download, no registry pull (--parents oci:// is refused)",
+    )
+    build.add_argument(
+        "--bundle",
+        type=Path,
+        metavar="FILE",
+        help="replay: build the image of an inputs bundle from the bundle alone (implies --offline)",
+    )
     build.add_argument(
         "--parents",
         action="append",
@@ -280,7 +305,15 @@ def dispatch(arguments: argparse.Namespace) -> int:
                 raise commands.Failed(f"{arguments.out}: {error.strerror or error}") from None
         return status
     if arguments.command == "fetch":
-        return fetch.fetch_command(arguments.plan, sources_of(arguments), bundle=arguments.bundle, out=sys.stdout)
+        if arguments.bundle_dir is not None and not arguments.bundle:
+            raise commands.Usage("--bundle-dir says where --bundle writes: add --bundle")
+        return fetch.fetch_command(
+            arguments.plan,
+            sources_of(arguments),
+            bundle=arguments.bundle,
+            out=sys.stdout,
+            bundle_dir=arguments.bundle_dir,
+        )
     if arguments.command == "build":
         return build_run.build_command(
             arguments.plan_file,
@@ -292,6 +325,8 @@ def dispatch(arguments: argparse.Namespace) -> int:
             builder_image=arguments.builder_image,
             out=sys.stdout,
             parent_targets=arguments.parents,
+            offline=arguments.offline,
+            bundle=arguments.bundle,
         )
     if arguments.command == "test":
         effects = checks.Effects(

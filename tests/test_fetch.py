@@ -199,18 +199,67 @@ class FetchTest(FetchCase):
         self.assertEqual((code, out.getvalue()), (1, ""))
         self.assertIn("schema", err.getvalue())
 
-    def test_bundle_is_a_usage_error(self) -> None:
-        with self.assertRaisesRegex(commands.Usage, "inputs bundles arrive in a later release"):
-            fetch.fetch_command(
-                self.write_plan(self.plan_text), self.sources_in(self.new_cache()), bundle=True, out=io.StringIO()
-            )
+    def test_bundle_dir_without_bundle_is_a_usage_error(self) -> None:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             code = cli.main(
-                ["fetch", str(self.write_plan(self.plan_text)), "--bundle", "--cache", str(self.new_cache())]
+                ["fetch", str(self.write_plan(self.plan_text)), "--bundle-dir", str(self.new_cache()), "--cache", "c"]
             )
         self.assertEqual(code, 2)
-        self.assertIn("inputs bundles arrive in a later release", err.getvalue())
+        self.assertIn("--bundle-dir says where --bundle writes", err.getvalue())
+
+
+class OnlyWhatBuildsTest(FetchCase):
+    """`fetch` reads for the images whose state is `build`, and for a child only what it adds to its parent."""
+
+    def with_states(self, **states: str) -> Path:
+        document = json.loads(self.plan_text)
+        for image, state in states.items():
+            document["images"][image]["state"] = state
+        return self.write_plan(json.dumps(document))
+
+    def pool_files(self, cache: Path) -> list[str]:
+        pool = fetch.mirror_dir(cache, FIRST_ID) / "debian" / "pool"
+        return sorted(path.name for path in pool.rglob("*.deb")) if pool.exists() else []
+
+    def test_a_child_that_builds_on_a_reused_parent_fetches_only_what_it_adds(self) -> None:
+        cache = self.new_cache()
+        urls: list[str] = []
+        summary = self.fetch(
+            self.with_states(core="reuse", **{"app-b": "reuse", "app-c": "wait"}), cache, recording(urls)
+        )
+        self.assertEqual(self.pool_files(cache), ["lib-a_1.0_all.deb", "tool-a_1.0_amd64.deb"])
+        self.assertEqual(sorted(url.rsplit("/", 1)[1] for url in urls if url.endswith(".deb")), self.pool_files(cache))
+        self.assertIn("images: 1 build, 3 need nothing (reuse or wait)", summary)
+        self.assertIn("packages: 2 fetched, 0 already cached (2 in all)", summary)
+
+    def test_a_plan_where_nothing_builds_fetches_nothing_and_says_so(self) -> None:
+        cache = self.new_cache()
+        urls: list[str] = []
+        summary = self.fetch(
+            self.with_states(core="reuse", **{"app-a": "wait", "app-b": "reuse", "app-c": "reuse"}),
+            cache,
+            recording(urls),
+        )
+        self.assertEqual(urls, [])
+        self.assertEqual(summary, "nothing to fetch: no image builds (4 are reused or wait)\n")
+        self.assertFalse((cache / "mirror").exists())
+
+    def test_a_chain_that_builds_needs_each_link_only_for_what_it_adds(self) -> None:
+        plan = fetch.fetch_plan(planfile.parse_plan(json.loads(self.plan_text)))
+        added = {one.image: [name for name, _version, _arch in one.packages] for one in plan.images}
+        self.assertEqual(added["core"], ["apt", "base-files", "dpkg", "fixture-essential", "lib-b", "tool-b"])
+        self.assertEqual(added["app-a"], ["lib-a", "tool-a"])
+        self.assertEqual((added["app-b"], added["app-c"]), ([], []))
+        self.assertEqual(plan.skipped, ())
+
+    def test_an_input_of_a_reused_image_is_not_read(self) -> None:
+        document = json.loads(self.plan_text)
+        document["images"]["app-a"]["inputs"] = {"tool": tool_fields()}
+        document["images"]["app-a"]["state"] = "reuse"
+        urls: list[str] = []
+        self.fetch(self.write_plan(json.dumps(document)), self.new_cache(), recording(urls, {TOOL_URL: TOOL_BYTES}))
+        self.assertNotIn(TOOL_URL, urls)
 
 
 class InputsTest(FetchCase):

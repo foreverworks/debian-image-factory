@@ -121,7 +121,7 @@ own requirements.
 | Stage | Takes | Emits |
 |---|---|---|
 | `plan` | lock, definition, params, the published state (looked up live by identity) | `plan.json`: per image its resolved package set, identity, state (`reuse`, `wait` or `build`) and the reasons |
-| `fetch` | `plan.json` | every `.deb`, index and external file the plan names, verified, in the cache; optionally an inputs bundle per image |
+| `fetch` | `plan.json` | every `.deb`, index and external file the plan names, verified, in the cache; only for the images that build; optionally an inputs bundle per image |
 | `core` | snapshot indices, the core package list, hooks, files | rootfs tarball, SBOM, provenance |
 | `oci` | parent rootfs (core or an OCI parent), packages, modules, OCI config | OCI image layout (one layer for the base, one added layer per child), SBOM, provenance |
 | `incus` | parent rootfs, packages, modules, the factory's NoCloud templates | `metadata` tarball plus `rootfs.squashfs`, their Incus fingerprint, SBOM, provenance |
@@ -876,10 +876,34 @@ the rare case inputs cannot see (an archive key rotation, say).
 - **Valid-Until.** Security archive `Release` files expire. Reads of a snapshot set
   `Acquire::Check-Valid-Until=false`; signatures and hashes are still verified, and the snapshot ID
   pins the content.
-- **Inputs bundle.** With `--bundle`, fetch also writes the partial mirror and external files per
-  image as `<artifact digest>.inputs.tar`. `build --offline --bundle <file>` rebuilds that image
-  from it with snapshot.debian.org unreachable. A replay is the normal build path reading a
-  different directory, not a separate mode.
+- **Only what builds.** `fetch` reads for the images whose state in the plan is `build`, and for nothing
+  else: a `reuse` or `wait` image needs no index, package or input, and a plan where nothing builds fetches
+  nothing and says so. A child's parent is an artifact, never an input (found in `out/` or through
+  `--parents`, 9.1), so a child that builds needs from the mirror only the packages it adds to its parent's
+  set (its resolved set minus the parent's, vendor `.deb` files left out: they are inputs), plus the signed
+  indices apt reads, and from the cache its own locked inputs.
+- **Inputs bundle.** With `--bundle`, fetch also writes one bundle per image that builds, into `--bundle-dir`
+  (default `bundles/` beside the plan), named `<image>-<suite>-<arch>-<first 16 hex of identity>.inputs.tar`.
+  It is named by what determines its content, not by the artifact digest: the digest of the artifact exists
+  only after the build, and `fetch` runs before it. One identity is one set of inputs, as in an artifact's
+  name (7.4). A bundle is a plain tar of `manifest.json` (first), `plan.json` (the plan fetched from, byte
+  for byte) and the image's slice of the cache under `cache/`: the signed `InRelease` and the indices of
+  every suite, the pool files the image adds, its locked inputs (keyrings, vendor `.deb` files, tarballs) by
+  sha256, and the signed checksum lists, signatures and indices that vouched for them with their notes (what
+  provenance names, 8.2). The manifest holds the schema, the image, its identity, the snapshot, the suite and
+  the architecture, and every other member with its size and sha256. Members are sorted and every header
+  has the same time (0), owner (uid and gid 0, no names) and mode (0644), so two fetches of one plan write
+  byte-identical bundles. Bundles are off by default (16.4).
+- **Replay.** `build --offline --bundle <file>` rebuilds the bundle's image from it with snapshot.debian.org
+  unreachable. A replay is the normal build path reading a different directory, not a separate mode: the
+  bundle is unpacked into a scratch cache under `out/` (every member checked against the manifest's size and
+  sha256, a member the manifest does not list or a link refused), the manifest is checked against the plan it
+  carries (the image's identity, the snapshot, the suite) and the cache against what the build reads (every
+  suite's `InRelease`, every locked input of the image), and the ordinary build then runs with that cache. The
+  plan comes from the bundle; a plan given beside it must be the same bytes. `--offline` also makes any
+  network access of the factory process itself a hard error: no download, no registry pull (`--parents
+  oci://` is refused, a parent is given as `dir://`), so nothing can fall back to a mirror. A bundle holds one
+  image: its parent is built first or found as in any build.
 
 ## 8. Artifacts and records
 
@@ -1179,8 +1203,9 @@ debian-image-factory lock baseline --id ID               move the baseline snaps
 debian-image-factory lock checksums [--entry NAME]       fill checksums of entries whose version moved; verify vendor indices and signatures
 debian-image-factory plan [--against TARGET]... [--snapshot lock|latest|ID] [--param K=V]... [--params FILE]
                           [--rebuild IMAGE --reason TEXT] [--previous PLAN] [--out FILE] > plan.json
-debian-image-factory fetch plan.json [--mirror URL] [--bundle]
-debian-image-factory build plan.json --out out/ [--image NAME]... [--parents TARGET]... [--builder-image REF] [--offline] [--builder container|host]
+debian-image-factory fetch plan.json [--mirror URL] [--bundle [--bundle-dir DIR]]
+debian-image-factory build [plan.json] --out out/ [--image NAME]... [--parents TARGET]... [--builder-image REF]
+                           [--offline] [--bundle FILE] [--builder container|host]
 debian-image-factory test out/ [--check NAME]... [--url URL] [--definition FILE]
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
 debian-image-factory publish out/ --to TARGET... [--sign none|keyless|key:REF]
@@ -1206,7 +1231,8 @@ their boot checks (`test --vm-image` names the image QEMU runs in, `scripts/buil
 and `lock checksums`: input-lock's `refresh` on a lock the definition agrees with, for the entries
 `--entry` names or those whose version moved since the git ref `--base`. It writes nothing unless every
 entry verified (a `deb` entry through its vendor's signed `InRelease`), and checks the result against
-the definition again. M6 adds `prune` and, with the rest of the nightly loop, `fetch --bundle`.
+the definition again. M6 adds `prune`, `fetch --bundle` and `build --offline --bundle`, with the rest of the
+nightly loop.
 
 `build` reads the plan, and also the lock and the definition (`--lock`, `--definition`, as `plan`
 does): hooks and file trees live beside the definition, and provenance names the lock. Before it
@@ -1218,8 +1244,15 @@ release: a `.pyz` carries the digest reference of the builder its release publis
 is its default; 5.4.) A child whose parent this run does not build reads it from `out/` (by
 artifact name: the identity prefix and the digest the plan names), then from each `--parents TARGET`
 (`dir://` holding the core tarball or an `.oci` layout, or `oci://`, pulled by digest); a parent found
-nowhere fails the build naming the image, the digest and the places looked in. Images of kinds a release cannot build yet are listed as not built. `--offline` (a replay from an inputs bundle) arrives with M6 and `--builder host` later;
-every build already runs with no network.
+nowhere fails the build naming the image, the digest and the places looked in. Images of kinds a release cannot build yet are listed as not built. `--builder host` arrives later;
+every build already runs with no network in the builder.
+
+`fetch` reads only for the images the plan says to build (7.7); with `--bundle` it also writes one inputs
+bundle for each, into `--bundle-dir` (default `bundles/` beside the plan). `build --offline` makes any use of
+the network by the factory process itself a hard error. `build --bundle FILE` replays the bundle's image from
+it alone (7.7) and implies `--offline`; the plan argument is then optional, since the bundle carries the plan,
+and a plan given with it must be that plan. `--image` may name only the bundle's image, and `--parents oci://`
+is refused offline (give the parent as `dir://`, or build it in the same run).
 
 Targets are `oci://<registry>/<repository>`, `github-release://<owner>/<repo>@<tag>` and
 `dir://<path>`. `plan --against` looks identities up live in those targets (7.4); nothing about
@@ -1456,6 +1489,11 @@ pre-release (3.16.0a2 today), so a coming break is seen weeks before it matters.
 - Identity: order and formatting never change it; every field that should change it does; the
   deny-list ignores exactly the Renovate hints and `used_by`; an unknown entry field changes it; the
   baseline enters only images whose sources point at it; the build snapshot never does.
+- Fetch and bundles: only the images that build are read for, a child only for what it adds to its parent,
+  and a plan where nothing builds reads nothing; a bundle is byte-identical across fetches (a name too long
+  for a plain tar header included); unpacking refuses a changed byte, an unlisted member, a missing one, a
+  link, a manifest that is not first or names a path outside the bundle, and a manifest or plan that
+  disagrees with the other; `--offline` refuses every URL and an `oci://` parent.
 - Plan: every row of the table in 7.6; the reuse, wait and build states; refusal of a child that
   would upgrade its parent.
 - Records: SPDX documents validated against SPDX's published 2.3 JSON schema, vendored as a test
@@ -1496,7 +1534,13 @@ identities of the images that install it, and nothing else.
 - Rootless Docker: core, OCI, Incus rootfs, installer and OS builds from the fixture archive and from
   the real snapshot; `package-set`, `locked-inputs`, `no-machine-identity`, `two-clones` for core and
   OCI, `sbom-complete`, `ancestry`, `same-resolution`, `no-build-snapshot`, `byte-equal`, `oci-run`;
-  offline replay from an inputs bundle with `--network none`; publishing to a throwaway local
+  offline replay from inputs bundles (`tests/integration/test_replay.py`): core, oci-base and a child that
+  installs a package are fetched with `--bundle` (the example's other images marked `reuse`, so nothing is
+  read for them), built once, and replayed with `build --offline --bundle` by a factory running inside a
+  container started with `--network none` (the host's docker socket mounted, the work paths at the same
+  paths), after a request to snapshot.debian.org from that container has failed; the replayed core must have
+  the first build's digest and the OCI images their manifest digests, and a second fetch must write
+  byte-identical bundles; publishing to a throwaway local
   registry container, then `verify` and `plan --against` it.
 - **Two registries, one with the referrers API and one without** (`tests/integration/test_registries.py`,
   rootless Docker on 127.0.0.1): zot v2.1.23 (`ghcr.io/project-zot/zot`), which answers the referrers
