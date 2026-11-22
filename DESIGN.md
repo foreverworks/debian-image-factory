@@ -1383,11 +1383,16 @@ fingerprint, an image's manifest digest. It keeps that artifact in every target 
 against the two limits; a pin that matches nothing is noted. A build of an image the definition does
 not name is kept, since nothing says which checks make it good. What a delete removes:
 
-- `dir://`: the artifact file (an Incus image's two) and its `<digest>.intoto.jsonl`.
-- `github-release://`: the same files, as assets.
+- `dir://`: the artifact file (an Incus image's two, the rootfs first and then the metadata, the file a
+  listing finds the image by) and its `<digest>.intoto.jsonl`. A delete that fails therefore never leaves
+  a rootfs nothing lists: when the rootfs delete failed, both files stay and a later prune retries; when
+  only the metadata delete failed, the listing names it as ignored (no rootfs beside it) for the person
+  to remove.
+- `github-release://`: the same files, in the same order, as assets.
 - `oci://`: the image's manifest by digest, the records attached to it (referrers, or the index of the
-  `sha256-<digest>` tag under the tag schema), and the `identity-<identity>` tag if it still names the
-  manifest. Only manifests an `identity-` tag names are listed: older manifests a moved tag left behind
+  `sha256-<digest>` tag under the tag schema), and the `identity-<identity>` tag unless a lookup shows
+  it names another manifest (a registry that kept the tag of a deleted manifest answers 404 for it, and
+  the tag is deleted too: no later prune would list it). Only manifests an `identity-` tag names are listed: older manifests a moved tag left behind
   and the consumer's own tags are not seen, and a consumer's tag that names a deleted manifest is
   dropped with it by the registry, so such an image is protected by `--pin`, not by its tag. Layers and
   blobs are the registry's to collect. A registry must allow `DELETE` on manifests: zot and the official

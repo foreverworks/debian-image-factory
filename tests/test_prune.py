@@ -4,16 +4,18 @@ the in-process fakes of `tests.support`; no test here reaches a real one."""
 
 import contextlib
 import io
+import shutil
 import tempfile
 import unittest
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Final
+from unittest import mock
 
 from input_lock.records import TestOutcome
 
-from debian_image_factory import cli, commands, oci, prune, publish, published, registry
+from debian_image_factory import cli, commands, github, incus, oci, prune, publish, published, registry
 from tests.support import fake_github, fake_registry
 from tests.support.definitions import CORE, HEADER, child
 from tests.support.fake_registry import Fake as FakeRegistry
@@ -150,6 +152,50 @@ class DirTest(PruneCase):
             {stays.metadata, stays.rootfs, published.records_name_for(min(old_print, new_print))},
         )
         self.assertIn(f"{gone.metadata} deleted, ", said)
+
+    def incus_artifact(self) -> tuple[published.Artifact, incus.Names]:
+        names, fingerprint = make_incus(self.dir)
+        return published.Artifact("incus-base", "ab" * 32, fingerprint, names.metadata, None), names
+
+    def test_an_incus_image_goes_rootfs_first_then_metadata_then_records(self) -> None:
+        artifact, names = self.incus_artifact()
+        gone: list[str] = []
+        real = Path.unlink
+
+        def record(path: Path, missing_ok: bool = False) -> None:
+            gone.append(path.name)
+            real(path, missing_ok=missing_ok)
+
+        with mock.patch.object(Path, "unlink", record):
+            prune.delete_from_dir(self.dir, artifact, True)
+        self.assertEqual(gone, [names.rootfs, names.metadata, published.records_name_for(artifact.digest)])
+
+    @staticmethod
+    def refusing(stuck: str) -> Callable[[Path, bool], None]:
+        """An `unlink` that refuses the file called `stuck` and does the rest."""
+        real = Path.unlink
+
+        def unlink(path: Path, missing_ok: bool = False) -> None:
+            if path.name == stuck:
+                raise PermissionError(13, "Permission denied")
+            real(path, missing_ok=missing_ok)
+
+        return unlink
+
+    def test_a_failed_delete_leaves_the_file_a_listing_finds_and_never_a_lone_rootfs(self) -> None:
+        for stuck in ("rootfs", "metadata"):
+            with self.subTest(stuck=stuck):
+                shutil.rmtree(self.dir, ignore_errors=True)
+                artifact, names = self.incus_artifact()
+                with (
+                    mock.patch.object(Path, "unlink", self.refusing(getattr(names, stuck))),
+                    self.assertRaises(PermissionError),
+                ):
+                    prune.delete_from_dir(self.dir, artifact, True)
+                left = self.names()
+                self.assertIn(names.metadata, left)
+                self.assertIn(published.records_name_for(artifact.digest), left)
+                self.assertEqual(names.rootfs in left, stuck == "rootfs")
 
     def test_records_shared_with_a_kept_artifact_stay(self) -> None:
         name, digest, records = self.core(1)
@@ -317,6 +363,23 @@ class ReleaseTest(PruneCase):
         self.assertEqual(len(self.lines(said.getvalue(), "deleted")), 1)  # the second artifact still went
 
 
+class ReleaseOrderTest(unittest.TestCase):
+    def test_an_incus_image_goes_rootfs_first_then_metadata_then_records(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            names, fingerprint = make_incus(Path(raw))
+        artifact = published.Artifact("incus-base", "ab" * 32, fingerprint, names.metadata, None)
+        records = published.records_name_for(fingerprint)
+        held: dict[str, github.Asset] = {
+            name: {"id": number, "name": name, "size": 1, "digest": None}
+            for number, name in enumerate((names.metadata, names.rootfs, records))
+        }
+        gone: list[str] = []
+        with mock.patch.object(github, "delete_asset", lambda client, asset: gone.append(asset["name"])):
+            prune.delete_from_release(mock.sentinel.client, held, artifact, True)
+        self.assertEqual(gone, [names.rootfs, names.metadata, records])
+        self.assertEqual(held, {})
+
+
 class RegistryCase(PruneCase):
     def put(self, name: str, n: int, checks: Sequence[tuple[str, TestOutcome]] = GOOD) -> str:
         """Publish image `n` (own content, identity and finish time) to the registry `name`; its manifest digest."""
@@ -392,6 +455,26 @@ class RegistryTest(RegistryCase):
             self.assertIn("UNSUPPORTED", str(caught.exception))
             self.assertEqual((fake.manifests, fake.tags), before)
             self.assertEqual(len(self.lines(said.getvalue(), "delete failed")), 2)
+
+    def test_a_tag_the_registry_kept_and_that_answers_404_is_deleted_too(self) -> None:
+        fake = FakeRegistry(keep_tags_on_delete=True)
+        with fake_registry.running(fake) as name:
+            digest = self.put(name, 1, BAD)
+            self.prune([f"oci://{name}/team/app"])
+            self.assertNotIn(f"sha256:{digest}", fake.manifests)
+            self.assertNotIn(oci.identity_tag(identity(1)), fake.tags)  # it would never be listed again
+
+    def test_a_tag_that_names_another_manifest_stays(self) -> None:
+        fake = FakeRegistry()
+        with fake_registry.running(fake) as name:
+            old = self.put(name, 1, BAD)
+            newer = self.put(name, 2, BAD)
+            fake.tags[oci.identity_tag(identity(1))] = f"sha256:{newer}"  # a rebuild moved the tag
+            client = registry.connect(published.OciTarget(name, "team/app"))
+            artifact = published.Artifact("app", identity(1), old, "app", None)
+            prune.delete_from_registry(client, artifact)
+            self.assertNotIn(f"sha256:{old}", fake.manifests)
+            self.assertEqual(fake.tags[oci.identity_tag(identity(1))], f"sha256:{newer}")
 
     def test_a_registry_that_has_nothing_tagged_holds_nothing(self) -> None:
         with fake_registry.running(FakeRegistry()) as name:

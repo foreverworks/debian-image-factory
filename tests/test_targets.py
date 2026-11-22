@@ -101,7 +101,7 @@ class DirLookupTest(unittest.TestCase):
         name, digest = write_artifact(self.dir, b"one", results={"a": "FAILED"})
         predicate = test_result(
             "PASSED",
-            [{"name": "a"}, {"name": "run", "annotations": {"runId": "x", "finishedOn": "2099-01-01T00:00:00Z"}}],  # type: ignore[list-item]  # annotations are in-toto's
+            [{"name": "a"}, {"name": "run", "annotations": {"runId": "x", "finishedOn": "2099-01-01T00:00:00Z"}}],  # type: ignore[typeddict-unknown-key]  # annotations are in-toto's
         )
         extra = envelope(statement([subject(name, digest)], TEST_RESULT_PREDICATE, predicate))
         path = self.dir / records_name_for(digest)

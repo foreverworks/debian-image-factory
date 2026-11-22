@@ -164,7 +164,7 @@ class NewCheckTest(unittest.TestCase):
 
     def test_a_check_nobody_has_run_is_not_held_against_older_builds_but_is_against_the_newest(self) -> None:
         found = run([build(1), build(2), build(3, PENDING)], good=5, candidates=1)
-        self.assertEqual([(one.artifact.name, one.standing) for one in found][0], ("app-3", "candidate"))
+        self.assertEqual((found[0].artifact.name, found[0].standing), ("app-3", "candidate"))
         self.assertEqual({one.standing for one in found[1:]}, {"good"})
 
 

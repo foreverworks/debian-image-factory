@@ -44,6 +44,8 @@ class Fake:
     referrers_api: bool = True
     delete_enabled: bool = True
     """False answers every DELETE with 405 UNSUPPORTED, as a distribution registry does by default."""
+    keep_tags_on_delete: bool = False
+    """True leaves the tags of a manifest deleted by digest in the tag list: they answer 404 on a HEAD (dangling)."""
     tag_page_size: int | None = None
     subject_header: bool = True
     absolute_location: bool = False
@@ -196,7 +198,8 @@ def handler_for(fake: Fake) -> type[BaseHTTPRequestHandler]:
                     return
                 del fake.manifests[reference]
                 for tag in [name for name, digest in fake.tags.items() if digest == reference]:
-                    del fake.tags[tag]
+                    if not fake.keep_tags_on_delete:
+                        del fake.tags[tag]
             elif reference in fake.tags:
                 del fake.tags[reference]
             else:

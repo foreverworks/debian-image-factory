@@ -4,13 +4,17 @@
 consumer's pins. This module reads each target, prints one line per artifact (kept or deleted, with the
 reason), and deletes unless `--dry-run`:
 
-- `dir://`: the artifact's file or files (an Incus image's metadata and rootfs) and its
-  `<digest>.intoto.jsonl`.
-- `github-release://`: the same files, as assets.
+- `dir://`: the artifact's file or files and its `<digest>.intoto.jsonl`. An Incus image goes rootfs first,
+  then metadata (the file a listing finds it by), then the records. A delete that fails leaves the metadata,
+  never a rootfs nothing lists: when the rootfs delete failed both files stay and a later prune retries; when
+  only the metadata delete failed, the listing names it as ignored (no rootfs beside it) and it is the
+  person's to remove.
+- `github-release://`: the same files, in the same order, as assets.
 - `oci://`: the image's manifest by digest, then the records attached to it (the referrers, or the index
-  of the referrers tag under the tag schema), and the `identity-<identity>` tag if it still names the
-  manifest. The image goes first: when a registry refuses the delete, nothing else was touched and the
-  artifact is reported, never left without its records. Layers and blobs are the registry's to
+  of the referrers tag under the tag schema), and the `identity-<identity>` tag unless it names another
+  manifest (a tag a registry kept, which answers 404, goes too: no later prune would list it). The image
+  goes first: when a registry refuses the delete, nothing else was touched and the artifact is reported,
+  never left without its records. Layers and blobs are the registry's to
   collect.
 
 An artifact is deleted before its records, so a failure in between leaves records without an artifact
@@ -65,8 +69,15 @@ def describe(error: OSError) -> str:
 # ---- deleting ----------------------------------------------------------------------------------
 
 
+def deletion_order(artifact: Artifact) -> list[str]:
+    """The files of a file artifact in the order they go: an Incus image's rootfs first, then its metadata
+    (the file a listing finds it by), so a delete that fails never leaves a rootfs nothing lists; the records
+    come after both."""
+    return files_of(artifact)[::-1]
+
+
 def delete_from_dir(directory: Path, artifact: Artifact, with_records: bool) -> None:
-    names = files_of(artifact)
+    names = deletion_order(artifact)
     if with_records:
         names.append(published.records_name_for(artifact.digest))
     for name in names:
@@ -77,7 +88,7 @@ def delete_from_release(
     client: github.Client, held: dict[str, github.Asset], artifact: Artifact, with_records: bool
 ) -> None:
     """Delete the assets of `artifact`; `held` is the release's assets by name and follows the deletions."""
-    names = files_of(artifact)
+    names = deletion_order(artifact)
     if with_records:
         names.append(published.records_name_for(artifact.digest))
     for name in names:
@@ -100,7 +111,8 @@ def delete_from_registry(client: registry.Client, artifact: Artifact) -> None:
     if index is not None:
         registry.delete_reference(client, oci.digest_text(index))
     tag = oci.identity_tag(artifact.identity)
-    if registry.manifest_digest(client, tag) == digest:  # a registry that kept the tag of a deleted image
+    named = registry.manifest_digest(client, tag)
+    if named is None or named == digest:  # a dangling tag answers 404 and is deleted too; no later prune lists it
         registry.delete_reference(client, tag)
 
 
