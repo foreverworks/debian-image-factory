@@ -7,6 +7,9 @@ jq), built in a second run that finds its parents in the first one's output, so 
 installer parent's kit are unpacked for real. Needs docker, the builder image (`scripts/builder build`) and
 network access to snapshot.debian.org.
 
+The installer and the os are then built a second time from the same plan, and their digests must be equal:
+the engine revision guard below records them (DESIGN 12), and `test --check byte-equal --twin` compares them.
+
 What it checks: the os tarball holds the kernel and the initrd its postinst made in /boot; the kit's layout,
 kit.json and its initrd (newc, /init, sorted, inodes in order); a booting root's machine ID waits for the
 first boot and holds no SSH host keys, while Debian's own first-boot unit makes them; the os image carries
@@ -26,13 +29,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from debian_image_factory import published, records
+from debian_image_factory import ENGINE, published, records
 from debian_image_factory.build import initrd
 
 from .test_core_build import EXAMPLES, ROOT, factory, files, sha256_of
 
 EPOCH = 1754697600
 BASELINE = "20261108T000000Z"
+
+EXPECTED_OS: dict[int, str] = {1: "47b403d5e3f21d01f247a69945ee6bdeada5290650db466872f101a42707497a"}
+EXPECTED_INSTALLER: dict[int, str] = {1: "204e53953a4da90061aef02e216139dc9f2b44752138e66bd6327f6590a8916f"}
+"""The engine revision guard (DESIGN 12) for the example `os` and `installer` at the example lock's snapshot, the
+sha256 of the file per engine revision, as `test_core_build.EXPECTED_CORE` does for core. A change to these bytes
+without a raised ENGINE fails here; a change to the examples, the lock or the builder updates them in the same
+commit."""
 
 CHILDREN = """
 [images.os-tools]
@@ -99,6 +109,11 @@ class BootingBuildTest(unittest.TestCase):
         cls.plan = json.loads(plan.read_text())
         images = ["--image", "core", "--image", "installer", "--image", "os"]
         factory("build", str(plan), "--out", str(cls.work / "out1"), *images, "--builder-image", tag, *files())
+        # The same plan again, for the installer and the os only: their parent core is out1's.
+        factory(
+            "build", str(plan), "--out", str(cls.work / "out3"), "--image", "installer", "--image", "os",
+            "--parents", f"dir://{cls.work / 'out1'}", "--builder-image", tag, *files(),
+        )  # fmt: skip
         children = cls.work / "children"
         shutil.copytree(EXAMPLES, children)
         with (children / "factory.toml").open("a") as handle:
@@ -196,6 +211,33 @@ class BootingBuildTest(unittest.TestCase):
                 while block := handle.read(1 << 22):
                     self.assertNotIn(snapshot, tail + block, f"{path.name} holds the build snapshot ID")
                     tail = block[-len(snapshot) :]
+
+    # ---- byte for byte ----------------------------------------------------------------------------
+
+    def test_two_builds_of_the_os_and_the_installer_from_one_plan_give_the_same_bytes(self) -> None:
+        for first, second in (
+            (self.os_tarball(), self.os_tarball("out3")),
+            (self.kit(), self.kit("out3")),
+        ):
+            self.assertEqual(first.name, second.name)
+            self.assertEqual(sha256_of(first), sha256_of(second), f"two builds of {first.name} differ")
+
+    def test_the_byte_equal_check_passes_on_the_second_build(self) -> None:
+        printed = factory("test", str(self.work / "out3"), "--check", "byte-equal", "--twin", str(self.work / "out1"))
+        self.assertIn("os: byte-equal PASSED", printed)
+        self.assertIn("installer: byte-equal PASSED", printed)
+
+    def test_engine_revision_guard(self) -> None:
+        for label, path, expected in (
+            ("os", self.os_tarball(), EXPECTED_OS),
+            ("installer", self.kit(), EXPECTED_INSTALLER),
+        ):
+            self.assertIn(ENGINE, expected, f"record the example {label}'s digest for engine revision {ENGINE}")
+            self.assertEqual(
+                sha256_of(path),
+                expected[ENGINE],
+                f"the example {label}'s bytes changed without a raised engine revision",
+            )
 
     # ---- the installer kit ------------------------------------------------------------------------
 

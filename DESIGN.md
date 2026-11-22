@@ -1660,10 +1660,12 @@ commit with its version.
   the tag schema).
 - **The engine revision guard.** For every kind whose fixture build is byte-equal, the expected
   digest is recorded beside the engine revision. A change that alters those bytes without raising
-  the revision fails here. Only core is guarded today, and its bytes hold no commit; the day an OCI
-  image's digest is guarded, its fixture is built from a definition with no git remote, so the
-  expected digest does not move with the repository's HEAD (5.3). A kind not yet byte-equal relies on review: any change to its build code
-  raises the revision.
+  the revision fails here. Core, the example `os` and the example `installer` are byte-equal (two builds
+  of one plan, the second on the first's core, give the same sha256; `tests/integration/test_booting_build.py`
+  records both digests and compares them with `test --check byte-equal --twin`), so all three are guarded,
+  and their bytes hold no commit. The day an OCI image's digest is guarded, its fixture is built from a
+  definition with no git remote, so the expected digest does not move with the repository's HEAD (5.3).
+  A kind not yet byte-equal (OCI, Incus) relies on review: any change to its build code raises the revision.
 - QEMU with KVM: `installer-boot`, `os-boot`, `two-clones` for the installer and OS, and
   `incus-boot` in a Debian 13 VM with Incus from the same snapshot (6.0.4 in Debian 13). QEMU runs in
   the boot checks' image (`builder/vm.Dockerfile`, built by `scripts/builder vm` from the builder's base
