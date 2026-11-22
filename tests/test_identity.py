@@ -363,7 +363,19 @@ class DefinitionRowsTest(IdentityCase):
 
 class ParamRowsTest(IdentityCase):
     def test_a_flip_changes_only_the_images_whose_modules_it_switches(self) -> None:
-        self.assertEqual(self.changed_by_params({"vendor_tools": True}), ["os", "os-child"])
+        self.assertEqual(self.changed_by_params({"vendor_tools": True}), ["installer", "os", "os-child"])
+
+    def test_the_flag_off_removes_its_module_from_the_installer_and_the_os(self) -> None:
+        # M5's acceptance (DESIGN 14): one flag, one module, both boot kinds
+        on = compute(
+            as_lock(example_lock_data()), self.spec, packages_for(), files=self.facts, params={"vendor_tools": True}
+        )
+        for name in ("installer", "os"):
+            self.assertIn("vendor-deb", on[name].modules, name)
+            self.assertNotIn("vendor-deb", self.base[name].modules, name)
+            self.assertIn("example-tool", on[name].entries, name)
+            self.assertNotIn("example-tool", self.base[name].entries, name)
+            self.assertNotEqual(on[name].identity, self.base[name].identity, name)
 
     def test_an_image_reads_the_switch_of_its_module_on_or_off(self) -> None:
         self.assertEqual(self.base["os"].params, {"vendor_tools": False})

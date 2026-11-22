@@ -270,9 +270,18 @@ and bundles it into the `.pyz`.
       "module": "vendor-deb",
       "registryUrl": "https://packages.example.com/debian?suite=trixie&components=main&binaryArch=amd64",
       "sha256": "<sha256 of the .deb>",
+      "signed_by": "example-vendor-keys",
       "url": "https://packages.example.com/debian/pool/main/e/example-tool/example-tool_{version_noepoch}_amd64.deb",
-      "used_by": ["os"],
+      "used_by": ["installer", "os"],
       "version": "2.4.0-1"
+    },
+    "example-vendor-keys": {
+      "description": "A trust root: the keyring the vendor signs its InRelease with, moved by hand.",
+      "module": "vendor-deb",
+      "sha256": "<sha256 of the keyring>",
+      "url": "https://packages.example.com/debian/example-archive-keyring.pgp",
+      "used_by": ["installer", "os"],
+      "version": "2026.1"
     },
     "node-26": {
       "datasource": "node-version",

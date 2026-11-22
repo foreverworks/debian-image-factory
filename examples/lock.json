@@ -27,6 +27,7 @@
       "signed_by": "example-vendor-keys",
       "url": "https://packages.example.com/debian/pool/main/e/example-tool/example-tool_{version_noepoch}_amd64.deb",
       "used_by": [
+        "installer",
         "os"
       ],
       "version": "2.4.0-1"
@@ -37,6 +38,7 @@
       "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
       "url": "https://packages.example.com/debian/example-archive-keyring.pgp",
       "used_by": [
+        "installer",
         "os"
       ],
       "version": "2026.1"
