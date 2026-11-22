@@ -212,6 +212,11 @@ Each asset is uploaded under a temporary `.partial-` name and renamed once it is
 upload never leaves half a file where `plan` could find it; the next `publish` deletes what a crashed run
 left.
 
+One build can hold several images that belong in different repositories. `publish out/ --image debian --to
+oci://ghcr.io/example/debian` sends only the image `debian` (repeat `--image` for more; a name the build does not
+hold is refused), and `{image}` in an `oci://` repository is replaced by each image's name, so `publish out/ --to
+oci://ghcr.io/example/{image}` sends `debian` to `ghcr.io/example/debian` and `node-26` to `ghcr.io/example/node-26`.
+
 Published builds pile up, so `prune` clears them: `debian-image-factory prune --against
 oci://ghcr.io/example/debian --pin sha256:<digest> --dry-run` lists, for every image, the newest 5 good builds and
 the newest candidate it would keep (`--keep-good`, `--keep-candidates`) and the rest it would delete,

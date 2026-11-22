@@ -1261,7 +1261,7 @@ debian-image-factory build [plan.json] --out out/ [--image NAME]... [--parents T
                            [--offline] [--bundle FILE] [--builder container|host]
 debian-image-factory test out/ [--check NAME]... [--url URL] [--definition FILE] [--twin DIR]...
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
-debian-image-factory publish out/ --to TARGET... [--sign none|keyless|key:REF]
+debian-image-factory publish out/ --to TARGET... [--image NAME]... [--sign none|keyless|key:REF]
 debian-image-factory verify REF [--pull [--artifact NAME|SHA256]] [--require-checks] [--lock FILE] [--definition FILE]
                                                          records match the bits, provenance names the lock, checks complete
 debian-image-factory prune --against TARGET... --pin DIGEST... [--keep-good 5] [--keep-candidates 1] [--dry-run]
@@ -1312,7 +1312,13 @@ the published state is stored in the consumer's repository.
 
 `publish` writes `dir://` targets (files only: an OCI image layout is refused there) and `oci://`
 targets (OCI images only: a core tarball is refused there; when `out/` holds both, each target
-takes its kind and the command names what it left). An OCI image is pushed with its tag
+takes its kind and the command names what it left). `--image NAME` (repeatable) publishes only the images it
+names, the files and the layouts of each, and a NAME the build does not hold is refused (exit 2) before anything is
+written; without it every image of `out/` goes, as before. In the repository of an `oci://` target `{image}` is
+replaced by the name of each image, so one `publish` sends `debian` to `oci://ghcr.io/example/debian` and
+`node-26` to `oci://ghcr.io/example/node-26` with `--to oci://ghcr.io/example/{image}`; `--image` and several
+`--to` combine, each image going to every target. `{image}` belongs to `oci://` targets, and an image whose name
+makes no valid repository is refused. An OCI image is pushed with its tag
 `identity-<identity>`, its records are attached as referrers (8.2), and publishing again pushes and
 attaches only what the registry lacks. Credentials come from the Docker config (`$DOCKER_CONFIG`
 or `~/.docker`: `auths`, `credHelpers`, `credsStore`); registries on `localhost`, `127.0.0.1` and

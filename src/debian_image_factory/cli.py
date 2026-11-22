@@ -187,7 +187,17 @@ def parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="TARGET",
-        help="dir://PATH, oci://REGISTRY/REPOSITORY or github-release://OWNER/REPO@TAG (repeat)",
+        help=(
+            "dir://PATH, oci://REGISTRY/REPOSITORY or github-release://OWNER/REPO@TAG (repeat); "
+            "in an oci:// repository {image} is replaced by each image's name"
+        ),
+    )
+    publish_.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="publish only this image of OUT (repeat); default: every image",
     )
     publish_.add_argument(
         "--sign", default="none", metavar="none", help="signing arrives in a later release; only none for now"
@@ -347,7 +357,9 @@ def dispatch(arguments: argparse.Namespace) -> int:
             arguments.out, arguments.check, sources_of(arguments), sys.stdout, effects=effects, url=arguments.url
         )
     if arguments.command == "publish":
-        return publish.publish_command(arguments.out_dir, arguments.to, arguments.sign, sys.stdout)
+        return publish.publish_command(
+            arguments.out_dir, arguments.to, arguments.sign, sys.stdout, images=arguments.image
+        )
     if arguments.command == "verify":
         return verify.verify_command(
             arguments.ref,

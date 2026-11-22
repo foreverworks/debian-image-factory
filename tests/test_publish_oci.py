@@ -194,6 +194,115 @@ class PublishOciTest(unittest.TestCase):
             )
 
 
+class PublishImagesTest(unittest.TestCase):
+    """`publish --image NAME` and `{image}` in an oci:// repository: which image goes to which repository."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = Path(self.tmp.name) / "out"
+        self.debian = make_image(self.out, image="debian", identity=IDENTITY, content=b"debian")
+        self.node = make_image(self.out, image="node-26", identity=OTHER, content=b"node")
+
+    def publish(self, name: str, *targets: str, images: tuple[str, ...] = ()) -> str:
+        said = io.StringIO()
+        status = publish.publish_command(
+            self.out, [target.replace("@REG@", name) for target in targets], "none", said, images=images
+        )
+        self.assertEqual(status, 0)
+        return said.getvalue()
+
+    def repositories_written(self, fake: Fake) -> set[str]:
+        """The repositories a manifest was PUT into."""
+        return {
+            line.split("/")[2] + "/" + line.split("/")[3]
+            for line in fake.log
+            if line.startswith("PUT") and "/manifests/" in line
+        }
+
+    def test_without_image_every_layout_goes_to_the_target(self) -> None:
+        fake = Fake()
+        with fake_registry.running(fake) as name:
+            said = self.publish(name, "oci://@REG@/team/app")
+        self.assertEqual(
+            sorted(fake.tags.values()), sorted([f"sha256:{self.debian.digest}", f"sha256:{self.node.digest}"])
+        )
+        self.assertIn(self.debian.name, said)
+        self.assertIn(self.node.name, said)
+
+    def test_image_publishes_only_the_images_it_names(self) -> None:
+        fake = Fake()
+        with fake_registry.running(fake) as name:
+            said = self.publish(name, "oci://@REG@/team/app", images=("debian",))
+        self.assertEqual(list(fake.tags.values()), [f"sha256:{self.debian.digest}"])
+        self.assertNotIn(self.node.name, said)
+
+    def test_image_is_repeatable(self) -> None:
+        fake = Fake()
+        with fake_registry.running(fake) as name:
+            self.publish(name, "oci://@REG@/team/app", images=("debian", "node-26"))
+        self.assertEqual(len(fake.tags), 2)
+
+    def test_an_image_the_build_does_not_hold_is_refused_before_anything_is_pushed(self) -> None:
+        fake = Fake()
+        with (
+            fake_registry.running(fake) as name,
+            self.assertRaisesRegex(commands.Usage, "--image nope.*debian, node-26"),
+        ):
+            self.publish(name, "oci://@REG@/team/app", images=("debian", "nope"))
+        self.assertEqual(fake.log, [])
+
+    def test_the_image_placeholder_sends_each_image_to_its_own_repository(self) -> None:
+        fake = Fake()
+        with fake_registry.running(fake) as name:
+            said = self.publish(name, "oci://@REG@/example/{image}")
+        self.assertEqual(self.repositories_written(fake), {"example/debian", "example/node-26"})
+        self.assertIn(f"{name}/example/debian: {self.debian.name} pushed", said)
+        self.assertIn(f"{name}/example/node-26: {self.node.name} pushed", said)
+
+    def test_the_placeholder_and_image_together_send_one_image_to_its_repository(self) -> None:
+        fake = Fake()
+        with fake_registry.running(fake) as name:
+            self.publish(name, "oci://@REG@/example/{image}", images=("node-26",))
+        self.assertEqual(self.repositories_written(fake), {"example/node-26"})
+
+    def test_one_build_can_go_to_two_repositories_by_image(self) -> None:
+        fake = Fake()
+        with fake_registry.running(fake) as name:
+            said = self.publish(name, "oci://@REG@/base/{image}", "oci://@REG@/team/app", images=("debian",))
+        lines = said.splitlines()
+        self.assertEqual(
+            [line.split(" ")[0] for line in lines], [f"oci://{name}/base/debian:", f"oci://{name}/team/app:"], said
+        )
+        self.assertNotIn(self.node.name, said)
+        self.assertEqual(set(fake.tags.values()), {f"sha256:{self.debian.digest}"})
+
+    def test_the_placeholder_belongs_to_oci_targets(self) -> None:
+        for target in ("dir:///{image}", "github-release://example/{image}@v1"):
+            with self.subTest(target), self.assertRaisesRegex(commands.Usage, r"\{image\} belongs in the repository"):
+                publish.publish_command(self.out, [target], "none", io.StringIO())
+
+    def test_an_image_name_that_makes_no_repository_is_refused(self) -> None:
+        make_image(self.out, image="a..b", identity="d5" * 32, content=b"x")
+        with self.assertRaisesRegex(commands.Usage, "the image a..b makes no repository"):
+            publish.publish_command(self.out, ["oci://127.0.0.1:9/example/{image}"], "none", io.StringIO())
+
+    def test_image_limits_a_dir_target_to_the_files_of_that_image(self) -> None:
+        core = make_core_file(self.out)
+        target = Path(self.tmp.name) / "dir"
+        said = io.StringIO()
+        publish.publish_command(self.out, [f"dir://{target}"], "none", said, images=("core",))
+        self.assertEqual(
+            sorted(path.name for path in target.iterdir()), sorted([core.name, f"{core.digest}.intoto.jsonl"])
+        )
+        self.assertNotIn("debian", said.getvalue())
+
+    def test_image_that_names_only_oci_images_leaves_a_dir_target_an_error(self) -> None:
+        make_core_file(self.out)
+        with self.assertRaisesRegex(commands.Failed, "holds OCI images only"):
+            publish.publish_command(self.out, [f"dir://{self.tmp.name}/dir"], "none", io.StringIO(), images=("debian",))
+
+
 class TargetsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

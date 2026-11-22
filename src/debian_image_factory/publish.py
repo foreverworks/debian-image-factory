@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, TextIO
+from typing import Final, Literal, TextIO
 
 from input_lock.identity import HEX64
 
@@ -94,10 +94,10 @@ def artifacts_in(out_dir: Path) -> list[fileartifacts.FileArtifact]:
     return found
 
 
-def publish_dir(out_dir: Path, target: Path, out: TextIO) -> None:
-    """Copy every artifact of `out_dir` (each of its files) and merge its records into the directory `target`."""
+def publish_dir(out_dir: Path, artifacts: Sequence[fileartifacts.FileArtifact], target: Path, out: TextIO) -> None:
+    """Copy `artifacts` of `out_dir` (each of its files) and merge their records into the directory `target`."""
     target.mkdir(parents=True, exist_ok=True)
-    for artifact in artifacts_in(out_dir):
+    for artifact in artifacts:
         states: list[str] = []
         for path in artifact.files:
             destination = target / path.name
@@ -142,8 +142,10 @@ def release_conflicts(
                 )
 
 
-def publish_release(out_dir: Path, target: published.ReleaseTarget, out: TextIO) -> None:
-    """Upload every artifact of `out_dir` (each of its files) to the release `target`, create the release
+def publish_release(
+    out_dir: Path, artifacts: Sequence[fileartifacts.FileArtifact], target: published.ReleaseTarget, out: TextIO
+) -> None:
+    """Upload `artifacts` of `out_dir` (each of its files) to the release `target`, create the release
     when the tag has none, and merge each artifact's records into its records asset.
 
     Assets are never overwritten: a file whose name is already an asset is skipped when the digest
@@ -154,7 +156,6 @@ def publish_release(out_dir: Path, target: published.ReleaseTarget, out: TextIO)
     moment can lose a line; publishing again restores it."""
     try:
         client = github.connect(target)
-        artifacts = artifacts_in(out_dir)
         release = github.release_by_tag(client)
         held = {one["name"]: one for one in github.list_assets(client, release)} if release else {}
         release_conflicts(client, out_dir, artifacts, held)
@@ -394,27 +395,97 @@ def target_scheme(target: published.Target) -> str:
     return "dir://" if isinstance(target, published.DirTarget) else "github-release://"
 
 
+IMAGE_PLACEHOLDER: Final = "{image}"
+"""In the repository of an `oci://` target: replaced by the name of the image each layout is, so one
+publish can send `debian` to one repository and `node-26` to another."""
+
+
+@dataclass(frozen=True, slots=True)
+class Destination:
+    """One `--to` as given: `text` is what the user wrote, `target` what it parses to (a repository with
+    `{image}` parses with the image name `image`, to check the template), `per_image` that it has the placeholder."""
+
+    text: str
+    target: published.Target
+    per_image: bool
+
+
+def destination_of(text: str) -> Destination:
+    """`text` as a destination. Raises Usage for a target that does not parse, or that has `{image}` but is
+    not an `oci://` target (a directory or a release holds each artifact under its own name already)."""
+    per_image = IMAGE_PLACEHOLDER in text
+    if per_image and not text.startswith("oci://"):
+        raise commands.Usage(f"{text}: {IMAGE_PLACEHOLDER} belongs in the repository of an oci:// target")
+    try:
+        return Destination(text, published.parse_target(text.replace(IMAGE_PLACEHOLDER, "image")), per_image)
+    except ValueError as error:
+        raise commands.Usage(str(error)) from None
+
+
+def image_of(name: str) -> str:
+    parts = published.parse_artifact_name(name)
+    assert parts is not None  # artifacts_in and layouts_in only return named artifacts
+    return parts.image
+
+
+def selected(
+    images: Sequence[str], files: Sequence[fileartifacts.FileArtifact], layouts: Sequence[Path]
+) -> tuple[list[fileartifacts.FileArtifact], list[Path]]:
+    """The artifacts of the images `--image` names, or all of them when it names none. Raises Usage for a
+    name that is not an image of this build."""
+    if not images:
+        return list(files), list(layouts)
+    held = sorted({image_of(one.name) for one in files} | {image_of(one.name) for one in layouts})
+    for name in images:
+        if name not in held:
+            raise commands.Usage(f"--image {name}: the build holds no such image (it holds {', '.join(held)})")
+    wanted = set(images)
+    return [one for one in files if image_of(one.name) in wanted], [
+        one for one in layouts if image_of(one.name) in wanted
+    ]
+
+
+def oci_targets_for(destination: Destination, layouts: Sequence[Path]) -> list[tuple[published.OciTarget, list[Path]]]:
+    """The repositories `layouts` go to for an `oci://` destination: the one, or with `{image}` one per image,
+    each with its own layouts. Raises Usage when an image's name does not make a valid repository."""
+    if not destination.per_image:
+        assert isinstance(destination.target, published.OciTarget)
+        return [(destination.target, list(layouts))]
+    found: list[tuple[published.OciTarget, list[Path]]] = []
+    for image in sorted({image_of(one.name) for one in layouts}):
+        text = destination.text.replace(IMAGE_PLACEHOLDER, image)
+        try:
+            target = published.parse_target(text)
+        except ValueError as error:
+            raise commands.Usage(f"{destination.text}: the image {image} makes no repository ({error})") from None
+        assert isinstance(target, published.OciTarget)
+        found.append((target, [one for one in layouts if image_of(one.name) == image]))
+    return found
+
+
 def publish_command(
     out_dir: Path,
     targets: Sequence[str],
     sign: str,
     out: TextIO,
     connect: Callable[[published.OciTarget], registry.Client] = registry.connect,
+    images: Sequence[str] = (),
 ) -> int:
     if sign != "none":
         raise commands.Usage("signing arrives in a later release; this release publishes unsigned records")
     if not targets:
         raise commands.Usage("publish needs at least one --to TARGET")
-    try:
-        parsed = [published.parse_target(target) for target in targets]
-    except ValueError as error:
-        raise commands.Usage(str(error)) from None
+    destinations = [destination_of(target) for target in targets]
     if not out_dir.is_dir():
         raise commands.Failed(f"{out_dir}: no such directory (build writes it)")
-    files, layouts = artifacts_in(out_dir), layouts_in(out_dir)
+    files, layouts = selected(images, artifacts_in(out_dir), layouts_in(out_dir))
     if not files and not layouts:
         raise commands.Failed(f"{out_dir}: no artifacts to publish")
-    for one in parsed:  # every target is checked before anything is written
+    routes = [
+        (one.target, oci_targets_for(one, layouts) if isinstance(one.target, published.OciTarget) else [])
+        for one in destinations
+    ]
+    for one, _ in routes:  # every target is checked before anything is written
         if isinstance(one, published.DirTarget | published.ReleaseTarget) and not files:
             raise commands.Failed(
                 f"{out_dir}: holds OCI images only ({', '.join(p.name for p in layouts)}); "
@@ -425,11 +496,11 @@ def publish_command(
                 f"{out_dir}: holds files only ({', '.join(artifact.name for artifact in files)}); "
                 "oci:// targets take OCI images, publish these to dir:// or github-release://"
             )
-    for one in parsed:
+    for one, repositories in routes:
         if isinstance(one, published.DirTarget):
             for path in layouts:
                 print(f"{one.path}: {path.name} not published here, OCI images publish to oci:// targets", file=out)
-            publish_dir(out_dir, Path(one.path), out)
+            publish_dir(out_dir, files, Path(one.path), out)
         elif isinstance(one, published.OciTarget):
             for artifact in files:
                 print(
@@ -437,7 +508,8 @@ def publish_command(
                     "files publish to dir:// or github-release://",
                     file=out,
                 )
-            publish_oci(out_dir, one, layouts, out, connect)
+            for repository, group in repositories:
+                publish_oci(out_dir, repository, group, out, connect)
         else:
             for path in layouts:
                 print(
@@ -445,5 +517,5 @@ def publish_command(
                     "OCI images publish to oci:// targets",
                     file=out,
                 )
-            publish_release(out_dir, one, out)
+            publish_release(out_dir, files, one, out)
     return 0
