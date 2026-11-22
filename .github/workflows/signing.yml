@@ -61,4 +61,5 @@ jobs:
           DIF_KEYLESS: "1"
         run: |
           set -euo pipefail
+          python3 scripts/vendor-input-lock
           PYTHONPATH=src:.vendor python3 -m unittest -v tests.integration.test_signing.KeylessTest
