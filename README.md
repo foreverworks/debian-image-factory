@@ -274,7 +274,7 @@ name: images
 on:
   schedule: [{cron: "17 2 * * *"}]
 permissions:
-  contents: read
+  contents: read            # contents: write instead to publish to a github-release:// target
   packages: write           # publishing to ghcr.io
 jobs:
   images:
@@ -284,6 +284,11 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@<commit> # v7.0.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:                                   # the factory reads the Docker config for oci:// targets
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
       - id: factory
         uses: foreverworks/debian-image-factory@<commit> # v0.6.0
         with:
@@ -298,8 +303,17 @@ jobs:
           CHANGED: ${{ steps.factory.outputs.changed }}
 ```
 
+The Action reaches a target with the credentials you give it, and gives itself none. For an `oci://`
+target the factory reads the Docker config, so log in to the registry in a step before the Action
+(`docker/login-action`, as above; on ghcr.io the workflow's own token is enough with `packages: write`).
+For a `github-release://` target it reads `GITHUB_TOKEN`: the Action's `token` input passes the workflow's
+token to `plan` and `publish` and to no other step, and needs `contents: write` to publish. GitHub does not
+put that token in a step's environment by itself, which is why the input exists.
+
 The inputs are `definition`, `lock`, `params`, `snapshot`, `against`, `steps` (default
-`plan,fetch,build,test`), `publish`, `sign` and `mirror`; the outputs are `changed`, `plan` (the path of
+`plan,fetch,build,test`), `publish`, `sign`, `mirror`, `token` (default the workflow's token) and
+`keep-work` (default `false`: the work directory, with the build output, is removed when the run ends, so
+a later step that reads the `plan` output sets it to `true`); the outputs are `changed`, `plan` (the path of
 `plan.json`) and `artifacts` (JSON of image to digest). The runner needs Docker to build, and `apt`
 and `gpgv` to plan (the Action installs the last two when they are missing). Until the first public
 release publishes the builder image, the Action builds it from its own checkout: pin the Action at the

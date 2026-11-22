@@ -41,6 +41,7 @@ class NightlyActionTest(unittest.TestCase):
                 "against": f"dir://{cls.target}",
                 "publish": "true",
                 "pyz": str(pyz),
+                "keep-work": "true",  # the checks below read plan.json and the build output after the run
             },
             scratch=cls.work / name,
             cwd=cls.work,

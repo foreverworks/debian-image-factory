@@ -260,7 +260,20 @@ class ActionFileTest(unittest.TestCase):
         document = action.read_action()
         self.assertEqual(
             list(action.mapping(document["inputs"])),
-            ["definition", "lock", "params", "snapshot", "against", "steps", "publish", "sign", "mirror", "pyz"],
+            [
+                "definition",
+                "lock",
+                "params",
+                "snapshot",
+                "against",
+                "steps",
+                "publish",
+                "sign",
+                "mirror",
+                "pyz",
+                "token",
+                "keep-work",
+            ],
         )
         self.assertEqual(list(action.mapping(document["outputs"])), ["changed", "plan", "artifacts"])
         self.assertEqual(action.input_defaults()["steps"], "plan,fetch,build,test")
@@ -296,6 +309,31 @@ class ActionFileTest(unittest.TestCase):
                 self.assertRegex(found[1], r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$", where)
                 self.assertRegex(found[2], r"^\s+# v\d+(\.\d+)*$", where)
         self.assertGreater(checked, 8)
+
+    def test_the_token_defaults_to_the_workflow_s_and_reaches_only_plan_and_publish_through_env(self) -> None:
+        self.assertEqual(action.input_defaults()["token"], "${{ github.token }}")
+        holders = {}
+        for step in action.read_steps():
+            for name, value in step.env.items():
+                if "inputs.token" in value:
+                    holders[step.id] = name
+            self.assertNotIn("token", step.run.lower().replace("github_token", ""), step.name)
+        self.assertEqual(holders, {"plan": "GITHUB_TOKEN", "publish": "GITHUB_TOKEN"})
+
+    def test_the_documented_examples_log_in_to_the_registry_with_a_pinned_action_and_say_what_they_need(self) -> None:
+        pinned = re.compile(r"docker/login-action@[0-9a-f]{40} # v\d+(\.\d+)*\n")
+        for path in (ROOT / "README.md", ROOT / "DESIGN.md"):
+            text = path.read_text(encoding="utf-8")
+            for block in re.findall(r"```yaml\n(.*?)```", text, re.DOTALL):
+                if "oci://" not in block or "foreverworks/debian-image-factory@" not in block:
+                    continue
+                with self.subTest(path=path.name):
+                    self.assertRegex(block, pinned)
+                    self.assertIn("password: ${{ github.token }}", block)
+                    self.assertIn("packages: write", block)
+                    self.assertLess(
+                        block.index("docker/login-action"), block.index("foreverworks/debian-image-factory@")
+                    )
 
     def test_the_nightly_uses_the_local_action_and_never_a_public_target(self) -> None:
         text = (WORKFLOWS / "nightly.yml").read_text(encoding="utf-8")
@@ -354,8 +392,45 @@ class InputChecksTest(unittest.TestCase):
         self.assertIn("publish needs the build step", result.log)
         self.assertTrue(self.run_setup(publish="true", against="dir:///x").ok)
 
+    def test_keep_work_is_true_or_false(self) -> None:
+        self.assertIn("keep-work is true or false, not 'maybe'", self.run_setup(**{"keep-work": "maybe"}).log)
+
     def test_publish_is_true_or_false(self) -> None:
         self.assertIn("publish is true or false, not 'yes'", self.run_setup(publish="yes").log)
+
+
+class CleanupTest(unittest.TestCase):
+    """The last step removes the work directory, whether or not the run passed, unless keep-work says not to."""
+
+    @staticmethod
+    def failing_run(root: Path, **inputs: str) -> action.Result:
+        """A run whose plan fails: the .pyz it is given exits at once."""
+        failing = root / "factory.py"
+        failing.write_text("raise SystemExit('this stands in for a plan that fails')\n")
+        return run_action({"pyz": str(failing), **inputs}, scratch=root / "temp", cwd=root, skip=("prerequisites",))
+
+    def test_a_failed_run_leaves_no_work_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            result = self.failing_run(Path(raw))
+            self.assertFalse(result.ok)
+            self.assertEqual(result.failed, "plan")
+            self.assertIn("cleanup", result.outputs)
+            work = Path(result.outputs["setup"]["work"])
+            self.assertTrue(work.parent.is_dir())
+            self.assertFalse(work.exists())
+
+    def test_keep_work_keeps_it(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            result = self.failing_run(Path(raw), **{"keep-work": "true"})
+            self.assertNotIn("cleanup", result.outputs)
+            self.assertTrue(Path(result.outputs["setup"]["work"]).is_dir())
+
+    def test_a_run_that_stopped_before_it_made_a_work_directory_has_nothing_to_remove(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            result = run_action({"steps": "deploy"}, scratch=root / "temp", cwd=root)
+            self.assertFalse(result.ok)
+            self.assertNotIn("cleanup", result.outputs)
 
 
 if __name__ == "__main__":

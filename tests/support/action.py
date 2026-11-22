@@ -3,8 +3,10 @@ does: each `run:` step is a bash script with `-e -o pipefail`, its `env:` evalua
 what it writes to `$GITHUB_OUTPUT` read back for the steps after it. `uses:` steps are skipped (the runner
 provides them). It also loads scripts/action-support, which is not a module name.
 
-Only the expressions the Action uses are understood: `inputs.X`, `steps.ID.outputs.NAME`, `github.action_path`
-and `runner.temp`, and `if:` conditions of `==` and `!=` comparisons joined by `&&`.
+Only the expressions the Action uses are understood: `inputs.X`, `steps.ID.outputs.NAME`, `github.action_path`,
+`github.token` (the `GITHUB_TOKEN` of `env`, empty without one) and `runner.temp`, and `if:` conditions of `==` and
+`!=` comparisons and `always()`, joined by `&&`. After a step fails only the steps whose condition has `always()`
+run, as on the runner.
 """
 
 import importlib.machinery
@@ -25,6 +27,7 @@ SUPPORT: Final = ROOT / "scripts" / "action-support"
 type Node = str | list[Node] | dict[str, Node]
 
 EXPRESSION: Final = re.compile(r"\$\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
+ALWAYS: Final = "always()"
 COMPARISON: Final = re.compile(r"\s*([A-Za-z0-9_.-]+)\s*(==|!=)\s*'([^']*)'\s*")
 
 
@@ -120,6 +123,8 @@ def holds(condition: str, context: Mapping[str, str]) -> bool:
     if not condition:
         return True
     for part in condition.split("&&"):
+        if part.strip() == ALWAYS:
+            continue
         found = COMPARISON.fullmatch(part)
         if found is None:
             raise ValueError(f"cannot evaluate the condition {condition!r}")
@@ -149,14 +154,15 @@ def run_action(
 ) -> Result:
     """Run the Action's shell steps in order with `inputs` (the others at their defaults), from `cwd`, with
     `scratch` as the runner's temp directory. Steps named in `skip` (by id) are left out, and the run stops after
-    the step `until` names. Stops at the first step that fails."""
+    the step `until` names. After the first step that fails only the steps that say `always()` run."""
     steps = read_steps()
     context: dict[str, str] = {
-        **{f"inputs.{name}": value for name, value in input_defaults().items()},
-        **{f"inputs.{name}": value for name, value in inputs.items()},
         "github.action_path": str(ROOT),
+        "github.token": (env or {}).get("GITHUB_TOKEN", ""),
         "runner.temp": str(scratch),
     }
+    context.update({f"inputs.{name}": evaluate(value, context) for name, value in input_defaults().items()})
+    context.update({f"inputs.{name}": value for name, value in inputs.items()})
     result = Result()
     environment = {
         **os.environ,
@@ -168,6 +174,8 @@ def run_action(
     scratch.mkdir(parents=True, exist_ok=True)
     for number, step in enumerate(steps, start=1):
         label = step.id or step.name or f"step {number}"
+        if not result.ok and ALWAYS not in step.condition:
+            continue
         if step.uses or step.id in skip or not holds(step.condition, context):
             continue
         script = scratch / f"step-{number:02d}.sh"
@@ -187,9 +195,8 @@ def run_action(
         written = outputs_of(output)
         result.outputs[step.id] = written
         context.update({f"steps.{step.id}.outputs.{key}": value for key, value in written.items()})
-        if done.returncode != 0:
+        if done.returncode != 0 and result.ok:
             result.ok, result.failed = False, label
-            return result
         if until is not None and step.id == until:
             return result
     return result

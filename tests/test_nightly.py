@@ -100,6 +100,7 @@ class NightTest(test_cli.CliCase):
                     "against": "" if target is None else f"dir://{target}",
                     "mirror": self.mirror,
                     "pyz": str(self.wrapper()),
+                    "keep-work": "true",  # the tests read plan.json after the run
                     **inputs,
                 },
                 scratch=Path(raw) / "temp",

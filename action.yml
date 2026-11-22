@@ -35,6 +35,15 @@ inputs:
   pyz:
     description: A local .pyz to run instead of the release the lock pins, not checked against the lock. Only for testing the factory itself.
     default: ""
+  token:
+    description: >-
+      The GitHub token plan and publish use for github-release:// targets, passed to them as GITHUB_TOKEN and to
+      no other step. The workflow's own token needs contents: write to publish a release. For oci:// targets the
+      factory reads the Docker config instead: log in to the registry in an earlier step (docker/login-action).
+    default: ${{ github.token }}
+  keep-work:
+    description: Whether to keep the Action's work directory (plan.json, the build output, the logs) after the run (true or false). By default it is removed at the end, and the plan output then names a file that is gone.
+    default: "false"
 
 outputs:
   changed:
@@ -57,6 +66,7 @@ runs:
         STEPS: ${{ inputs.steps }}
         PUBLISH: ${{ inputs.publish }}
         AGAINST: ${{ inputs.against }}
+        KEEP_WORK: ${{ inputs.keep-work }}
         WORK_BASE: ${{ runner.temp }}
       run: |
         set -euo pipefail
@@ -81,6 +91,10 @@ runs:
           [ -n "${want[build]:-}" ] || { echo "debian-image-factory: publish needs the build step" >&2; exit 1; }
           [ -n "${AGAINST//[[:space:]]/}" ] || { echo "debian-image-factory: publish needs against: the targets to write to" >&2; exit 1; }
         fi
+        case "$KEEP_WORK" in
+          true | false) ;;
+          *) echo "debian-image-factory: keep-work is true or false, not '$KEEP_WORK'" >&2; exit 1 ;;
+        esac
         work=$(mktemp -d "$WORK_BASE/debian-image-factory.XXXXXX")
         {
           echo "work=$work"
@@ -166,6 +180,7 @@ runs:
         SNAPSHOT: ${{ inputs.snapshot }}
         AGAINST: ${{ inputs.against }}
         MIRROR: ${{ inputs.mirror }}
+        GITHUB_TOKEN: ${{ inputs.token }}
       run: |
         set -euo pipefail
         args=(plan --lock "$LOCK" --definition "$DEFINITION" --snapshot "$SNAPSHOT" --out "$WORK/plan.json")
@@ -257,6 +272,7 @@ runs:
         WORK: ${{ steps.setup.outputs.work }}
         AGAINST: ${{ inputs.against }}
         SIGN: ${{ inputs.sign }}
+        GITHUB_TOKEN: ${{ inputs.token }}
       run: |
         set -euo pipefail
         args=(publish "$WORK/out" --sign "$SIGN")
@@ -279,3 +295,15 @@ runs:
         [ ! -d "$WORK/out" ] || out=("$WORK/out")
         json=$(python3 "$ACTION_PATH/scripts/action-support" artifacts --pyz "$PYZ" "$PLAN" "${out[@]}")
         echo "json=$json" >> "$GITHUB_OUTPUT"
+
+    # The work directory holds the build output, which can be gigabytes: it goes when the run ends, whether the run
+    # passed or not, unless keep-work asks for it (a later step that reads the plan output needs it).
+    - name: Remove the work directory
+      id: cleanup
+      if: always() && steps.setup.outputs.work != '' && inputs.keep-work != 'true'
+      shell: bash
+      env:
+        WORK: ${{ steps.setup.outputs.work }}
+      run: |
+        set -euo pipefail
+        rm -rf -- "$WORK" || echo "debian-image-factory: could not remove $WORK" >&2

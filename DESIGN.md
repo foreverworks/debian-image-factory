@@ -1444,6 +1444,11 @@ jobs:
     concurrency: {group: "images-${{ github.ref }}", cancel-in-progress: false}
     steps:
       - uses: actions/checkout@<commit> # v7.0.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
       - id: factory
         uses: foreverworks/debian-image-factory@<commit> # v0.6.0
         with:
@@ -1474,9 +1479,21 @@ tier):
 | `sign` | `none` | `publish --sign` |
 | `mirror` | none | `--mirror`, a server that serves snapshot.debian.org's paths |
 | `pyz` | none | a local `.pyz` to run instead of the lock's release, unchecked: for testing the factory itself |
+| `token` | `${{ github.token }}` | the GitHub token `plan` and `publish` get as `GITHUB_TOKEN` (through `env:`, never on a command line), for `github-release://` targets; no other step sees it |
+| `keep-work` | `false` | `true` keeps the work directory (`plan.json`, the build output, the logs) after the run; by default the last step removes it, whether the run passed or failed, and the `plan` output then names a file that is gone |
 
 Outputs: `changed` (`true` when the plan builds at least one image), `plan` (the path of `plan.json`)
 and `artifacts` (JSON: image to digest, of what the plan reuses or waits for and what the run built).
+
+**Credentials and permissions.** The Action logs in nowhere. A GitHub Actions step does not get the
+workflow's token in its environment, and the factory reads `GITHUB_TOKEN` (else `GH_TOKEN`) for a
+`github-release://` target, so the Action's `token` input, which defaults to `${{ github.token }}`,
+hands it to the `plan` and `publish` steps and to none other. For an `oci://` target the factory reads
+the Docker config (9.1), so the workflow logs in before the Action with `docker/login-action`, pinned by
+commit with its version as a comment, as the example shows; on ghcr.io the workflow's token with
+`packages: write` is enough. Publishing to a release needs `contents: write`; a job that only plans
+needs read access (`contents: read`, and `packages: read` for a ghcr.io package). Without them `plan`
+or `publish` fails with the registry's or GitHub's refusal, named in the error.
 
 **One run per image and target at a time.** Two runs that publish the same image to the same target
 race: both see `build`, both push, and on a registry without the referrers API both rewrite the tag
