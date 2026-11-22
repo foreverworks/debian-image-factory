@@ -36,6 +36,8 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils
 
+      # A world-writable socket is safe here: the runner is a fresh VM that runs this one job and is thrown away
+      # after it, so no other user or job can reach the socket.
       - name: Docker, installed when the runner has none
         run: |
           command -v docker >/dev/null || sudo apt-get install -y -q --no-install-recommends docker.io
