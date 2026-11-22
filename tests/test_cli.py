@@ -9,12 +9,15 @@ import os
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.parse
+from email.message import Message
 from pathlib import Path
 from unittest import mock
 
 import input_lock
 from input_lock import JsonValue
+from input_lock import fetch as input_lock_fetch
 from input_lock.records import TestOutcome
 
 from debian_image_factory import cli, commands, definition, publish
@@ -689,6 +692,55 @@ class LockTest(CliCase):
         run = self.run_cli(root, "lock", "check")
         self.assertEqual(run.code, 1)
         self.assertIn("does not match its sha256", run.err)
+
+    BLOB_URL = "https://downloads.example.com/blob-1.bin"
+
+    def blob_workspace(self) -> Path:
+        """A workspace whose core places a `builtin:file` download, its checksum stale."""
+        factory = FACTORY.replace(
+            "[images.core]", '[modules.blob]\nuse = "builtin:file"\npath = "/opt/blob"\n\n[images.core]'
+        )
+        blob = {"module": "blob", "sha256": "3" * 64, "url": self.BLOB_URL, "used_by": ["core"], "version": "1"}
+        return self.workspace(factory=factory, inputs={"blob": blob})
+
+    def checksums(self, root: Path, served: dict[str, bytes], *argv: str) -> Run:
+        """`lock checksums` with input-lock's downloads answered from `served` (a missing URL is a 404)."""
+
+        def hashes(url: str, algorithms: list[str]) -> dict[str, str]:
+            if url not in served:
+                raise urllib.error.HTTPError(url, 404, "Not Found", Message(), None)
+            return {algorithm: hashlib.new(algorithm, served[url]).hexdigest() for algorithm in algorithms}
+
+        with mock.patch.object(input_lock_fetch, "hashes", side_effect=hashes):
+            return self.run_cli(root, "lock", "checksums", *argv, sources=False)
+
+    def test_lock_checksums_fills_the_named_entry_from_its_download(self) -> None:
+        root = self.blob_workspace()
+        run = self.checksums(root, {self.BLOB_URL: b"the blob"}, "--entry", "blob")
+        self.assertEqual(run.code, 0, run.err)
+        entry = json.loads((root / "lock.json").read_text())["inputs"]["blob"]
+        self.assertEqual(entry["sha256"], hashlib.sha256(b"the blob").hexdigest())
+        self.assertIn(f"blob: sha256 {'3' * 64} -> {entry['sha256']}", run.out)
+
+    def test_lock_checksums_needs_an_entry_or_a_base(self) -> None:
+        run = self.checksums(self.blob_workspace(), {})
+        self.assertEqual(run.code, 2)
+        self.assertIn("--entry NAME", run.err)
+
+    def test_lock_checksums_writes_nothing_when_a_download_fails(self) -> None:
+        root = self.blob_workspace()
+        before = (root / "lock.json").read_text()
+        run = self.checksums(root, {}, "--entry", "blob")
+        self.assertEqual(run.code, 1)
+        self.assertIn("nothing written", run.err)
+        self.assertEqual((root / "lock.json").read_text(), before)
+
+    def test_lock_checksums_refuses_a_lock_the_definition_disagrees_with(self) -> None:
+        root = self.blob_workspace()
+        (root / "factory.toml").write_text(FACTORY)
+        run = self.checksums(root, {self.BLOB_URL: b"the blob"}, "--entry", "blob")
+        self.assertEqual(run.code, 1)
+        self.assertIn("blob", run.err)
 
     def test_lock_baseline_writes_the_reserved_entry(self) -> None:
         root = self.workspace()

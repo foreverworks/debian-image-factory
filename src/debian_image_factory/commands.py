@@ -16,6 +16,7 @@ from typing import Final, TextIO
 
 import input_lock
 from input_lock import JsonValue, Lock, Package
+from input_lock import cli as input_lock_cli
 
 from . import (
     archive,
@@ -197,6 +198,24 @@ def lock_snapshot(lock_path: Path, choice: str, sources: Sources, out: TextIO) -
     write_lock(lock_path, updated)
     print(f"debian_snapshot: {before} -> {chosen}" if before != chosen else f"debian_snapshot stays {chosen}", file=out)
     return 0
+
+
+def lock_checksums(lock_path: Path, definition_path: Path, entries: Sequence[str], base: str | None) -> int:
+    """input-lock's `refresh` on a lock the definition agrees with: the checksums of the named entries, or of
+    the ones whose version moved since the git ref `base`, downloaded and verified (a `deb` entry through
+    its vendor's signed InRelease). input-lock writes nothing unless every entry verified; the definition is
+    checked against the result again, so a refresh never leaves a lock `plan` would refuse."""
+    checked_lock(load(lock_path, definition_path))
+    if not entries and base is None:
+        raise Usage("lock checksums needs --entry NAME (repeat) or --base REF (the branch a bump goes into)")
+    argv = ["refresh", "--lock", str(lock_path)]
+    argv += ["--base", base] if base is not None else []
+    for name in entries:
+        argv += ["--entry", name]
+    status = input_lock_cli.main(argv)
+    if status == 0:
+        checked_lock(load(lock_path, definition_path))
+    return status
 
 
 def lock_baseline(lock_path: Path, definition_path: Path, snapshot_id: str, sources: Sources, out: TextIO) -> int:

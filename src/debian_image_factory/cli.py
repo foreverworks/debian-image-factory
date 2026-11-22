@@ -1,8 +1,8 @@
 """The command line (DESIGN 9.1). Exit codes: 0 done, 1 a check or validation failed, 2 usage.
 
-This release has `lock check`, `lock snapshot`, `lock baseline`, `plan`, `fetch`, `build` (core and oci),
-`test`, `publish` (to `dir://`, `oci://` and `github-release://`) and `verify`; the other kinds and targets
-arrive in later releases.
+This release has `lock check`, `lock snapshot`, `lock checksums`, `lock baseline`, `plan`, `fetch`, `build`
+(core, oci, incus, installer and os), `test`, `publish` (to `dir://`, `oci://` and `github-release://`) and
+`verify`; the other commands arrive in later releases.
 """
 
 import argparse
@@ -59,6 +59,13 @@ def parser() -> argparse.ArgumentParser:
     which = snapshot.add_mutually_exclusive_group(required=True)
     which.add_argument("--latest", action="store_true", help="the newest completed snapshot ID")
     which.add_argument("--id", metavar="ID", help="a given snapshot ID (it must be completed)")
+
+    sums = lock.add_parser(
+        "checksums", help="fill checksums of entries whose version moved; verify vendor indices and signatures"
+    )
+    files_options(sums)
+    sums.add_argument("--entry", action="append", default=[], metavar="NAME", help="refresh this entry (repeat)")
+    sums.add_argument("--base", metavar="REF", help="refresh the entries whose version differs from this git ref")
 
     baseline = lock.add_parser("baseline", help="move the baseline snapshot")
     files_options(baseline)
@@ -202,7 +209,9 @@ def dispatch(arguments: argparse.Namespace) -> int:
             return commands.lock_baseline(
                 arguments.lock, arguments.definition, arguments.id, sources_of(arguments), sys.stdout
             )
-        raise commands.Usage("lock needs a command: check, snapshot or baseline")
+        if arguments.lock_command == "checksums":
+            return commands.lock_checksums(arguments.lock, arguments.definition, arguments.entry, arguments.base)
+        raise commands.Usage("lock needs a command: check, snapshot, checksums or baseline")
     if arguments.command == "plan":
         if arguments.rebuild and not arguments.reason:
             raise commands.Usage('--rebuild needs --reason "<why>": the reason is recorded')
