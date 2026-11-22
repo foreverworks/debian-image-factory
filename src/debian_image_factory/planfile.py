@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, NotRequired, TypedDict
 
-from input_lock import JsonValue, Package, Value
+from input_lock import TRUST, JsonValue, Package, Value
 
 from .definition import Param
 
@@ -40,6 +40,9 @@ class ImageEntry(TypedDict):
     inputs: dict[str, dict[str, Value]]
     """Lock entry name -> its `build_fields` (`url` rendered; a field is text, a list of names or null)."""
     modules: tuple[str, ...]
+    trust: dict[str, dict[str, str]]
+    """Entry name -> `signed_by` (the keyring entry) and the rendered `sums_url` and `sums_sig_url` when it has
+    them: the signed checksum list `fetch` verifies the entry's checksum against."""
     params: dict[str, Param]
     checks: tuple[str, ...]
     state: str
@@ -134,6 +137,21 @@ def _fields(value: object, where: str) -> dict[str, Value]:
     return found
 
 
+def _trust(value: object, where: str) -> dict[str, dict[str, str]]:
+    found: dict[str, dict[str, str]] = {}
+    for name, raw in _object(value, where).items():
+        fields = _object(raw, f"{where}.{name}")
+        unknown = sorted(set(fields) - set(TRUST))
+        if unknown:
+            raise ValueError(f"{where}.{name} has fields {unknown}, which are not among {list(TRUST)}")
+        found[name] = {field: _text(item, f"{where}.{name}.{field}") for field, item in fields.items()}
+        if "signed_by" not in found[name]:
+            raise ValueError(f"{where}.{name}.signed_by is missing")
+        if "sums_sig_url" in found[name] and "sums_url" not in found[name]:
+            raise ValueError(f"{where}.{name}.sums_sig_url needs a sums_url")
+    return found
+
+
 def parse_image(name: str, value: object) -> ImageEntry:
     """One `images.<name>` entry of a plan, every field checked."""
     where = f"images.{name}"
@@ -163,6 +181,7 @@ def parse_image(name: str, value: object) -> ImageEntry:
         ),
         "inputs": inputs,
         "modules": _texts(member("modules"), f"{where}.modules"),
+        "trust": _trust(member("trust"), f"{where}.trust"),
         "params": _params(member("params"), f"{where}.params"),
         "checks": _texts(member("checks"), f"{where}.checks"),
         "state": state,

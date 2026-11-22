@@ -9,7 +9,8 @@ from collections.abc import Mapping, Sequence
 from typing import Final
 
 import input_lock
-from input_lock import JsonValue
+from input_lock import TRUST, Entry, JsonValue
+from input_lock.lock import render  # not in input-lock's __all__: renders any url template field of an entry
 
 from . import ENGINE, __version__
 from .definition import KIND_DEFAULTS, Definition, Param, required_checks, top_down
@@ -91,6 +92,17 @@ def as_json(fields: Mapping[str, input_lock.Value]) -> dict[str, JsonValue]:
     return {key: [*value] if isinstance(value, list) else value for key, value in fields.items()}
 
 
+def trust_of(entry: Entry) -> dict[str, JsonValue]:
+    """How an entry's checksum is vouched for, for `fetch`: its `signed_by` keyring entry and the rendered
+    `sums_url` and `sums_sig_url`. input-lock keeps these out of `build_fields`, so out of every identity:
+    a signature is checked, it does not change the bytes."""
+    found: dict[str, JsonValue] = {}
+    for field in TRUST:
+        if field in entry:
+            found[field] = str(entry[field]) if field == "signed_by" else render(entry, field)
+    return found
+
+
 def image_entry(definition: Definition, inputs: ImageInputs) -> dict[str, JsonValue]:
     spec = definition.images[inputs.name]
     requested: list[JsonValue] = [
@@ -107,6 +119,7 @@ def image_entry(definition: Definition, inputs: ImageInputs) -> dict[str, JsonVa
         "packages": [[name, version, arch] for name, version, arch in inputs.packages],
         "inputs": {name: as_json(input_lock.build_fields(entry)) for name, entry in sorted(inputs.entries.items())},
         "modules": [*inputs.modules],
+        "trust": {name: trust_of(entry) for name, entry in sorted(inputs.entries.items()) if "signed_by" in entry},
         "params": dict(inputs.params),
         "checks": [*required_checks(definition, inputs.name, bool(inputs.entries))],
     }

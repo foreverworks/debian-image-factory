@@ -6,9 +6,9 @@
       "depName": "foreverworks/input-lock",
       "description": "The lock library the factory bundles into its .pyz; scripts/vendor-input-lock fetches and checks it. debian_snapshot is the builder image's snapshot.",
       "extractVersion": "^v(?<version>.+)$",
-      "sha256": "15ebd5347d80528ab8341aa568a6bfd5339ee5be7832dd2316413e31bf02652e",
+      "sha256": "d352b3885f730c37e90c94a64bdab7e3b22bf0afcc3743fa0fcf80433665108b",
       "url": "https://github.com/foreverworks/input-lock/releases/download/v{version}/input-lock-{version}.pyz",
-      "version": "0.1.0"
+      "version": "0.2.0"
     }
   },
   "schema": 1

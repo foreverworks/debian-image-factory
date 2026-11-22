@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 
 from debian_image_factory import ENGINE, cli, published, records
+from debian_image_factory.checks import tarball
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLES = ROOT / "examples"
@@ -180,6 +181,14 @@ class CoreBuildTest(unittest.TestCase):
             ):
                 results[predicate["configuration"][0]["name"]] = predicate["result"]
         self.assertEqual(results, dict.fromkeys(CORE_CHECKS, "PASSED"))
+
+    def test_no_key_or_credential_token_in_any_file_of_core(self) -> None:
+        """The scan `no-machine-identity` runs, on Debian 13's own files: private key blocks and the credential
+        shapes of checks/scanning.py (GitHub, AWS, Slack, npm, PyPI, GitLab) must find nothing, so a hit later
+        is a real leak and not the distribution's own text. Plain files under /usr/share/doc are searched."""
+        found = tarball.scan_tarball(artifact(self.work / "out1"), frozenset(), None, True)
+        self.assertGreater(len(found.members), 1000, "the scan read the whole root")
+        self.assertEqual(found.key_files, ())
 
     def test_published_core_is_reused(self) -> None:
         target = self.work / "target"

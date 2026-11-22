@@ -11,10 +11,16 @@ sha256 (`input_path` says where).
 A file that does not match is refused, naming its URL, and never tried from another source: a mirror or
 cache is a performance layer, never an authority (7.7). Reads go through `Sources.read`, so tests and
 `--mirror` use the same code as snapshot.debian.org.
+
+An entry that has `signed_by` and `sums_url` (input-lock 0.2.0's trust fields, DESIGN 6.1) is also checked
+against its vendor's signed checksum list: `gpgv` verifies the list with the keyring entry `signed_by` names, and
+the list's checksum for the file must equal the lock's (Node's `SHASUMS256.txt.asc` is one). The list is kept in
+the cache by its sha256, with a small note keyed by the entry's sha256 that `vouched_by` reads back for provenance.
 """
 
 import filecmp
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -25,10 +31,12 @@ from pathlib import Path, PurePosixPath
 from typing import Final, TextIO
 
 from input_lock import Package, Value
+from input_lock.fetch import gpgv
+from input_lock.signed import dearmor, listed, sums_name
 
-from . import archive, debian, resolve
+from . import archive, debian, records, resolve
 from .commands import Failed, Sources, Usage
-from .planfile import Plan, read_plan
+from .planfile import ImageEntry, Plan, read_plan
 
 CHECKSUMS: Final = (("sha256", 64, hashlib.sha256), ("sha512", 128, hashlib.sha512), ("sha1", 40, hashlib.sha1))
 """Field name, hex length and constructor of the checksums a locked input may carry."""
@@ -46,6 +54,18 @@ class LockedInput:
 
 
 @dataclass(frozen=True, slots=True)
+class Vouched:
+    """A locked input whose checksum a vendor's signed list vouches for, and what verifies it."""
+
+    entry: LockedInput
+    keyring: LockedInput
+    """The entry `signed_by` names: a trust root, already pinned by its own checksum."""
+    sums_url: str
+    sums_sig_url: str | None
+    """The detached signature of the list, when it is not clear-signed."""
+
+
+@dataclass(frozen=True, slots=True)
 class FetchPlan:
     """What `fetch` reads of a plan.json: the snapshot, where to look, and everything to fetch."""
 
@@ -57,6 +77,8 @@ class FetchPlan:
     """The union of every image's resolved set, sorted."""
     inputs: tuple[LockedInput, ...]
     """Every locked input of every image, once each, sorted."""
+    vouched: tuple[Vouched, ...]
+    """Every input with a signed checksum list, once each, sorted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,13 +115,40 @@ def locked_input(image: str, name: str, fields: Mapping[str, Value]) -> LockedIn
     return LockedInput(name, url, checksums[0][1], tuple(checksums))
 
 
+def vouched_inputs(image: str, entry: ImageEntry) -> list[Vouched]:
+    """The inputs of an image that name a signed checksum list (`sums_url`) and the keyring that signs it.
+
+    Failed when the keyring is not among the image's inputs, or is not https like every input."""
+    found: list[Vouched] = []
+    for name, trust in sorted(entry["trust"].items()):
+        if "sums_url" not in trust:
+            continue  # an apt entry's signed list is its repository's Release, read by the deb module (M5)
+        keyring = trust["signed_by"]
+        if keyring not in entry["inputs"] or name not in entry["inputs"]:
+            raise Failed(f"plan: images.{image}.trust.{name}: {name} and its keyring {keyring} must both be inputs")
+        for field in ("sums_url", "sums_sig_url"):
+            if field in trust and not trust[field].startswith("https://"):
+                raise Failed(f"plan: images.{image}.trust.{name}.{field} must be an https:// URL, not {trust[field]!r}")
+        found.append(
+            Vouched(
+                locked_input(image, name, entry["inputs"][name]),
+                locked_input(image, keyring, entry["inputs"][keyring]),
+                trust["sums_url"],
+                trust.get("sums_sig_url"),
+            )
+        )
+    return found
+
+
 def fetch_plan(plan: Plan) -> FetchPlan:
     """What fetch needs of a plan: the union of every image's packages and locked inputs."""
     packages: set[Package] = set()
     inputs: set[LockedInput] = set()
+    vouched: set[Vouched] = set()
     for image, entry in sorted(plan["images"].items()):
         packages.update(entry["packages"])
         inputs.update(locked_input(image, name, fields) for name, fields in sorted(entry["inputs"].items()))
+        vouched.update(vouched_inputs(image, entry))
     debian_ = plan["debian"]
     return FetchPlan(
         plan["snapshot"],
@@ -108,6 +157,7 @@ def fetch_plan(plan: Plan) -> FetchPlan:
         debian_["architecture"],
         tuple(sorted(packages)),
         tuple(sorted(inputs, key=lambda item: (item.name, item.url, item.checksums))),
+        tuple(sorted(vouched, key=lambda item: (item.entry.name, item.entry.url, item.keyring.name))),
     )
 
 
@@ -213,6 +263,115 @@ def download_input(item: LockedInput, sources: Sources) -> bool:
         raise Failed(f"{item.url}: cannot be read: {error}") from None
     verified_input(item, data)
     archive.store(sources.cache, data)
+    return True
+
+
+# ---- a vendor's signed checksum list ------------------------------------------------------------------
+
+
+NOTES: Final = "vouched"
+"""`<cache>/vouched/<input sha256>.json`: which signed list vouched for an input, and which signature."""
+
+
+def note_path(cache: Path, sha256: str) -> Path:
+    return cache / NOTES / f"{sha256}.json"
+
+
+def _remote(value: object) -> records.Remote | None:
+    if not isinstance(value, dict):
+        return None
+    uri, sha256 = value.get("uri"), value.get("sha256")
+    ok = isinstance(uri, str) and isinstance(sha256, str) and re.fullmatch("[0-9a-f]{64}", sha256)
+    return records.Remote(str(uri), str(sha256)) if ok else None
+
+
+def vouched_by(cache: Path, sha256: str) -> tuple[records.Remote, ...]:
+    """The signed files `fetch` verified for the input with this sha256, as provenance names dependencies: the
+    checksum list, then its detached signature when it has one, each with its address and the sha256 of the
+    file in the cache. Empty when there is no note or a file it names is not in the cache any more."""
+    try:
+        note: object = json.loads(note_path(cache, sha256).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    if not isinstance(note, dict) or "list" not in note:
+        return ()
+    files = [_remote(note.get(key)) for key in ("list", "signature") if key in note]
+    found = [one for one in files if one is not None]
+    ok = len(found) == len(files) and all(archive.cached(cache, one.sha256) is not None for one in found)
+    return tuple(found) if ok else ()
+
+
+def agreement(item: Vouched, text: str) -> str | None:
+    """Why the signed list `text` does not vouch for the input's lock checksums; None when it does.
+
+    The list must give the file a checksum of at least one algorithm the lock has, and every checksum of an
+    algorithm both have must be equal."""
+    try:
+        given = listed(text, sums_name(item.entry.url, item.sums_url))
+    except ValueError as error:
+        return str(error)
+    ours = dict(item.entry.checksums)
+    common = sorted(set(given) & set(ours))
+    if not common:
+        return f"the signed list gives {sorted(given)} for the file and the lock has {sorted(ours)}: nothing to compare"
+    wrong = [
+        f"{name} {given[name]} in the list, {ours[name]} in the lock" for name in common if given[name] != ours[name]
+    ]
+    return "the signed list and the lock disagree: " + "; ".join(wrong) if wrong else None
+
+
+def read_url(url: str, sources: Sources) -> bytes:
+    try:
+        return sources.read(url)
+    except (OSError, ValueError) as error:
+        raise Failed(f"{url}: cannot be read: {error}") from None
+
+
+def judged(item: Vouched, ring: bytes, data: bytes, signature: bytes | None) -> None:
+    """Failed naming the list's URL unless its signature verifies with `ring` and it vouches for the input."""
+    try:
+        text = gpgv(ring, data, signature).decode("utf-8")
+    except ValueError as error:  # gpgv's refusals and a text that is not UTF-8
+        raise Failed(f"{item.sums_url}: {error}") from None
+    problem = agreement(item, text)
+    if problem is not None:
+        raise Failed(f"{item.sums_url}: {problem}")
+
+
+def check_vouched(item: Vouched, sources: Sources) -> bool:
+    """Make sure the vendor's signed list vouches for the locked checksum; True when it was downloaded.
+
+    The list is verified with the keyring entry (read from the cache, where `download_input` checked it
+    against the lock's checksum) and must give the file the lock's checksum. A copy in the cache is verified
+    again, never trusted; one that no longer verifies is replaced by a fresh download. Raises Failed naming
+    the list's URL."""
+    keyring_file = archive.cached(sources.cache, item.keyring.sha256)
+    if keyring_file is None:
+        raise Failed(f"{item.keyring.url}: the keyring is not in the cache {sources.cache}")
+    try:
+        ring = dearmor(keyring_file.read_bytes())
+    except ValueError as error:
+        raise Failed(f"{item.keyring.url}: {error}") from None
+    noted = vouched_by(sources.cache, item.entry.sha256)
+    kept = [archive.cached(sources.cache, one.sha256) for one in noted]
+    if noted and noted[0].uri == item.sums_url and len(noted) == (1 if item.sums_sig_url is None else 2):
+        blobs = [path.read_bytes() for path in kept if path is not None]
+        try:
+            judged(item, ring, blobs[0], blobs[1] if len(blobs) > 1 else None)
+            return False
+        except Failed:
+            pass  # a cache is never an authority: the list may have been re-signed, so read it again
+    data = read_url(item.sums_url, sources)
+    signature = None if item.sums_sig_url is None else read_url(item.sums_sig_url, sources)
+    judged(item, ring, data, signature)
+    note: dict[str, dict[str, str]] = {
+        "list": {"uri": item.sums_url, "sha256": archive.store(sources.cache, data).name}
+    }
+    if signature is not None and item.sums_sig_url is not None:
+        note["signature"] = {"uri": item.sums_sig_url, "sha256": archive.store(sources.cache, signature).name}
+    path = note_path(sources.cache, item.entry.sha256)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(note, sort_keys=True) + "\n", encoding="utf-8")
     return True
 
 
@@ -332,6 +491,16 @@ def fetch_command(plan_path: Path, sources: Sources, *, bundle: bool, out: TextI
                 inputs_reused += 1
         except Failed as error:
             problems.append(str(error))
+    vouched_fetched = vouched_reused = 0
+    if not problems:  # the keyrings are in the cache only when every input was
+        for vouch in plan.vouched:
+            try:
+                if check_vouched(vouch, sources):
+                    vouched_fetched += 1
+                else:
+                    vouched_reused += 1
+            except Failed as error:
+                problems.append(str(error))
     if problems:
         raise Failed("\n".join(problems))
     mirror = mirror_dir(sources.cache, plan.snapshot)
@@ -343,5 +512,11 @@ def fetch_command(plan_path: Path, sources: Sources, *, bundle: bool, out: TextI
     print(f"suites: {len(indices)} verified at snapshot {plan.snapshot}", file=out)
     print(f"packages: {fetched} fetched, {reused} already cached ({len(found)} in all)", file=out)
     print(f"inputs: {inputs_fetched} fetched, {inputs_reused} already cached ({len(plan.inputs)} in all)", file=out)
+    if plan.vouched:
+        print(
+            f"signed checksum lists: {vouched_fetched} fetched, {vouched_reused} already cached "
+            f"({len(plan.vouched)} in all), each verified with its keyring",
+            file=out,
+        )
     print(f"mirror: {mirror}", file=out)
     return 0

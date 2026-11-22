@@ -95,11 +95,12 @@ You write two files. The lock holds versions; the definition holds names.
 
 `lock.json` (maintained by tools, reviewed by you). Every download has a checksum, and so does the
 key that vouches for it: the Node.js release keyring is an entry of its own, so a key change shows
-up as a diff you review.
+up as a diff you review. `signed_by` and `sums_url` tell `fetch` to check the checksum against
+Node.js's own signed `SHASUMS256.txt.asc` before anything is built (they make it a schema 2 lock).
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "debian_snapshot": "20261121T004329Z",
   "inputs": {
     "node-26": {
@@ -107,6 +108,8 @@ up as a diff you review.
       "version": "26.13.1",
       "url": "https://nodejs.org/dist/v{version}/node-v{version}-linux-x64.tar.xz",
       "sha256": "5c063e46bab0fbc1c17cc445d7ff129cbdcd0471be6ed83b6ab864f8143bc864",
+      "signed_by": "node-release-keys",
+      "sums_url": "https://nodejs.org/dist/v{version}/SHASUMS256.txt.asc",
       "used_by": ["node-26"]
     },
     "node-release-keys": {

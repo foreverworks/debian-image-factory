@@ -54,18 +54,69 @@ class ScanTest(unittest.TestCase):
         )
         self.assertEqual(found.contents, {"/etc/a": b"one"})
 
-    def test_private_keys_outside_documentation(self) -> None:
+    def test_private_keys_are_found_in_plain_files_wherever_they_are(self) -> None:
         found = self.scan(
             {
                 "./root/id": KEY,
                 "./etc/notes": b"no key here",
                 "./usr/share/doc/ssh/example": KEY,
                 "./usr/share/man/man1/ssh.1": KEY,
+                "./usr/share/info/ssh.info": KEY,
                 "./srv/key": b"text\n" + KEY,
             },
             keys=True,
         )
-        self.assertEqual(found.key_files, ("/root/id", "/srv/key"))
+        self.assertEqual(
+            found.key_files,
+            (
+                "/root/id",
+                "/srv/key",
+                "/usr/share/doc/ssh/example",
+                "/usr/share/info/ssh.info",
+                "/usr/share/man/man1/ssh.1",
+            ),
+        )
+
+    def test_only_compressed_documentation_is_exempt(self) -> None:
+        exempt = {
+            f"./usr/share/{tree}/pkg/file{suffix}": KEY
+            for tree in ("doc", "man", "info")
+            for suffix in (".gz", ".bz2", ".xz", ".zst")
+        }
+        self.assertEqual(self.scan(exempt, keys=True).key_files, ())
+        near = {
+            "./usr/share/doc/pkg/file.gz.txt": KEY,
+            "./usr/share/docs/pkg/file.gz": KEY,
+            "./usr/share/doc/x.GZ": KEY,
+        }
+        self.assertEqual(
+            self.scan(near, keys=True).key_files,
+            ("/usr/share/doc/pkg/file.gz.txt", "/usr/share/doc/x.GZ", "/usr/share/docs/pkg/file.gz"),
+        )
+
+    def test_tokens_are_named_by_file_and_kind_with_a_redacted_form(self) -> None:
+        token = b"gh" + b"p_" + b"aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fH3jL5"
+        found = self.scan(
+            {
+                "./root/.netrc": b"password " + token + b"\n",
+                "./usr/share/doc/x/notes": token,
+                "./usr/share/doc/x.gz": token,
+            },
+            keys=True,
+        )
+        self.assertEqual(
+            found.key_files,
+            (
+                "/root/.netrc (GitHub token: ghp_…(40 characters))",
+                "/usr/share/doc/x/notes (GitHub token: ghp_…(40 characters))",
+            ),
+        )
+        self.assertNotIn(token.decode()[5:], " ".join(found.key_files))
+
+    def test_a_key_and_a_token_in_one_file_are_two_entries(self) -> None:
+        token = b"npm" + b"_" + b"aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fH3jL5"
+        found = self.scan({"./root/both": KEY + token}, keys=True)
+        self.assertEqual(len(found.key_files), 2)
 
     def test_keys_are_not_searched_when_not_asked_for(self) -> None:
         self.assertEqual(self.scan({"./root/id": KEY}).key_files, ())

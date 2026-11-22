@@ -13,6 +13,8 @@ from typing import Final
 
 from input_lock import JsonValue
 
+from . import nodejs
+
 SCHEMA: Final = 1
 
 KINDS: Final = ("core", "oci", "incus", "installer", "os")
@@ -220,6 +222,8 @@ def parse_modules(data: Mapping[str, JsonValue], params: Mapping[str, Param], fo
             found.append(f"{where}.use: {use!r} is not one of {list(BUILTIN_MODULES)}")
         elif not use.startswith("builtin:") and not relative_path(use):
             found.append(f"{where}.use: a script path is relative to the definition and stays inside it")
+        if use == nodejs.MODULE:
+            found.extend(f"{where}: {problem}" for problem in nodejs.table_problems(raw))
         enabled_by = text(raw, "enabled_by", where, found)
         if enabled_by is not None:
             if enabled_by not in params:
