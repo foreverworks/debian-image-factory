@@ -1,0 +1,281 @@
+# The GitHub Action (DESIGN 9.2): plan, fetch, build, test and publish with the factory release the
+# consumer's lock pins. Every input reaches a script through env:, never through ${{ }} inside a script
+# (scripts/action-support shell, run by scripts/test static, fails a step that does it).
+name: Debian Image Factory
+description: Plan, fetch, build, test and publish Debian images with the release of the Debian Image Factory your lock pins, and build only what changed.
+
+inputs:
+  definition:
+    description: The build definition (factory.toml).
+    default: factory.toml
+  lock:
+    description: The lock (lock.json). Its debian-image-factory entry names the release this Action runs.
+    default: lock.json
+  params:
+    description: A JSON file of parameter values, passed to plan as --params. Empty for none.
+    default: ""
+  snapshot:
+    description: The build snapshot for plan, passed as --snapshot. lock (the lock's own), latest (the newest completed ID) or an ID.
+    default: lock
+  against:
+    description: Targets, one per line (oci://, github-release://, dir://). plan looks every identity up there, and publish writes to them.
+    default: ""
+  steps:
+    description: The steps to run, comma separated, out of plan, fetch, build and test. plan is always needed, and a step needs the one before it.
+    default: plan,fetch,build,test
+  publish:
+    description: Whether to publish what was built to the against targets (true or false). Needs the build step.
+    default: "false"
+  sign:
+    description: How publish signs, passed as --sign (none, keyless or key:REF).
+    default: none
+  mirror:
+    description: A server that serves snapshot.debian.org's paths, passed as --mirror. Empty for snapshot.debian.org itself.
+    default: ""
+  pyz:
+    description: A local .pyz to run instead of the release the lock pins, not checked against the lock. Only for testing the factory itself.
+    default: ""
+
+outputs:
+  changed:
+    description: true when the plan builds at least one image, false on a night with nothing to do. fetch, build, test and publish do nothing when it is false.
+    value: ${{ steps.summary.outputs.changed }}
+  plan:
+    description: The path of plan.json.
+    value: ${{ steps.plan.outputs.path }}
+  artifacts:
+    description: 'A JSON object of image name to artifact digest: what the plan reuses or waits for, and what this run built.'
+    value: ${{ steps.artifacts.outputs.json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the inputs
+      id: setup
+      shell: bash
+      env:
+        STEPS: ${{ inputs.steps }}
+        PUBLISH: ${{ inputs.publish }}
+        AGAINST: ${{ inputs.against }}
+        WORK_BASE: ${{ runner.temp }}
+      run: |
+        set -euo pipefail
+        declare -A want=()
+        IFS=',' read -r -a listed <<< "$STEPS"
+        for step in "${listed[@]}"; do
+          step=${step//[[:space:]]/}
+          case "$step" in
+            plan | fetch | build | test) want[$step]=true ;;
+            "") ;;
+            *) echo "debian-image-factory: steps names '$step': the steps are plan, fetch, build and test" >&2; exit 1 ;;
+          esac
+        done
+        [ "${want[plan]:-}" = true ] || { echo "debian-image-factory: steps must include plan, which every other step reads" >&2; exit 1; }
+        [ -z "${want[build]:-}" ] || [ -n "${want[fetch]:-}" ] || { echo "debian-image-factory: the build step needs the fetch step before it" >&2; exit 1; }
+        [ -z "${want[test]:-}" ] || [ -n "${want[build]:-}" ] || { echo "debian-image-factory: the test step needs the build step before it" >&2; exit 1; }
+        case "$PUBLISH" in
+          true | false) ;;
+          *) echo "debian-image-factory: publish is true or false, not '$PUBLISH'" >&2; exit 1 ;;
+        esac
+        if [ "$PUBLISH" = true ]; then
+          [ -n "${want[build]:-}" ] || { echo "debian-image-factory: publish needs the build step" >&2; exit 1; }
+          [ -n "${AGAINST//[[:space:]]/}" ] || { echo "debian-image-factory: publish needs against: the targets to write to" >&2; exit 1; }
+        fi
+        work=$(mktemp -d "$WORK_BASE/debian-image-factory.XXXXXX")
+        {
+          echo "work=$work"
+          echo "fetch=${want[fetch]:-false}"
+          echo "build=${want[build]:-false}"
+          echo "test=${want[test]:-false}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Look for Python 3.13 or newer
+      id: python
+      shell: bash
+      run: |
+        set -euo pipefail
+        if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 13) else 1)' 2> /dev/null; then
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # Debian's python3 is 3.13, and some runners ship an older or no python3: uv installs one (setup-python has
+    # no builds for Debian)
+    - name: Install Python with uv
+      if: steps.python.outputs.ready != 'true'
+      uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      with:
+        python-version: "3.15"
+        activate-environment: true
+        venv-path: ${{ runner.temp }}/debian-image-factory-python
+        enable-cache: false
+
+    - name: Get the factory release the lock pins
+      id: release
+      shell: bash
+      env:
+        LOCK: ${{ inputs.lock }}
+        PYZ_INPUT: ${{ inputs.pyz }}
+        ACTION_PATH: ${{ github.action_path }}
+        WORK: ${{ steps.setup.outputs.work }}
+      run: |
+        set -euo pipefail
+        if [ -n "$PYZ_INPUT" ]; then
+          [ -f "$PYZ_INPUT" ] || { echo "debian-image-factory: pyz names $PYZ_INPUT, which is not a file" >&2; exit 1; }
+          pyz=$(realpath "$PYZ_INPUT")
+          echo "Running $pyz, named by the pyz input: it is not checked against the lock."
+        else
+          python3 "$ACTION_PATH/scripts/action-support" release "$LOCK" > "$WORK/release.txt"
+          mapfile -t release < "$WORK/release.txt"
+          version=${release[0]}
+          url=${release[1]}
+          sha256=${release[2]}
+          pyz="$WORK/debian-image-factory-$version.pyz"
+          echo "Downloading debian-image-factory $version from $url"
+          curl --fail --location --silent --show-error --retry 3 --proto '=https' --proto-redir '=https' --output "$pyz" "$url"
+          printf '%s  %s\n' "$sha256" "$pyz" | sha256sum --check --strict --quiet \
+            || { echo "debian-image-factory: the download is not the .pyz the lock pins (its sha256 is not $sha256)" >&2; exit 1; }
+          [ "$(python3 "$pyz" --version)" = "debian-image-factory $version" ] \
+            || { echo "debian-image-factory: the .pyz is not version $version" >&2; exit 1; }
+        fi
+        echo "pyz=$pyz" >> "$GITHUB_OUTPUT"
+
+    - name: Planning needs apt, gpgv and Debian's archive keyring
+      id: prerequisites
+      shell: bash
+      run: |
+        set -euo pipefail
+        command -v apt-get > /dev/null || { echo "debian-image-factory: plan needs apt, so a Debian or Ubuntu runner" >&2; exit 1; }
+        if ! command -v gpgv > /dev/null || [ ! -e /usr/share/keyrings/debian-archive-keyring.pgp ]; then
+          as_root=()
+          [ "$(id -u)" -eq 0 ] || as_root=(sudo -n)
+          "${as_root[@]}" apt-get update -q
+          "${as_root[@]}" apt-get install -y -q --no-install-recommends apt gpgv debian-archive-keyring
+        fi
+
+    - name: Plan
+      id: plan
+      shell: bash
+      env:
+        PYZ: ${{ steps.release.outputs.pyz }}
+        WORK: ${{ steps.setup.outputs.work }}
+        DEFINITION: ${{ inputs.definition }}
+        LOCK: ${{ inputs.lock }}
+        PARAMS: ${{ inputs.params }}
+        SNAPSHOT: ${{ inputs.snapshot }}
+        AGAINST: ${{ inputs.against }}
+        MIRROR: ${{ inputs.mirror }}
+      run: |
+        set -euo pipefail
+        args=(plan --lock "$LOCK" --definition "$DEFINITION" --snapshot "$SNAPSHOT" --out "$WORK/plan.json")
+        [ -z "$PARAMS" ] || args+=(--params "$PARAMS")
+        [ -z "$MIRROR" ] || args+=(--mirror "$MIRROR")
+        while read -r target; do
+          [ -z "$target" ] || args+=(--against "$target")
+        done <<< "$AGAINST"
+        python3 "$PYZ" "${args[@]}"
+        echo "path=$WORK/plan.json" >> "$GITHUB_OUTPUT"
+
+    - name: Does anything build
+      id: summary
+      shell: bash
+      env:
+        PYZ: ${{ steps.release.outputs.pyz }}
+        PLAN: ${{ steps.plan.outputs.path }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        python3 "$ACTION_PATH/scripts/action-support" summary --pyz "$PYZ" "$PLAN" >> "$GITHUB_OUTPUT"
+
+    - name: Fetch what the plan builds from
+      id: fetch
+      if: steps.setup.outputs.fetch == 'true' && steps.summary.outputs.changed == 'true'
+      shell: bash
+      env:
+        PYZ: ${{ steps.release.outputs.pyz }}
+        PLAN: ${{ steps.plan.outputs.path }}
+        MIRROR: ${{ inputs.mirror }}
+      run: |
+        set -euo pipefail
+        args=(fetch "$PLAN")
+        [ -z "$MIRROR" ] || args+=(--mirror "$MIRROR")
+        python3 "$PYZ" "${args[@]}"
+
+    # The builder is not published yet (DESIGN 5.4): it is built here from the recipe at this Action's own ref.
+    # build refuses a builder whose byte-writing tools are not the release's, so pin the Action at the commit
+    # of the release your lock names until the release publishes its builder.
+    - name: Build
+      id: build
+      if: steps.setup.outputs.build == 'true' && steps.summary.outputs.changed == 'true'
+      shell: bash
+      env:
+        PYZ: ${{ steps.release.outputs.pyz }}
+        PLAN: ${{ steps.plan.outputs.path }}
+        WORK: ${{ steps.setup.outputs.work }}
+        DEFINITION: ${{ inputs.definition }}
+        LOCK: ${{ inputs.lock }}
+        MIRROR: ${{ inputs.mirror }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        command -v docker > /dev/null || { echo "debian-image-factory: build needs docker on the runner" >&2; exit 1; }
+        builder=$("$ACTION_PATH/scripts/builder" build)
+        args=(build "$PLAN" --out "$WORK/out" --lock "$LOCK" --definition "$DEFINITION" --builder-image "$builder")
+        [ -z "$MIRROR" ] || args+=(--mirror "$MIRROR")
+        python3 "$PYZ" "${args[@]}"
+
+    # QEMU uses /dev/kvm when it opens and emulates otherwise, slower and with the same result (DESIGN 12). The
+    # Incus checks run only where an Incus host answers; elsewhere they are reported as not run and the image
+    # stays a candidate.
+    - name: Test
+      id: test
+      if: steps.setup.outputs.test == 'true' && steps.summary.outputs.changed == 'true'
+      shell: bash
+      env:
+        PYZ: ${{ steps.release.outputs.pyz }}
+        WORK: ${{ steps.setup.outputs.work }}
+        DEFINITION: ${{ inputs.definition }}
+        MIRROR: ${{ inputs.mirror }}
+        VM: ${{ steps.summary.outputs.vm }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        args=(test "$WORK/out" --definition "$DEFINITION" --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
+        [ -z "$MIRROR" ] || args+=(--mirror "$MIRROR")
+        if [ "$VM" = true ]; then
+          args+=(--vm-image "$("$ACTION_PATH/scripts/builder" vm)")
+        fi
+        python3 "$PYZ" "${args[@]}"
+
+    - name: Publish
+      id: publish
+      if: inputs.publish == 'true' && steps.setup.outputs.build == 'true' && steps.summary.outputs.changed == 'true'
+      shell: bash
+      env:
+        PYZ: ${{ steps.release.outputs.pyz }}
+        WORK: ${{ steps.setup.outputs.work }}
+        AGAINST: ${{ inputs.against }}
+        SIGN: ${{ inputs.sign }}
+      run: |
+        set -euo pipefail
+        args=(publish "$WORK/out" --sign "$SIGN")
+        while read -r target; do
+          [ -z "$target" ] || args+=(--to "$target")
+        done <<< "$AGAINST"
+        python3 "$PYZ" "${args[@]}"
+
+    - name: Name the artifacts
+      id: artifacts
+      shell: bash
+      env:
+        PYZ: ${{ steps.release.outputs.pyz }}
+        PLAN: ${{ steps.plan.outputs.path }}
+        WORK: ${{ steps.setup.outputs.work }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        out=()
+        [ ! -d "$WORK/out" ] || out=("$WORK/out")
+        json=$(python3 "$ACTION_PATH/scripts/action-support" artifacts --pyz "$PYZ" "$PLAN" "${out[@]}")
+        echo "json=$json" >> "$GITHUB_OUTPUT"

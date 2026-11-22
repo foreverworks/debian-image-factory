@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Every test tier, runnable locally with one command (DESIGN 12): nobody waits on CI to learn what a change broke.
 #
-#   scripts/test static        ruff, ruff format, mypy, check-ignores, shellcheck
+#   scripts/test static        ruff, ruff format, mypy, check-ignores, shellcheck (scripts, hooks, the Action's steps)
 #   scripts/test unit          the unit tests (seconds, no network, no root)
 #   scripts/test integration   the slow tests, DIF_INTEGRATION=1 (network, docker)
 #   scripts/test boot          only the tests that boot images: the boot checks' and M5's acceptance (QEMU;
@@ -53,12 +53,17 @@ static() {
     tool mypy
     # a script is module __main__ to mypy: one run each, or two of them clash
     tool mypy scripts/incus-vm
+    tool mypy scripts/action-support
     echo "== check-ignores"
     python3 scripts/check-ignores
     echo "== shellcheck"
     if [ "${#shell_scripts[@]}" -gt 0 ]; then
         tool shellcheck "${shell_scripts[@]}"
     fi
+    echo "== shellcheck: the run steps of the Action and the nightly workflow"
+    # each step's script is written to its own file; a step that puts a ${{ }} expression into its script fails here
+    python3 scripts/action-support shell dist/action-shell action.yml .github/workflows/nightly.yml
+    tool shellcheck dist/action-shell/*.sh
 }
 
 # unit_like <name> [VAR=value...]: unittest discover, output to a file, printed, exit with its status.

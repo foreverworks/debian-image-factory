@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""What action.yml needs besides shell: read the factory release out of the consumer's lock, summarise a
+plan for the Action's outputs, and extract the Action's shell steps for shellcheck (DESIGN 9.2, 12).
+
+    scripts/action-support release LOCK                 version, url and sha256 of the lock's factory entry
+    scripts/action-support summary [--pyz PYZ] PLAN     changed=, images= and vm= lines for $GITHUB_OUTPUT
+    scripts/action-support artifacts [--pyz PYZ] PLAN [OUT]   JSON: image name to artifact digest
+    scripts/action-support shell DIRECTORY FILE...      write each `run:` step of the YAML files to DIRECTORY
+
+`summary` and `artifacts` ask the factory itself (the .pyz the Action downloaded, `--pyz`) which images a plan
+builds, so the Action and the plan never disagree. Standard library only: the Action runs this with the
+interpreter it found or installed, before and after it has the release.
+"""
+
+import argparse
+import json
+import re
+import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final, cast
+
+FACTORY_ENTRY: Final = "debian-image-factory"
+"""The lock entry that pins the release: lockrules.FACTORY_ENTRY."""
+
+SHA256: Final = re.compile(r"[0-9a-f]{64}")
+VERSION: Final = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+~_-]*")
+BOOTING_KINDS: Final = ("installer", "os")
+"""The kinds whose boot checks run in QEMU, in the boot checks' image."""
+
+# ---- the release in the lock --------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Release:
+    version: str
+    url: str
+    sha256: str
+
+
+def release_of(lock: object, where: str = "lock") -> Release:
+    """The factory release the lock pins: its version, the .pyz's URL and the sha256 it must have.
+    Raises ValueError naming what is wrong."""
+    inputs = lock.get("inputs") if isinstance(lock, dict) else None
+    entry = inputs.get(FACTORY_ENTRY) if isinstance(inputs, dict) else None
+    here = f"{where}: inputs.{FACTORY_ENTRY}"
+    if not isinstance(entry, dict):
+        raise ValueError(f"{here} is missing: pin the factory release in the lock (DESIGN 9.3)")
+    version, url, digest = entry.get("version"), entry.get("url"), entry.get("sha256")
+    if not (isinstance(version, str) and VERSION.fullmatch(version)):
+        raise ValueError(f"{here}.version must be a release version such as 0.6.0")
+    if not isinstance(url, str):
+        raise ValueError(f"{here}.url must be the release asset's URL, with {{version}} where the version goes")
+    rendered = url.replace("{version}", version)
+    if not rendered.startswith("https://") or any(c.isspace() for c in rendered):
+        raise ValueError(f"{here}.url must be an https URL without spaces, not {rendered!r}")
+    if not (isinstance(digest, str) and SHA256.fullmatch(digest)):
+        raise ValueError(f"{here}.sha256 must be 64 lowercase hex characters")
+    if digest == "0" * 64:
+        raise ValueError(
+            f"{here}.sha256 is the placeholder: fill it with `debian-image-factory lock checksums --entry "
+            f"{FACTORY_ENTRY}` once the release exists"
+        )
+    return Release(version, rendered, digest)
+
+
+def release_command(path: Path) -> int:
+    try:
+        lock: object = json.loads(path.read_text(encoding="utf-8"))
+        found = release_of(lock, path.name)
+    except (OSError, ValueError) as error:
+        print(f"action-support: {error}", file=sys.stderr)
+        return 1
+    print(found.version, found.url, found.sha256, sep="\n")
+    return 0
+
+
+# ---- what a plan says ---------------------------------------------------------------------------
+
+
+def import_factory(pyz: str | None) -> None:
+    """Make the factory importable: from the .pyz when given, else from where this interpreter finds it."""
+    if pyz:
+        sys.path.insert(0, pyz)
+
+
+def read_plan(path: Path) -> dict[str, object]:
+    data: object = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path.name}: not a plan (expected a JSON object)")
+    return data
+
+
+def build_names(document: dict[str, object]) -> list[str]:
+    """The images a plan builds: the factory's own `plan.changed`."""
+    from input_lock import JsonValue
+
+    from debian_image_factory import plan as plans
+
+    return plans.changed(cast(Mapping[str, JsonValue], document))
+
+
+def kind_of(document: dict[str, object], name: str) -> str:
+    images = document.get("images")
+    entry = images.get(name) if isinstance(images, dict) else None
+    kind = entry.get("kind") if isinstance(entry, dict) else None
+    return kind if isinstance(kind, str) else ""
+
+
+def summary_lines(document: dict[str, object]) -> list[str]:
+    """`changed` (whether anything builds), `images` (what builds, comma separated) and `vm` (whether a
+    built image's checks boot a VM), as GITHUB_OUTPUT lines."""
+    names = build_names(document)
+    booting = any(kind_of(document, name) in BOOTING_KINDS for name in names)
+    return [
+        f"changed={'true' if names else 'false'}",
+        f"images={','.join(names)}",
+        f"vm={'true' if booting else 'false'}",
+    ]
+
+
+def digest_text(value: str) -> str:
+    return f"sha256:{value}" if SHA256.fullmatch(value) else value
+
+
+def built_artifacts(out: Path) -> dict[str, str]:
+    """Image name to digest of what a build left in `out`: each artifact's name carries the image and the
+    first 12 hex of its digest, and the records file beside it is named by the full digest."""
+    from debian_image_factory import published
+
+    names = [path.name for path in out.iterdir()] if out.is_dir() else []
+    digests = sorted(d for name in names if (d := published.records_digest(name)) is not None)
+    found: dict[str, str] = {}
+    for name in sorted(names):
+        parts = published.parse_artifact_name(name)
+        if parts is None:
+            continue
+        full = [d for d in digests if d.startswith(parts.digest12)]
+        if len(full) != 1:
+            raise ValueError(f"{out}: {name} has {len(full)} records files named by its digest, expected one")
+        if found.get(parts.image, f"sha256:{full[0]}") != f"sha256:{full[0]}":
+            raise ValueError(f"{out}: two artifacts for {parts.image}")
+        found[parts.image] = f"sha256:{full[0]}"
+    return found
+
+
+def artifacts_of(document: dict[str, object], out: Path | None) -> dict[str, str]:
+    """Image to digest: the artifact a plan reuses or waits for, and what a build left in `out`."""
+    images = document.get("images")
+    found: dict[str, str] = {}
+    if isinstance(images, dict):
+        for name, entry in sorted(images.items()):
+            artifact = entry.get("artifact") if isinstance(entry, dict) else None
+            if isinstance(artifact, str):
+                found[str(name)] = digest_text(artifact)
+    if out is not None:
+        found.update(built_artifacts(out))
+    return dict(sorted(found.items()))
+
+
+# ---- the YAML the Action is written in ----------------------------------------------------------
+
+type Node = str | list[Node] | dict[str, Node]
+"""A YAML document read by `parse_yaml`: scalars are strings, collections lists and mappings."""
+
+
+@dataclass(frozen=True, slots=True)
+class Line:
+    indent: int
+    text: str
+    number: int
+
+
+def significant(raw: Sequence[str]) -> list[Line]:
+    """The lines that carry structure: not blank, not a comment."""
+    return [
+        Line(len(line) - len(line.lstrip(" ")), line.strip(), number)
+        for number, line in enumerate(raw)
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def scalar(text: str) -> str:
+    """A plain or quoted scalar's value: quotes removed, a trailing ` # comment` of a plain scalar dropped."""
+    text = text.strip()
+    if text[:1] in ('"', "'"):
+        end = text.find(text[0], 1)
+        if end < 0:
+            raise ValueError(f"unterminated quoted scalar: {text}")
+        return text[1:end]
+    if text[:1] in ("[", "{"):
+        raise ValueError(f"flow collections are not supported here: {text}")
+    return re.sub(r"\s+#.*$", "", text)
+
+
+def split_key(text: str) -> tuple[str, str] | None:
+    """`key: rest` as (key, rest), or None when the text is not a mapping entry."""
+    found = re.fullmatch(r"([A-Za-z0-9_.-]+):(?:\s+(.*))?", text)
+    return None if found is None else (found[1], found[2] or "")
+
+
+def block_scalar(raw: Sequence[str], start: int, indent: int, style: str) -> tuple[str, int]:
+    """The block scalar whose lines follow raw[start - 1] (the key at `indent`): returns its text and the
+    index of the first raw line after it."""
+    body: list[str] = []
+    index = start
+    while index < len(raw) and (not raw[index].strip() or len(raw[index]) - len(raw[index].lstrip(" ")) > indent):
+        body.append(raw[index])
+        index += 1
+    while body and not body[-1].strip():
+        body.pop()
+    width = min((len(line) - len(line.lstrip(" ")) for line in body if line.strip()), default=0)
+    lines = [line[width:] for line in body]
+    joined = "\n".join(lines) if style.startswith("|") else " ".join(line for line in lines if line)
+    return (joined if style.endswith("-") else joined + "\n"), index
+
+
+def parse_yaml(text: str) -> Node:
+    """The subset of YAML the Action and its workflows use: block mappings and sequences, plain and
+    quoted scalars, block scalars (`|`, `|-`, `>`, `>-`), comments. Anything else raises ValueError."""
+    raw = text.split("\n")
+    lines = significant(raw)
+    if not lines:
+        return {}
+    node, _ = parse_node(raw, lines, 0, lines[0].indent)
+    return node
+
+
+def line_index(lines: Sequence[Line], number: int) -> int:
+    """Index into `lines` of the first significant line numbered at least `number`."""
+    return next((i for i, one in enumerate(lines) if one.number >= number), len(lines))
+
+
+def parse_node(raw: Sequence[str], lines: Sequence[Line], at: int, indent: int) -> tuple[Node, int]:
+    if lines[at].text == "-" or lines[at].text.startswith("- "):
+        return parse_sequence(raw, lines, at, indent)
+    return parse_mapping(raw, lines, at, indent)
+
+
+def parse_sequence(raw: Sequence[str], lines: Sequence[Line], at: int, indent: int) -> tuple[Node, int]:
+    items: list[Node] = []
+    while at < len(lines) and lines[at].indent == indent and (lines[at].text == "-" or lines[at].text.startswith("- ")):
+        rest = lines[at].text[1:].strip()
+        if not rest:
+            if at + 1 >= len(lines) or lines[at + 1].indent <= indent:
+                raise ValueError(f"line {lines[at].number + 1}: an empty sequence item")
+            item, at = parse_node(raw, lines, at + 1, lines[at + 1].indent)
+        else:
+            # `- key: value` is a mapping whose first line starts two columns in
+            shifted = [Line(indent + 2, rest, lines[at].number), *lines[at + 1 :]]
+            if split_key(rest) is None:
+                items.append(scalar(rest))
+                at += 1
+                continue
+            item, used = parse_mapping(raw, shifted, 0, indent + 2)
+            at += used
+        items.append(item)
+    return items, at
+
+
+def parse_mapping(raw: Sequence[str], lines: Sequence[Line], at: int, indent: int) -> tuple[Node, int]:
+    mapping: dict[str, Node] = {}
+    while at < len(lines) and lines[at].indent == indent:
+        entry = split_key(lines[at].text)
+        if entry is None:
+            raise ValueError(f"line {lines[at].number + 1}: not a mapping entry: {lines[at].text}")
+        key, rest = entry
+        number = lines[at].number
+        if rest[:1] in ("|", ">"):
+            mapping[key], resume = block_scalar(raw, number + 1, indent, rest.split()[0])
+            at = line_index(lines, resume)
+        elif rest:
+            mapping[key] = scalar(rest)
+            at += 1
+        elif at + 1 < len(lines) and lines[at + 1].indent > indent:
+            mapping[key], at = parse_node(raw, lines, at + 1, lines[at + 1].indent)
+        else:
+            mapping[key] = ""
+            at += 1
+    return mapping, at
+
+
+# ---- shell steps ---------------------------------------------------------------------------------
+
+
+def steps_of(document: Node) -> list[dict[str, Node]]:
+    """Every step of an action (`runs.steps`) or a workflow (`jobs.<job>.steps`)."""
+    found: list[dict[str, Node]] = []
+    if not isinstance(document, dict):
+        return found
+    groups: list[Node] = []
+    runs = document.get("runs")
+    if isinstance(runs, dict):
+        groups.append(runs.get("steps", []))
+    jobs = document.get("jobs")
+    if isinstance(jobs, dict):
+        groups.extend(job.get("steps", []) for job in jobs.values() if isinstance(job, dict))
+    for group in groups:
+        if isinstance(group, list):
+            found.extend(step for step in group if isinstance(step, dict))
+    return found
+
+
+def slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "step"
+
+
+def extract_shell(path: Path, directory: Path) -> list[str]:
+    """Write each `run:` step of one YAML file as a bash script in `directory`; return the problems found
+    (a step that puts a `${{ }}` expression into its script)."""
+    problems: list[str] = []
+    document = parse_yaml(path.read_text(encoding="utf-8"))
+    for number, step in enumerate(steps_of(document), start=1):
+        script = step.get("run")
+        if not isinstance(script, str):
+            continue
+        name = str(step.get("name") or step.get("id") or f"step {number}")
+        if "${{" in script:
+            problems.append(
+                f"{path}: step {name!r} puts an expression into its script: pass it through env: and read "
+                "it as a shell variable"
+            )
+        target = directory / f"{path.stem}-{number:02d}-{slug(name)}.sh"
+        target.write_text(f"#!/usr/bin/env bash\nset -eo pipefail\n{script}", encoding="utf-8")
+    return problems
+
+
+def shell_command(directory: Path, files: Sequence[Path]) -> int:
+    directory.mkdir(parents=True, exist_ok=True)
+    for old in directory.glob("*.sh"):
+        old.unlink()
+    problems: list[str] = []
+    for path in files:
+        try:
+            problems += extract_shell(path, directory)
+        except (OSError, ValueError) as error:
+            problems.append(f"{path}: {error}")
+    for problem in problems:
+        print(f"action-support: {problem}", file=sys.stderr)
+    return 1 if problems else 0
+
+
+# ---- command line ---------------------------------------------------------------------------------
+
+
+def parser() -> argparse.ArgumentParser:
+    top = argparse.ArgumentParser(prog="action-support", description="Support for action.yml.")
+    commands = top.add_subparsers(dest="command", required=True)
+    release = commands.add_parser("release", help="the factory release a lock pins")
+    release.add_argument("lock", type=Path)
+    for name in ("summary", "artifacts"):
+        one = commands.add_parser(name, help=f"{name} of a plan")
+        one.add_argument("--pyz", help="the factory .pyz to read the plan with")
+        one.add_argument("plan", type=Path)
+        if name == "artifacts":
+            one.add_argument("out", type=Path, nargs="?", help="a build's output directory")
+    shell = commands.add_parser("shell", help="extract the run steps of YAML files")
+    shell.add_argument("directory", type=Path)
+    shell.add_argument("files", type=Path, nargs="+")
+    return top
+
+
+def main(argv: Sequence[str]) -> int:
+    arguments = parser().parse_args(argv)
+    if arguments.command == "release":
+        return release_command(arguments.lock)
+    if arguments.command == "shell":
+        return shell_command(arguments.directory, arguments.files)
+    try:
+        import_factory(arguments.pyz)
+        document = read_plan(arguments.plan)
+        if arguments.command == "summary":
+            print(*summary_lines(document), sep="\n")
+            names = build_names(document)
+            print(f"images to build: {', '.join(names) or 'none'}", file=sys.stderr)
+        else:
+            print(json.dumps(artifacts_of(document, arguments.out), sort_keys=True, separators=(",", ":")))
+    except (OSError, ValueError) as error:
+        print(f"action-support: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
