@@ -20,6 +20,16 @@
   after another as before; the Action passes its `jobs` input as `--jobs`. Output lines start with the image's
   name; when images fail, nothing new starts, the running ones finish, and every failure is reported by name.
   Artifacts, digests and records are the same as a serial build's.
+- A signed publish to a target that already holds some of the records unsigned prints a warning with their count and
+  why they stay unsigned (a published record is never rewritten); `publish --require-signed-target` fails instead.
+  A line in a target's records file or a registry referrer that is not a record is skipped with a warning naming its
+  file and line, or its referrer digest, as an unsigned publish already leaves it alone, instead of failing the publish.
+- Two images of one build whose artifacts have the same digest write their shared records file under a lock, through a
+  temporary file renamed into place, and merge their records instead of the last writer winning.
+- Ctrl-C during a build stops the running builder containers by their own ids, starts no other image, and exits non-zero
+  with a message; the images that had finished keep their artifacts.
+- The Action stops before it installs cosign, with a message, when `sign` is not `none` and the release your lock pins
+  is older than 0.7.0, and stops the same way for `jobs`.
 
 ## 0.6.3 (2026-11-22)
 

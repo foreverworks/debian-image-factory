@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from unittest import mock
 
-from debian_image_factory import capacity, commands
+from debian_image_factory import capacity, commands, records
 from debian_image_factory.build import run, schedule
 
 PLAN = {"core": None, "base": "core", "node-26": "base", "node-24": "base", "node-22": "base"}
@@ -242,13 +242,17 @@ class InterruptTest(unittest.TestCase):
         context = types.SimpleNamespace(plan={"images": entries})
         stopped: list[bool] = []
 
+        def fake_stop() -> int:
+            stopped.append(True)
+            return 0
+
         def interrupted(*args: object, **kwargs: Callable[[], object]) -> None:
             kwargs["on_interrupt"]()
             raise KeyboardInterrupt
 
         with (
-            mock.patch.object(run.schedule, "run", interrupted),
-            mock.patch.object(run, "stop_builders", lambda: stopped.append(True) or 0),
+            mock.patch.object(schedule, "run", interrupted),
+            mock.patch.object(run, "stop_builders", fake_stop),
             self.assertRaises(commands.Failed) as caught,
         ):
             run.schedule_images(context, ["a", "b"], 2, io.StringIO())  # type: ignore[arg-type]  # a stand-in with only plan
@@ -270,7 +274,7 @@ class StopBuildersTest(unittest.TestCase):
 
             run._RUNNING.add(cidfile)
             try:
-                with mock.patch.object(run.subprocess, "run", fake_run):
+                with mock.patch.object(subprocess, "run", fake_run):
                     count = run.stop_builders(wait=5)
             finally:
                 run._RUNNING.discard(cidfile)
@@ -283,7 +287,7 @@ class RecordsWriteTest(unittest.TestCase):
         return types.SimpleNamespace(out_dir=out_dir, written=set())  # type: ignore[return-value]  # only these two are read
 
     def write(self, context: run.Run, name: str, lines: list[str]) -> None:
-        with mock.patch.object(run.records, "record_lines", lambda _: "".join(f"{one}\n" for one in lines)):
+        with mock.patch.object(records, "record_lines", lambda _: "".join(f"{one}\n" for one in lines)):
             run.write_records(context, name, [])
 
     def test_two_images_with_one_artifact_merge_their_records(self) -> None:

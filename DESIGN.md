@@ -1244,6 +1244,11 @@ environment has no OIDC identity (`SIGSTORE_ID_TOKEN`, or GitHub's `ACTIONS_ID_T
 `ACTIONS_ID_TOKEN_REQUEST_TOKEN`, which a job gets with `permissions: id-token: write`), and a `key:` file
 must exist.
 
+A record the target already holds is never rewritten, so one it holds unsigned stays unsigned: `publish` prints
+a warning with the count of such records, and `--require-signed-target` makes it fail instead, before it writes
+that artifact's records. A held line that is no record (not JSON, not an object, no payload) is skipped with a
+warning naming its file and line, or its referrer digest, as an unsigned publish leaves it alone.
+
 Each record is signed with one call, the statement's decoded payload written to a scratch file byte for byte:
 
     cosign attest-blob --statement statement.json --bundle bundle.json --yes                  # keyless
