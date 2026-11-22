@@ -54,7 +54,7 @@ def cache_path(cache: Path, sha256: str) -> Path:
     return cache / "sha256" / sha256[:2] / sha256
 
 
-def _cached(cache: Path, sha256: str) -> Path | None:
+def cached(cache: Path, sha256: str) -> Path | None:
     """The cached file with this hash when it is present and still hashes to it."""
     path = cache_path(cache, sha256)
     if path.is_file() and _sha256(path.read_bytes()) == sha256:
@@ -62,11 +62,11 @@ def _cached(cache: Path, sha256: str) -> Path | None:
     return None
 
 
-def _store(cache: Path, data: bytes) -> Path:
+def store(cache: Path, data: bytes) -> Path:
     """Put `data` in the cache (atomically) and return its path."""
     sha256 = _sha256(data)
     path = cache_path(cache, sha256)
-    if _cached(cache, sha256) is None:
+    if cached(cache, sha256) is None:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
         try:
@@ -117,7 +117,7 @@ def _fetch_listed(
 
     A file served but not matching Release is an ArchiveError, never a reason to try another form.
     """
-    present = _cached(cache, sha256)
+    present = cached(cache, sha256)
     if present is not None and present.stat().st_size == size:
         return present
     urls = [f"{base_url}/dists/{dist}/{path}"]
@@ -130,7 +130,7 @@ def _fetch_listed(
             continue
         if len(data) != size or _sha256(data) != sha256:
             raise ArchiveError(f"{url} does not match Release (expected {size} bytes, sha256 {sha256})")
-        return _store(cache, data)
+        return store(cache, data)
     return None
 
 
@@ -161,7 +161,7 @@ def _fetch_index(
         plain_listed = listed.get(stem)
         if plain_listed is not None and (len(plain) != plain_listed[1] or _sha256(plain) != plain_listed[0]):
             raise ArchiveError(f"{stem} (decompressed from {stem + suffix}) does not match Release")
-        return [(stem + suffix, fetched), (stem, _store(cache, plain))]
+        return [(stem + suffix, fetched), (stem, store(cache, plain))]
     raise ArchiveError(f"{base_url}/dists/{dist}: no Packages index for {component}/{arch} could be read")
 
 
