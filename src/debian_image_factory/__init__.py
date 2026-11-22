@@ -6,7 +6,7 @@ touches files, the network or subprocesses; the edges (resolve, archive, cli) do
 
 from typing import Final
 
-__version__: Final = "0.2.0"
+__version__: Final = "0.3.0"
 
 ENGINE: Final = 1
 """The engine revision: raised only by a change that can alter the bytes the factory writes (DESIGN 7.1)."""
