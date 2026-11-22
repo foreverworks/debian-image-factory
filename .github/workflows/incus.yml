@@ -18,7 +18,7 @@ jobs:
   incus:
     name: Incus checks in a VM
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ github.event.repository.private && 'debian-image-factory-kvm' || 'ubuntu-26.04' }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
       - name: System packages a bare runner lacks (git, gpgv and more)

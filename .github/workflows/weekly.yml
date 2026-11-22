@@ -15,7 +15,7 @@ jobs:
   matrix:
     name: Python ${{ matrix.python }}
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ github.event.repository.private && 'debian-image-factory' || 'ubuntu-26.04' }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     continue-on-error: ${{ matrix.experimental }}
     strategy:

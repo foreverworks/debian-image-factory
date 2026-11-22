@@ -16,7 +16,7 @@ jobs:
   matrix:
     name: Python ${{ matrix.python }}
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ github.event.repository.private && 'debian-image-factory' || 'ubuntu-26.04' }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -51,7 +51,7 @@ jobs:
     name: integration tier
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     # the tier boots images in QEMU (installer, OS): a runner with KVM, as boot.yml uses
-    runs-on: ${{ github.event.repository.private && 'debian-image-factory-kvm' || 'ubuntu-26.04' }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     steps:
       - name: System packages a bare runner lacks (git, gpgv and more)

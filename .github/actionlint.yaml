@@ -1,8 +1,4 @@
 # actionlint 1.7.12 predates the ubuntu-26.04 hosted runner label; it is a real GitHub-hosted runner.
-# debian-image-factory and debian-image-factory-kvm are the capability labels of the project's own
-# self-hosted runners, which the workflows' runs-on expressions pick only for a private copy of the repository.
 self-hosted-runner:
   labels:
     - ubuntu-26.04
-    - debian-image-factory
-    - debian-image-factory-kvm
