@@ -195,7 +195,8 @@ class RefusalTest(unittest.TestCase):
 
     def test_compression(self) -> None:
         self.assertIn("images.core.compression must be one of", refusal(CORE + 'compression = "bz2"\n'))
-        self.assertEqual(parse_definition(CORE + 'compression = "zstd"\n').images["core"].compression, "zstd")
+        self.assertIn("images.core.compression: zstd is not built yet", refusal(CORE + 'compression = "zstd"\n'))
+        self.assertEqual(parse_definition(CORE + 'compression = "gzip"\n').images["core"].compression, "gzip")
 
     def test_image_names(self) -> None:
         self.assertIn(
