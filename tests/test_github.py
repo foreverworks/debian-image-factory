@@ -88,6 +88,13 @@ class PureTest(unittest.TestCase):
         with self.assertRaises(github.GitHubError):
             github.parse_assets({})
 
+    def test_an_unfinished_upload_under_a_partial_name_is_listed_so_it_can_be_deleted(self) -> None:
+        page = [
+            {"id": 1, "name": "a.tar.gz.partial-0123456789abcdef", "size": 0, "state": "starter"},
+            {"id": 2, "name": "b.tar.gz", "size": 0, "state": "starter"},
+        ]
+        self.assertEqual([one["name"] for one in github.parse_assets(page)], ["a.tar.gz.partial-0123456789abcdef"])
+
     def test_error_answers(self) -> None:
         body = b'{"message":"Validation Failed","errors":[{"code":"already_exists"}]}'
         self.assertEqual(github.error_text(body), ("Validation Failed", True))

@@ -1,10 +1,10 @@
 """GitHub's releases API in a thread, enough of it to test the client without a network: a release by
 tag, release creation, paged asset listings (a small page size is switchable, so `Link` is exercised),
 uploads on a separate path named by the release's `upload_url` (with its `{?name,label}` template),
-deletes, and asset downloads answered with a redirect to another host name on the same port, so a test
-can see that the token does not follow it. Assets carry a `digest` unless a test hides it, a request
-can be made to fail with a 503 once, and a repository with a token set answers 404 to anyone without it,
-as a private one does.
+renames (PATCH of an asset's name), deletes, and asset downloads answered with a redirect to another host name
+on the same port, so a test can see that the token does not follow it. Assets carry a `digest` unless a test
+hides it, a request can be made to fail with a 503 once, and a repository with a token set answers 404 to
+anyone without it, as a private one does.
 
 The state is a plain dataclass the test reads and changes while the server runs.
 """
@@ -60,6 +60,8 @@ class Fake:
     releases: dict[str, Release] = field(default_factory=dict[str, Release])
     page_size: int | None = None
     hide_digest: set[str] = field(default_factory=set[str])
+    truncate_uploads: set[str] = field(default_factory=set[str])
+    """Names (a prefix of the uploaded name) whose stored bytes lose their last byte, as a broken upload would."""
     fail_once: list[str] = field(default_factory=list[str])
     """`<METHOD> <path prefix>` of requests that answer 503 the first time they are made."""
     log: list[str] = field(default_factory=list[str])
@@ -140,13 +142,13 @@ def handler_for(fake: Fake) -> type[BaseHTTPRequestHandler]:
             elif found["release"] is not None:
                 self.listing(int(found["release"]), parse_qs(parts.query))
             elif found["asset"] is not None:
-                self.asset(int(found["asset"]))
+                self.asset(int(found["asset"]), data)
             elif self.command == "POST":
                 self.create(data)
             else:
                 self.send_json(404, {"message": "Not Found"})
 
-        do_GET = do_POST = do_DELETE = route  # the base class's names
+        do_GET = do_POST = do_DELETE = do_PATCH = route  # the base class's names
 
         def by_tag(self, tag: str) -> None:
             if tag not in fake.releases:
@@ -192,11 +194,13 @@ def handler_for(fake: Fake) -> type[BaseHTTPRequestHandler]:
                 error = {"resource": "ReleaseAsset", "code": "already_exists", "field": "name"}
                 self.send_json(422, {"message": "Validation Failed", "errors": [error]})
                 return
+            if any(name.startswith(prefix) for prefix in fake.truncate_uploads):
+                data = data[:-1]
             stored = Stored(new_id(fake), name, data)
             release.assets.append(stored)
             self.send_json(201, asset_json(fake, stored))
 
-        def asset(self, asset_id: int) -> None:
+        def asset(self, asset_id: int, data: bytes) -> None:
             for release in fake.releases.values():
                 for one in release.assets:
                     if one.id != asset_id:
@@ -204,6 +208,14 @@ def handler_for(fake: Fake) -> type[BaseHTTPRequestHandler]:
                     if self.command == "DELETE":
                         release.assets.remove(one)
                         self.send(204)
+                    elif self.command == "PATCH":
+                        name = json.loads(data).get("name", "")
+                        if any(other.name == name for other in release.assets):
+                            error = {"resource": "ReleaseAsset", "code": "already_exists", "field": "name"}
+                            self.send_json(422, {"message": "Validation Failed", "errors": [error]})
+                        else:
+                            one.name = name
+                            self.send_json(200, asset_json(fake, one))
                     elif "octet-stream" in self.headers.get("Accept", ""):
                         location = f"http://{REDIRECT_HOST}:{fake.port}/storage/{one.id}"
                         self.send(302, b"", {"Location": location})

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from input_lock.records import PROVENANCE_PREDICATE, envelope, jsonl, provenance, statement, subject
 
-from debian_image_factory import commands, incus, publish, published, targets
+from debian_image_factory import commands, github, incus, publish, published, targets
 from tests.support import fake_github
 from tests.support.fake_github import OWNER, REPO, Fake, Stored
 from tests.support.oci_fixtures import IDENTITY, make_core_file, make_image, records_text, result_line
@@ -203,6 +203,139 @@ class PublishTest(ReleaseCase):
             self.publish()
         self.assertIn("HTTP 503", str(caught.exception))
         self.assertNotIn(fake_github.TOKEN, str(caught.exception))
+
+
+class PartialUploadTest(ReleaseCase):
+    """An asset is uploaded under a name no lookup reads, checked and renamed (DESIGN 7.4)."""
+
+    def requests(self) -> list[str]:
+        return [line for line in self.fake.log if line.startswith(("POST /upload", "PATCH"))]
+
+    def test_every_asset_is_uploaded_as_a_partial_one_and_renamed_into_place(self) -> None:
+        core = make_core_file(self.out)
+        self.publish()
+        uploads = [line for line in self.requests() if line.startswith("POST")]
+        self.assertEqual(len(uploads), 2)
+        for line, final in zip(uploads, (core.name, core.records.name), strict=True):
+            self.assertIn(f"name={final}.partial-", line)
+        self.assertEqual(len([line for line in self.requests() if line.startswith("PATCH")]), 2)
+        self.assertEqual(sorted(self.assets()), sorted([core.name, core.records.name]))
+        self.assertEqual(self.lookup().rejected, ())
+
+    def test_the_records_are_uploaded_last_after_the_artifact_is_in_place(self) -> None:
+        core = make_core_file(self.out)
+        self.publish()
+        kinds = [("upload " if line.startswith("POST") else "rename ") for line in self.requests()]
+        self.assertEqual(kinds, ["upload ", "rename ", "upload ", "rename "])
+        first_records = next(i for i, line in enumerate(self.requests()) if core.records.name in line)
+        self.assertGreater(first_records, 1)  # after the artifact's own upload and rename
+
+    def test_no_asset_ever_holds_a_final_name_before_it_is_whole(self) -> None:
+        core = make_core_file(self.out)
+        seen: list[set[str]] = []
+        original = fake_github.asset_json
+
+        def watch(fake: Fake, one: Stored) -> dict[str, object]:
+            seen.append({asset.name for asset in fake.releases["v1"].assets})
+            return original(fake, one)
+
+        fake_github.asset_json = watch
+        try:
+            self.publish()
+        finally:
+            fake_github.asset_json = original
+        uploaded = [names for names in seen if any(".partial-" in name for name in names)]
+        self.assertTrue(uploaded)
+        for names in uploaded:  # while a partial asset is there, the one it is for is not
+            for name in names:
+                if ".partial-" in name:
+                    self.assertNotIn(name.partition(".partial-")[0], names)
+        self.assertIn(core.name, self.assets())
+
+    def test_a_rename_that_fails_leaves_only_a_partial_asset_that_nothing_reads(self) -> None:
+        core = make_core_file(self.out)
+        self.fake.fail_once.extend(["PATCH /repos"] * 4)
+        with self.assertRaises(commands.Failed) as caught:
+            self.publish()
+        self.assertIn("HTTP 503", str(caught.exception))
+        (left,) = self.assets()
+        self.assertTrue(left.startswith(f"{core.name}.partial-"))
+        found = self.lookup()
+        self.assertEqual(found.artifacts, ())
+        self.assertEqual([(one.name, one.reason[:21]) for one in found.rejected], [(left, "an unfinished upload,")])
+
+    def test_the_next_publish_deletes_the_leftover_and_finishes(self) -> None:
+        core = make_core_file(self.out)
+        self.fake.fail_once.extend(["PATCH /repos"] * 4)
+        with self.assertRaises(commands.Failed):
+            self.publish()
+        (left,) = self.assets()
+        said = self.publish()
+        self.assertIn(f"{left} is an unfinished upload of an earlier run, deleted", said)
+        self.assertEqual(sorted(self.assets()), sorted([core.name, core.records.name]))
+        self.assertEqual([one.digest for one in self.lookup().artifacts], [core.digest])
+
+    def test_leftovers_of_other_files_and_of_records_go_too(self) -> None:
+        core = make_core_file(self.out)
+        release = fake_github.Release(fake_github.new_id(self.fake), "v1")
+        for name in (
+            f"someone-else-trixie-amd64-{OTHER[:16]}-{'0' * 12}.tar.gz.partial-{'ab' * 8}",
+            f"{OTHER}.intoto.jsonl.partial-{'cd' * 8}",
+        ):
+            release.assets.append(Stored(fake_github.new_id(self.fake), name, b"half"))
+        release.assets.append(Stored(fake_github.new_id(self.fake), "unrelated.txt", b"keep"))
+        self.fake.releases["v1"] = release
+        self.publish()
+        self.assertEqual(sorted(self.assets()), sorted([core.name, core.records.name, "unrelated.txt"]))
+
+    def test_an_upload_that_arrives_short_is_deleted_and_fails_the_publish(self) -> None:
+        core = make_core_file(self.out)
+        self.fake.truncate_uploads.add(core.name)
+        with self.assertRaises(commands.Failed) as caught:
+            self.publish()
+        self.assertIn(f"{core.name} arrived as", str(caught.exception))
+        self.assertIn("it was removed", str(caught.exception))
+        self.assertEqual(self.assets(), {})
+
+    def test_a_digest_that_github_states_and_that_is_wrong_is_caught_too(self) -> None:
+        core = make_core_file(self.out)
+        original = fake_github.asset_json
+
+        def wrong(fake: Fake, one: Stored) -> dict[str, object]:
+            body = original(fake, one)
+            body["digest"] = "sha256:" + "0" * 64
+            return body
+
+        fake_github.asset_json = wrong
+        try:
+            with self.assertRaisesRegex(commands.Failed, "arrived as"):
+                self.publish()
+        finally:
+            fake_github.asset_json = original
+        self.assertNotIn(core.name, self.assets())
+        self.assertEqual(self.assets(), {})
+
+    def test_a_name_taken_in_the_meantime_is_not_overwritten_and_leaves_nothing_behind(self) -> None:
+        core = make_core_file(self.out)
+        client = github_client()
+        release = github.release_by_tag(client) or github.create_release(client)
+        taken = github.upload_asset(client, release, core.name, core.layout)
+        with self.assertRaises(github.AlreadyExistsError):
+            github.store_asset(client, release, core.name, core.layout, "ab" * 8)
+        self.assertEqual(sorted(self.assets()), [taken["name"]])
+
+    def test_a_publish_of_incus_files_renames_both_before_the_records(self) -> None:
+        names, fingerprint = make_incus(self.out)
+        self.publish()
+        self.assertEqual(
+            sorted(self.assets()), sorted([names.metadata, names.rootfs, published.records_name_for(fingerprint)])
+        )
+        posted = [line for line in self.requests() if line.startswith("POST")]
+        self.assertIn("intoto.jsonl.partial-", posted[-1])
+
+
+def github_client() -> github.Client:
+    return github.connect(TARGET)
 
 
 class LookupTest(ReleaseCase):

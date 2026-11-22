@@ -13,6 +13,8 @@ Nothing else in the package talks to GitHub. What this module guarantees to its 
 - **Failures are OSErrors.** `GitHubError` is one, so a command reports it the way it reports an
   unreadable directory. A 5xx answer and a connection that fails are tried again after a short
   backoff, a few times; every request has a timeout; a 4xx answer is never retried.
+- **A name is only given to a whole asset.** `store_asset` uploads under a temporary name, checks what
+  arrived and renames it.
 - **Everything read is checked.** A release and an asset are parsed from JSON field by field into
   typed dictionaries; an asset's bytes are counted against the size its listing states.
 
@@ -35,7 +37,7 @@ from pathlib import Path
 from typing import BinaryIO, Final, TypedDict, TypeGuard
 
 from . import registry
-from .published import ReleaseTarget
+from .published import ReleaseTarget, partial_name, partial_of
 
 DEFAULT_API: Final = "https://api.github.com"
 API_VERSION: Final = "2022-11-28"
@@ -181,13 +183,15 @@ def _object(value: object, what: str) -> dict[str, object]:
 
 def parse_assets(value: object) -> list[Asset]:
     """The assets of one page of a listing. An asset still being uploaded (`state` other than
-    `uploaded`) is not there yet and is left out."""
+    `uploaded`) is not there yet and is left out, except an unfinished upload under a `.partial-` name,
+    which `publish` deletes."""
     if not isinstance(value, list):
         raise GitHubError("a list of assets is not an array")
     found: list[Asset] = []
     for item in value:
-        state = _object(item, "an asset").get("state", "uploaded")
-        if state == "uploaded":
+        body = _object(item, "an asset")
+        name = body.get("name")
+        if body.get("state", "uploaded") == "uploaded" or (isinstance(name, str) and partial_of(name) is not None):
             found.append(parse_asset(item))
     return found
 
@@ -410,6 +414,54 @@ def upload_asset(client: Client, release: Release, name: str, source: Path) -> A
         return parse_asset(_json(client, f"uploading {name}", response))
     except GitHubError as error:
         raise GitHubError(f"{client.name}: uploading {name}: {error}") from None
+
+
+def rename_asset(client: Client, asset: Asset, name: str) -> Asset:
+    """Give an uploaded asset another name (`PATCH /releases/assets/{id}`). An asset already called `name`
+    raises AlreadyExistsError: nothing is overwritten."""
+    document = json.dumps({"name": name}).encode()
+    response = _call(
+        client,
+        "PATCH",
+        repo_url(client, f"releases/assets/{asset['id']}"),
+        headers={"Content-Type": "application/json"},
+        body=document,
+    )
+    if response.status == 422 and error_text(response.body)[1]:
+        raise AlreadyExistsError(f"{client.name}: the release already holds an asset called {name}")
+    if response.status != 200:
+        raise _refusal(client, f"renaming {asset['name']} to {name}", response)
+    try:
+        return parse_asset(_json(client, f"renaming {asset['name']}", response))
+    except GitHubError as error:
+        raise GitHubError(f"{client.name}: renaming {asset['name']}: {error}") from None
+
+
+def store_asset(client: Client, release: Release, name: str, source: Path, token: str) -> Asset:
+    """Put the file `source` on the release as `name` without a reader ever finding half of it there: it is
+    uploaded as `partial_name(name, token)`, its size (and its sha256 when GitHub states one) checked against
+    the file, and only then renamed. An interrupted upload leaves an asset no lookup reads and that
+    `publish` removes the next time; one that arrived wrong is deleted here and raises GitHubError. An asset
+    already called `name` raises AlreadyExistsError and nothing is left behind."""
+    uploaded = upload_asset(client, release, partial_name(name, token), source)
+    size = source.stat().st_size
+    stated = uploaded["digest"]
+    if uploaded["size"] != size or (stated is not None and stated != _sha256_of(source)):
+        delete_asset(client, uploaded)
+        raise GitHubError(
+            f"{client.name}: {name} arrived as {uploaded['size']} bytes"
+            f"{'' if stated is None else f' (sha256 {stated})'}, not the {size} bytes of {source}; it was removed"
+        )
+    try:
+        return rename_asset(client, uploaded, name)
+    except AlreadyExistsError:
+        delete_asset(client, uploaded)
+        raise
+
+
+def _sha256_of(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def delete_asset(client: Client, asset: Asset) -> None:

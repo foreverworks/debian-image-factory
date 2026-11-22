@@ -16,11 +16,15 @@ is skipped, so publishing again adds only what is new.
 A `github-release://` target takes files only, as a `dir://` target does, with the release's assets as
 its files: the release is created when the tag has none, a file is uploaded unless an asset of that name
 already holds the same bytes (a different digest fails, naming both, and nothing is overwritten), and the
-records asset `<digest>.intoto.jsonl` is merged as a directory's is.
+records asset `<digest>.intoto.jsonl` is merged as a directory's is. An asset is uploaded as
+`<name>.partial-<token>`, checked and renamed (`github.store_asset`), so an interrupted upload never
+leaves half of a file under its real name; the records asset goes last, after its artifact is in place, and
+a leftover `.partial-` asset from an earlier run is deleted first.
 """
 
 import hashlib
 import os
+import secrets
 import shutil
 import tempfile
 import urllib.error
@@ -143,7 +147,8 @@ def publish_release(out_dir: Path, target: published.ReleaseTarget, out: TextIO)
     when the tag has none, and merge each artifact's records into its records asset.
 
     Assets are never overwritten: a file whose name is already an asset is skipped when the digest
-    matches, and a different one fails before anything is written. The records asset is read, merged
+    matches, and a different one fails before anything is written. Unfinished uploads of an earlier run
+    are deleted before the new ones start. The records asset is read, merged
     with `merged_lines` and, when that changed it, deleted and uploaded again (an asset cannot be
     changed in place), so a reader can find it missing for a moment, and two publishers at the same
     moment can lose a line; publishing again restores it."""
@@ -156,13 +161,14 @@ def publish_release(out_dir: Path, target: published.ReleaseTarget, out: TextIO)
         if release is None:
             release = github.create_release(client)
             print(f"{client.name}: release created", file=out)
+        remove_partials(client, held, out)
         for artifact in artifacts:
             states: list[str] = []
             for path in artifact.files:
                 if path.name in held:
                     states.append("already there")
                 else:
-                    held[path.name] = github.upload_asset(client, release, path.name, path)
+                    held[path.name] = github.store_asset(client, release, path.name, path, secrets.token_hex(8))
                     states.append("uploaded")
             state = "already there" if set(states) == {"already there"} else "uploaded"
             added = merge_records(client, release, held, artifact.digest, out_dir)
@@ -173,6 +179,15 @@ def publish_release(out_dir: Path, target: published.ReleaseTarget, out: TextIO)
         raise commands.Failed(str(error)) from None
     except OSError as error:
         raise commands.Failed(f"{target}: {describe(error)}") from None
+
+
+def remove_partials(client: github.Client, held: dict[str, github.Asset], out: TextIO) -> None:
+    """Delete the unfinished uploads (`<name>.partial-<token>`) an earlier publish left on the release.
+    Publishers of one release must not run at the same moment, which the records merge already asks."""
+    for name in sorted(held):
+        if published.partial_of(name) is not None:
+            github.delete_asset(client, held.pop(name))
+            print(f"{client.name}: {name} is an unfinished upload of an earlier run, deleted", file=out)
 
 
 def merge_records(
@@ -196,7 +211,7 @@ def merge_records(
     with tempfile.TemporaryDirectory(prefix="debian-image-factory-publish-") as scratch:
         source = Path(scratch) / name
         source.write_bytes(merged.encode("utf-8"))
-        held[name] = github.upload_asset(client, release, name, source)
+        held[name] = github.store_asset(client, release, name, source, secrets.token_hex(8))
     return len(merged.splitlines()) - len([line for line in present.splitlines() if line.strip()])
 
 
