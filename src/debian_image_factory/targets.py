@@ -1,12 +1,11 @@
 """The edge that asks a target what it holds for one identity (DESIGN 7.4): `dir://` and `oci://` targets."""
 
 import hashlib
-import os
 from pathlib import Path
 
 from input_lock.identity import HEX64
 
-from . import oci, registry
+from . import fileartifacts, oci, registry
 from .published import (
     Artifact,
     DirTarget,
@@ -17,7 +16,6 @@ from .published import (
     ReleaseTarget,
     Target,
     artifact_from_records,
-    parse_artifact_name,
     parse_envelope,
     records_name_for,
 )
@@ -47,35 +45,29 @@ def lookup(target: Target, image: str, suite: str, arch: str, identity: str) -> 
 
 
 def lookup_dir(directory: Path, image: str, suite: str, arch: str, identity: str) -> Lookup:
-    """List `directory`, keep the files named for this image, suite, architecture and identity, and
-    verify each: its real sha256 must match its name, its records file must exist and be well formed,
-    and its provenance must name the image and the full identity. A missing directory holds nothing."""
+    """List `directory`, keep the artifacts named for this image, suite, architecture and identity, and
+    verify each: its digest (a file's sha256, an Incus image's fingerprint) must match its name, its
+    records file must exist and be well formed, and its provenance must name the image and the full
+    identity. A missing directory holds nothing."""
     prefix = f"{image}-{suite}-{arch}-{identity[:16]}-"
     try:
-        names = sorted(name for name in os.listdir(directory) if name.startswith(prefix))
+        held, rejected = fileartifacts.file_artifacts(directory, prefix)
     except FileNotFoundError:
         return Lookup((), ())
     found: list[Artifact] = []
-    rejected: list[Rejected] = []
-    for name in names:
-        parsed = parse_artifact_name(name)
-        path = directory / name
-        if parsed is None or (parsed.image, parsed.suite, parsed.arch) != (image, suite, arch) or not path.is_file():
+    for one in held:
+        if (one.parts.image, one.parts.suite, one.parts.arch) != (image, suite, arch):
             continue
-        digest = sha256_of(path)
-        if not digest.startswith(parsed.digest12):
-            rejected.append(Rejected(name, f"its sha256 {digest} does not match the digest in its name"))
-            continue
-        records = directory / records_name_for(digest)
+        records = directory / records_name_for(one.digest)
         if not records.is_file():
-            rejected.append(Rejected(name, f"no records file {records.name} beside it"))
+            rejected.append(Rejected(one.name, f"no records file {records.name} beside it"))
             continue
         try:
             text = records.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            rejected.append(Rejected(name, f"records file {records.name} is not UTF-8"))
+            rejected.append(Rejected(one.name, f"records file {records.name} is not UTF-8"))
             continue
-        checked = artifact_from_records(name, digest, image, identity, text)
+        checked = artifact_from_records(one.name, one.digest, image, identity, text)
         if isinstance(checked, Rejected):
             rejected.append(checked)
         else:

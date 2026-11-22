@@ -31,7 +31,7 @@ import input_lock
 from input_lock.identity import HEX64
 from input_lock.records import PROVENANCE_PREDICATE, SPDX_PREDICATE, TestOutcome
 
-from . import commands, definition, oci, ocilayout, published, records, registry
+from . import commands, definition, fileartifacts, incus, oci, ocilayout, published, records, registry
 
 BUILD_TYPE: Final = re.compile(re.escape(records.REPOSITORY) + r"/blob/v[0-9][0-9A-Za-z.+-]*/docs/build-type-v1\.md")
 """The `buildType` of any release of this factory: the document names its release, so a verifier of one
@@ -296,15 +296,24 @@ def layout_subject(path: Path) -> Subject:
 
 
 def file_subject(path: Path) -> Subject:
+    """A file artifact: its sha256, or for an Incus image (its metadata tarball, or its rootfs) the
+    fingerprint of the two files."""
+    name = published.parse_artifact_name(path.name)
+    if name is not None and name.ext == incus.ROOTFS_EXT:
+        path = path.with_name(path.name.removesuffix(incus.ROOTFS_EXT) + incus.METADATA_EXT)
+        name = published.parse_artifact_name(path.name)
+    rootfs = incus.rootfs_of(path.name)
+    what = "sha256" if rootfs is None else "Incus fingerprint"
     try:
-        with path.open("rb") as handle:
-            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        if rootfs is None:
+            digest = fileartifacts.sha256_of(path)
+        else:
+            digest = fileartifacts.fingerprint_of(path, path.parent / rootfs)
     except OSError as error:
         raise commands.Failed(f"{path}: {describe(error)}") from None
-    name = published.parse_artifact_name(path.name)
     problems: list[str] = []
     if name is not None and not digest.startswith(name.digest12):
-        problems.append(f"{path}: its sha256 is {digest}, which its name does not carry")
+        problems.append(f"{path}: its {what} is {digest}, which its name does not carry")
     lines, bad = local_records(path.parent, digest, str(path))
     return Subject(str(path), digest, None, name, tuple(lines), tuple((*problems, *bad)))
 

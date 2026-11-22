@@ -27,7 +27,7 @@ from typing import Literal, TextIO
 
 from input_lock.identity import HEX64
 
-from . import commands, oci, ocilayout, published, registry
+from . import commands, fileartifacts, oci, ocilayout, published, registry
 
 
 def sha256_of(path: Path) -> str:
@@ -70,34 +70,35 @@ def copy_atomically(source: Path, path: Path) -> None:
         raise
 
 
-def artifacts_in(out_dir: Path) -> list[tuple[Path, str]]:
-    """Every artifact file in a build's output directory, with its sha256: files named as artifacts
-    whose content matches the digest in their name and that have a records file beside them."""
-    found: list[tuple[Path, str]] = []
-    for path in sorted(out_dir.iterdir()):
-        name = published.parse_artifact_name(path.name)
-        if name is None or not path.is_file():
-            continue
-        digest = sha256_of(path)
-        if not digest.startswith(name.digest12):
-            raise commands.Failed(f"{path}: its sha256 {digest} does not match the digest in its name")
-        if not (out_dir / published.records_name_for(digest)).is_file():
-            raise commands.Failed(f"{path}: no records file {published.records_name_for(digest)} beside it")
-        found.append((path, digest))
+def artifacts_in(out_dir: Path) -> list[fileartifacts.FileArtifact]:
+    """Every file artifact in a build's output directory: files named as artifacts whose digest matches
+    the one in their name (an Incus image's two files by their fingerprint) and that have a records file
+    beside them."""
+    found, rejected = fileartifacts.file_artifacts(out_dir)
+    if rejected:
+        raise commands.Failed(f"{out_dir / rejected[0].name}: {rejected[0].reason}")
+    for one in found:
+        if not (out_dir / published.records_name_for(one.digest)).is_file():
+            raise commands.Failed(
+                f"{out_dir / one.name}: no records file {published.records_name_for(one.digest)} beside it"
+            )
     return found
 
 
 def publish_dir(out_dir: Path, target: Path, out: TextIO) -> None:
-    """Copy every artifact of `out_dir` and merge its records into the directory `target`."""
+    """Copy every artifact of `out_dir` (each of its files) and merge its records into the directory `target`."""
     target.mkdir(parents=True, exist_ok=True)
-    for path, digest in artifacts_in(out_dir):
-        destination = target / path.name
-        if destination.is_file() and sha256_of(destination) == digest:
-            state = "already there"
-        else:
-            copy_atomically(path, destination)
-            state = "copied"
-        records_name = published.records_name_for(digest)
+    for artifact in artifacts_in(out_dir):
+        states: list[str] = []
+        for path in artifact.files:
+            destination = target / path.name
+            if destination.is_file() and sha256_of(destination) == sha256_of(path):
+                states.append("already there")
+            else:
+                copy_atomically(path, destination)
+                states.append("copied")
+        state = "already there" if set(states) == {"already there"} else "copied"
+        records_name = published.records_name_for(artifact.digest)
         new = (out_dir / records_name).read_text(encoding="utf-8")
         held = target / records_name
         present = held.read_text(encoding="utf-8") if held.is_file() else ""
@@ -105,7 +106,7 @@ def publish_dir(out_dir: Path, target: Path, out: TextIO) -> None:
         added = len(merged.splitlines()) - len([line for line in present.splitlines() if line.strip()])
         if merged != present:
             write_atomically(held, merged.encode("utf-8"))
-        print(f"{target}: {path.name} {state}, {added} record lines added", file=out)
+        print(f"{target}: {artifact.name} {state}, {added} record lines added", file=out)
 
 
 # ---- oci:// ------------------------------------------------------------------------------------
@@ -314,7 +315,7 @@ def publish_command(
             )
         if isinstance(one, published.OciTarget) and not layouts:
             raise commands.Failed(
-                f"{out_dir}: holds files only ({', '.join(p.name for p, _ in files)}); "
+                f"{out_dir}: holds files only ({', '.join(artifact.name for artifact in files)}); "
                 "oci:// targets take OCI images, publish these to dir://"
             )
     for one in parsed:
@@ -323,9 +324,9 @@ def publish_command(
                 print(f"{one.path}: {path.name} not published here, OCI images publish to oci:// targets", file=out)
             publish_dir(out_dir, Path(one.path), out)
         elif isinstance(one, published.OciTarget):
-            for path, _ in files:
+            for artifact in files:
                 print(
-                    f"{one.registry}/{one.repository}: {path.name} not published here, files publish to dir://",
+                    f"{one.registry}/{one.repository}: {artifact.name} not published here, files publish to dir://",
                     file=out,
                 )
             publish_oci(out_dir, one, layouts, out, connect)
