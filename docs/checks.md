@@ -13,8 +13,8 @@ that passed, warned and failed.
 - **PASSED**: every test passed.
 - **FAILED**: at least one test failed. The artifact stays a candidate: it is not reused, and pins do
   not move to it.
-- **WARNED**: no test failed and at least one warned. Only `byte-equal` warns; every other check
-  has two outcomes.
+- **WARNED**: no test failed and at least one warned. Only `byte-equal` and `os-boot` (a system that
+  boots `degraded`) warn; every other check has two outcomes.
 
 A check that is not required for an image has no say in whether the image is good. A good build is
 one whose required checks all PASSED or WARNED. When a build has several results for one check, the
@@ -130,6 +130,11 @@ entrypoint whatever entrypoint the image declares, and print `/etc/machine-id`, 
 and the SSH host public keys. An image without a shell cannot be read this way: the check is then not
 run. The tests are `machine-ids-differ`, `dbus-machine-ids-differ` and `ssh-host-keys-differ`.
 
+For an installer kit and an OS root the two instances are two boots of the artifact, the same boots as
+[installer-boot](#installer-boot) and [os-boot](#os-boot), which report their machine ID and the sha256
+of their SSH host public keys. The tests are `both-instances-reported`, `machine-ids-differ` and
+`ssh-host-keys-differ`. A boot that never reports fails the first.
+
 ## sbom-complete
 
 Kinds: all. Brought by: core in M2, oci in M3, incus in M4, installer and os in M5.
@@ -140,6 +145,9 @@ the lock entries the image uses.
 
 PASSED when nothing is missing and nothing is listed that is not there. FAILED otherwise, naming the
 differences.
+
+For an installer kit the test `subjects-are-the-kit-files` also holds the SBOM statement's subjects to
+the kit tarball first, then `vmlinuz` and `initrd.img`, by the sha256 of the bytes the kit holds.
 
 ## ancestry
 
@@ -164,6 +172,13 @@ The parent is the artifact of the plan's parent image in OUT. A core parent that
 the digest the plan names for it (`artifact`), which is all the first layer needs. An OCI parent that is not
 in OUT cannot be compared layer by layer, and neither can an image whose plan names no artifact for its
 parent: the check is then not run, with that reason, and never passed.
+
+For an OS root and an installer kit (whose root is its initrd) the test is `parent-files-present`: every
+path of the parent's root is in the child's, except the files of packages the child no longer installs
+(the parent's own dpkg file lists name them) and what every build cleans: device nodes, `/run`, `/tmp`,
+logs, apt's lists and caches, ldconfig's cache, dpkg's pending triggers, the apt sources each image
+renders for itself, and the machine identity files. The parent is the plan's parent image in OUT, or a
+file given with `test --parent`; when there are several, the one the plan names.
 
 ## same-resolution
 
@@ -232,6 +247,15 @@ packaged one.
 
 PASSED when the marker appears with that kernel. FAILED otherwise.
 
+QEMU boots `vmlinuz` with `initrd.img` as the whole system and `console=ttyS0`. The guest reports
+through two systemd credentials passed as SMBIOS OEM strings: a unit that waits for the boot to finish
+and writes one `FACTORY-REPORT` line (running kernel, machine ID, SSH host key digest, system state) to
+the serial port, then powers off, and a drop-in that makes `multi-user.target` want it. The artifact is
+never changed. The tests are `kit-json-matches-files` (the members are what kit.json lists),
+`report-arrived` and `running-kernel-is-the-kit-kernel`. A boot that does not report in time names the
+end of its serial log, and the whole log is kept beside the kit as `<kit>.boot-<n>.serial.log`. The
+check is not run when docker or the boot image (`scripts/builder vm`, `test --vm-image`) is missing.
+
 ## os-boot
 
 Kinds: os. Brought by: M5.
@@ -240,4 +264,12 @@ It proves that the root filesystem boots as a system: the test harness lays it o
 QEMU boots it to multi-user, the installed and the running kernel match, and the first boot creates
 the machine's identity.
 
-PASSED when it does. FAILED when it does not.
+PASSED when it does. WARNED when the system boots `degraded` (a unit failed). FAILED otherwise.
+
+The scratch disk is GPT: an EFI system partition holding `EFI/BOOT/BOOTX64.EFI`, made by the OS's own
+`grub-mkstandalone` and embedding a config that boots `/boot/vmlinuz-<kernel>` with its initramfs,
+`root=LABEL=factory-root rw console=ttyS0`, and an ext4 root made from the unpacked tarball. OVMF boots
+it. The guest reports as for [installer-boot](#installer-boot). The tests are `report-arrived`,
+`system-running`, `running-kernel-is-installed-kernel`, `first-boot-made-machine-id` and, when
+openssh-server is installed, `first-boot-made-ssh-host-keys`. A root without GRUB for UEFI, or with
+other than one kernel in `/boot`, fails `bootable`.

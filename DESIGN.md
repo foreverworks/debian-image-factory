@@ -1210,7 +1210,7 @@ Each runs on the exact artifact and emits one test result.
 | `package-set` | all | the image's dpkg status equals the plan's resolved set |
 | `locked-inputs` | all with lock entries | every entry the image uses is installed at its locked version (dpkg for `apt` entries, the module's own version probe otherwise); a keyring a `signed_by` names is a trust root, listed as passed and not installed |
 | `no-machine-identity` | all | `/etc/machine-id` absent, empty or `uninitialized`; no `/var/lib/dbus/machine-id`, no SSH host keys, no private key block and no credential token of a documented shape (GitHub, AWS, Slack, npm, PyPI, GitLab) in any plain file, `/usr/share/doc`, `man` and `info` included (only compressed documentation is skipped; executables are searched for keys only), no random seed, no cloud-init instance state, no `/etc/hostname` content, no `/etc/resolv.conf` file (a symlink, as systemd-resolved makes, is fine). For OCI the files are those of the layers merged with whiteouts applied, except that a private key or token in a layer counts even when a later layer deletes it, because it still ships |
-| `two-clones` | all | two instances of the artifact share no identity: machine IDs and SSH host keys, where present, differ. Core and OCI run as two rootless containers, Incus as two instances, the installer and OS as two VMs |
+| `two-clones` | all | two instances of the artifact share no identity: machine IDs and SSH host keys, where present, differ. Core and OCI run as two rootless containers, Incus as two instances, the installer and OS as two VMs (the boots of `installer-boot` and `os-boot`, run at once), each reporting its machine ID and host key digest |
 | `sbom-complete` | all | the SBOM lists every installed package and locked input |
 | `ancestry` | children | the parent's filesystem is the base: for OCI, the parent's layers are the first layers by digest; elsewhere, the parent's files are present unless the child's own records say it removed them |
 | `same-resolution` | core | a second resolution of the same lock gives the same package set |
@@ -1218,8 +1218,8 @@ Each runs on the exact artifact and emits one test result.
 | `byte-equal` | all, optional | two builds from the same inputs give the same digest; WARNED, never FAILED, when they differ |
 | `oci-run` | oci | runs under rootless Docker: declared user and entrypoint, `cmd` exits 0 |
 | `incus-boot` | incus | in an Incus host inside a VM: cloud-init finishes through NoCloud from both `cloud-init.user-data` and `user.user-data`, creates the user, runs commands, an IPv4 address is reported, all still true after a restart |
-| `installer-boot` | installer | QEMU boots the kit from RAM to a serial marker; the running kernel is the packaged one |
-| `os-boot` | os | the test harness lays the root filesystem onto a scratch disk, QEMU boots it to multi-user, installed and running kernel match, first boot creates its identity |
+| `installer-boot` | installer | kit.json matches the kit's files; QEMU boots `vmlinuz` with `initrd.img` from RAM (`console=ttyS0`) to a serial report; the running kernel is kit.json's |
+| `os-boot` | os | the test harness lays the root filesystem onto a scratch GPT disk (an ESP with the OS's own `grub-mkstandalone` image, an ext4 root labelled `factory-root` from the tarball), OVMF boots it to multi-user (`degraded` warns), installed and running kernel match, first boot creates a machine ID and, with openssh-server, host keys |
 
 Failed, cancelled or incomplete checks leave the artifact a candidate; the consumer's pins do not
 move, and `prune` deletes it once its checks end.
@@ -1303,7 +1303,16 @@ identities of the images that install it, and nothing else.
   the revision fails here. A kind not yet byte-equal relies on review: any change to its build code
   raises the revision.
 - QEMU with KVM: `installer-boot`, `os-boot`, `two-clones` for the installer and OS, and
-  `incus-boot` in a Debian 13 VM with Incus from the same snapshot (6.0.4 in Debian 13).
+  `incus-boot` in a Debian 13 VM with Incus from the same snapshot (6.0.4 in Debian 13). QEMU runs in
+  the boot checks' image (`builder/vm.Dockerfile`, built by `scripts/builder vm` from the builder's base
+  and snapshot), with `--device /dev/kvm` when it opens and TCG otherwise, under a longer time limit;
+  the harness never changes the artifact. The guest reports through two systemd credentials passed as
+  SMBIOS type 11 OEM strings: an extra unit (`Type=simple`, so the boot can finish while it waits for
+  `systemctl is-system-running --wait`) that writes one `FACTORY-REPORT` line to `/dev/ttyS0` and powers
+  off, and a drop-in that makes `multi-user.target` want it. Both boots of `two-clones` run at once and
+  also serve the boot check. A failed boot check keeps each boot's serial log beside the artifact and
+  names its last lines in the result. `tests/integration/test_boot_checks.py` builds a small OS root and
+  kit with mmdebstrap and boots both; under TCG each pair of boots takes under a minute.
 
 **Where it runs.** While the repository is private, its jobs run on the project's own self-hosted
 runners, picked by capability label (`debian-image-factory`, and `debian-image-factory-kvm` for jobs

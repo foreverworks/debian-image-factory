@@ -1,0 +1,48 @@
+# The boot checks' integration tests on demand: a small OS root and installer kit built with mmdebstrap,
+# booted in QEMU (installer-boot, os-boot, two-clones). Run by hand from the Actions tab; a release runs
+# the same tests in its integration tier (release.yml).
+#
+# Where it runs: while the repository is private, on the project's own self-hosted runners with the
+# capability label debian-image-factory-kvm (they can boot a VM with KVM); once it is public, on GitHub's
+# hosted ubuntu-26.04, which has /dev/kvm. Without KVM the tests fall back to TCG, slower but the same.
+name: boot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  boot:
+    name: boot checks (QEMU)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ github.event.repository.private && 'debian-image-factory-kvm' || 'ubuntu-26.04' }}
+    timeout-minutes: 60
+    steps:
+      - name: System packages a bare runner lacks (git, gpgv and more)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends apt gpgv gnupg git ca-certificates curl xz-utils
+
+      - name: Docker, installed when the runner has none
+        run: |
+          command -v docker >/dev/null || sudo apt-get install -y -q --no-install-recommends docker.io
+          docker info >/dev/null 2>&1 || sudo systemctl start docker >/dev/null 2>&1 || true
+          docker info >/dev/null 2>&1 || sudo chmod 666 /var/run/docker.sock
+
+      - name: KVM for the runner's user, when the machine has it
+        run: |
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; else echo "no /dev/kvm: the boots run under TCG"; fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: "3.15"
+          activate-environment: true
+
+      - name: Boot checks' integration tests (docker, QEMU and the network)
+        run: scripts/test boot
