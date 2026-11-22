@@ -20,6 +20,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import resources
 from pathlib import Path
 from typing import Final, TextIO
 from urllib.parse import unquote, urlparse
@@ -29,16 +30,34 @@ from input_lock import Lock, Package
 from input_lock.lock import entry_env
 from input_lock.records import Statement, statement, subject
 
-from .. import ENGINE, __version__, commands, debian, definition, fetch, planfile, records, resolve
+from .. import (
+    ENGINE,
+    __version__,
+    commands,
+    debian,
+    definition,
+    fetch,
+    identity,
+    modules,
+    oci,
+    ocilayout,
+    planfile,
+    published,
+    records,
+    resolve,
+)
 from .. import plan as plan_module
 from .. import tools as builder
 from ..identity import FileFact
 from ..published import artifact_name, records_name_for
-from . import core
+from . import core, parents
+from . import oci as oci_build
 
-SUPPORTED_KINDS: Final = ("core",)
+SUPPORTED_KINDS: Final = ("core", "oci")
 """The kinds this release builds; the others arrive with their milestones."""
-EXTENSIONS: Final[Mapping[str, str]] = {"core": "tar.gz"}
+EXTENSIONS: Final[Mapping[str, str]] = {"core": "tar.gz", "oci": oci.LAYOUT_EXT}
+LAYER_PROGRAM: Final = "layer.py"
+"""The layer writer's file name in the package and in the work directory."""
 PLAN_COPY: Final = "plan.json"
 """The plan a build ran from, copied byte for byte into the output directory for `test`."""
 
@@ -52,13 +71,6 @@ class Builder:
     """The image ID (`sha256:<hex>`), recorded in provenance."""
     owner: str | None
     """`uid:gid` to hand the artifact back to, when the container's root is the host's."""
-
-
-@dataclass(frozen=True, slots=True)
-class Built:
-    image: str
-    name: str
-    digest: str
 
 
 # ---- the builder container ----------------------------------------------------------------------
@@ -155,6 +167,40 @@ def input_file_name(fields: Mapping[str, input_lock.Value]) -> str:
     return "file" if unsafe else name
 
 
+def stage_run(
+    work: Path,
+    *,
+    loaded: commands.Loaded,
+    lock: Lock,
+    image: str,
+    entry: planfile.ImageEntry,
+    cache: Path,
+    scripts: Sequence[str],
+) -> None:
+    """The hooks, the verified file of every lock entry the image uses, and build.env, under `work/run`:
+    whatever a hook or a module reads. Inputs are staged whenever the image has lock entries, for hooks
+    and modules alike."""
+    if not scripts and not entry["inputs"]:
+        return
+    run = work / "run"
+    (run / "hooks").mkdir(parents=True)
+    for index, hook in enumerate(scripts, start=1):
+        target = run / "hooks" / core.hook_name(index, hook)
+        shutil.copyfile(loaded.root / hook, target)
+        target.chmod(0o755)
+    pairs: list[tuple[str, str]] = [("LOCK_ENTRIES", " ".join(sorted(entry["inputs"])))]
+    for name in sorted(entry["inputs"]):
+        pairs.extend(entry_env(name, lock["inputs"][name]))
+        source = fetch.input_path(cache, entry["inputs"][name])
+        if not source.is_file():
+            raise commands.Failed(f"images.{image}: input {name} is not in the cache: run fetch first")
+        folder = run / "inputs" / name
+        folder.mkdir(parents=True)
+        shutil.copyfile(source, folder / input_file_name(entry["inputs"][name]))
+    pairs.extend(core.param_env(entry["params"]))
+    (run / "build.env").write_text(input_lock.shell(pairs))
+
+
 def prepare_work(
     work: Path,
     *,
@@ -166,46 +212,75 @@ def prepare_work(
     keyring: Path,
     cache: Path,
     owner: str | None,
+    base: parents.Base | None = None,
 ) -> None:
-    """Write everything the builder reads for one image into `work`."""
+    """Write everything the builder reads for one image into `work`. An OCI image (`base` is its parent's
+    layers) gets the layer program and its parent's layers instead of core's sources and mmdebstrap."""
     spec = loaded.definition.images[image]
     suite = plan["debian"]["suite"]
     components = plan["debian"]["components"]
+    epoch = loaded.definition.debian.source_date_epoch
     work.mkdir(parents=True)
     shutil.copyfile(keyring, work / "keyring.pgp")
-    (work / "build.list").write_text(core.build_sources(suite, components))
-    (work / "debian.sources").write_text(core.image_sources(entry["apt_sources"], suite, components, plan["baseline"]))
     if spec.files is not None:
-        (work / "files.tar").write_bytes(
-            files_tar(loaded.root, spec.files, loaded.files, loaded.definition.debian.source_date_epoch)
+        (work / "files.tar").write_bytes(files_tar(loaded.root, spec.files, loaded.files, epoch))
+    if base is None:
+        (work / "build.list").write_text(core.build_sources(suite, components))
+        (work / "debian.sources").write_text(
+            core.image_sources(entry["apt_sources"], suite, components, plan["baseline"])
         )
-    if spec.hooks:
-        run = work / "run"
-        (run / "hooks").mkdir(parents=True)
-        for index, hook in enumerate(spec.hooks, start=1):
-            target = run / "hooks" / core.hook_name(index, hook)
-            shutil.copyfile(loaded.root / hook, target)
-            target.chmod(0o755)
-        pairs: list[tuple[str, str]] = [("LOCK_ENTRIES", " ".join(sorted(entry["inputs"])))]
-        for name in sorted(entry["inputs"]):
-            pairs.extend(entry_env(name, lock["inputs"][name]))
-            source = fetch.input_path(cache, entry["inputs"][name])
-            if not source.is_file():
-                raise commands.Failed(f"images.{image}: input {name} is not in the cache: run fetch first")
-            folder = run / "inputs" / name
-            folder.mkdir(parents=True)
-            shutil.copyfile(source, folder / input_file_name(entry["inputs"][name]))
-        pairs.extend(core.param_env(entry["params"]))
-        (run / "build.env").write_text(input_lock.shell(pairs))
-    (work / "customize.sh").write_text(core.customize_script(files=spec.files is not None, hooks=spec.hooks))
+        stage_run(work, loaded=loaded, lock=lock, image=image, entry=entry, cache=cache, scripts=spec.hooks)
+        (work / "customize.sh").write_text(core.customize_script(files=spec.files is not None, hooks=spec.hooks))
+        (work / "build.sh").write_text(
+            core.build_script(suite=suite, request=entry["request"], source_date_epoch=epoch, owner=owner)
+        )
+        return
+    (work / "build.list").write_text(
+        core.build_sources(suite, components, mirror=oci_build.CHILD_MIRROR, keyring=oci_build.CHILD_KEYRING)
+    )
+    scripts = identity.script_paths(loaded.definition, image, entry["modules"])
+    stage_run(work, loaded=loaded, lock=lock, image=image, entry=entry, cache=cache, scripts=scripts)
+    (work / LAYER_PROGRAM).write_text(
+        resources.files("debian_image_factory.build").joinpath(LAYER_PROGRAM).read_text(encoding="utf-8")
+    )
+    (work / "layers").mkdir()
+    for index, (path, _, _) in enumerate(base.layers):
+        place(path, work / "layers" / oci_build.layer_name(index))
     (work / "build.sh").write_text(
-        core.build_script(
-            suite=suite,
+        oci_build.build_script(
+            layers=len(base.layers),
             request=entry["request"],
-            source_date_epoch=loaded.definition.debian.source_date_epoch,
+            source_date_epoch=epoch,
             owner=owner,
+            files=spec.files is not None,
+            module_lines=module_lines(loaded.definition, entry, epoch),
+            hooks=scripts,
         )
     )
+
+
+def place(source: Path, target: Path) -> None:
+    """`source` at `target`: hard-linked when the file system allows, copied otherwise."""
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copyfile(source, target)
+
+
+def module_lines(spec: definition.Definition, entry: planfile.ImageEntry, source_date_epoch: int) -> list[str]:
+    """What every switched-on built-in module the image uses runs in the builder (modules.install_lines),
+    each module with its own lock entries, in module-name order."""
+    lines: list[str] = []
+    for name in entry["modules"]:
+        module = spec.modules[name]
+        if not module.use.startswith("builtin:"):
+            continue  # a script: it runs as a hook, before the image's own (identity.script_paths)
+        own = {entry_name: fields for entry_name, fields in entry["inputs"].items() if fields.get("module") == name}
+        lines.append(f"# module {name} ({module.use})")
+        lines += modules.install_lines(
+            module, own, inputs=f"{core.WORK}/run/inputs", source_date_epoch=source_date_epoch
+        )
+    return lines
 
 
 # ---- what the artifact holds --------------------------------------------------------------------
@@ -331,8 +406,10 @@ def image_records(
     builder_: Builder,
     started: str,
     finished: str,
+    ancestors: Sequence[records.Parent] = (),
 ) -> list[Statement]:
-    """Provenance and SBOM of one artifact (DESIGN 8.2)."""
+    """Provenance and SBOM of one artifact (DESIGN 8.2). `ancestors` are the images it descends from,
+    nearest first (none for core)."""
     builder_id, invocation = records.run_details(os.environ, __version__)
     entries = sorted(entry["inputs"])
     subjects = [subject(name, digest)]
@@ -352,7 +429,7 @@ def image_records(
         in_releases=releases,
         builder_image=repository_of(builder_.reference),
         builder_digest=builder_.digest.removeprefix("sha256:"),
-        parent=None,
+        ancestors=ancestors,
         builder_id=builder_id,
         invocation_id=invocation,
         version=__version__,
@@ -436,6 +513,221 @@ def verify_identity(
         )
 
 
+def pull_parent(target: published.OciTarget, digest: str, dest: Path) -> Path:
+    """Pull the image with manifest digest `digest` (hex) from `target` into `dest` as an OCI image layout
+    and return the layout's directory, named as a build names it. The registry publisher provides this."""
+    raise commands.Failed("oci:// parents arrive with the registry publisher")
+
+
+@dataclass(frozen=True, slots=True)
+class Run:
+    """What every image of one `build` run shares."""
+
+    plan: planfile.Plan
+    lock: Lock
+    loaded: commands.Loaded
+    sources: commands.Sources
+    mirror: Path
+    releases: Sequence[records.Remote]
+    builder_: Builder
+    source: records.DefinitionSource | None
+    out_dir: Path
+    directories: Sequence[Path]
+    """The `dir://` targets given as --parents."""
+    registries: Sequence[published.OciTarget]
+    """The `oci://` targets given as --parents."""
+
+
+@dataclass(frozen=True, slots=True)
+class Result:
+    artifact: parents.ParentArtifact
+    packages: int
+
+
+def build_core(run: Run, image: str, scratch: Path) -> Result:
+    """One core image: mmdebstrap in the builder, then the tarball and its records."""
+    entry = run.plan["images"][image]
+    work = scratch / "factory"
+    prepare_work(
+        work,
+        loaded=run.loaded,
+        lock=run.lock,
+        image=image,
+        entry=entry,
+        plan=run.plan,
+        keyring=run.sources.keyring,
+        cache=run.sources.cache,
+        owner=run.builder_.owner,
+    )
+    started = now()
+    run_builder(run.builder_, work, run.mirror, run.out_dir / f"{image}.build.log")
+    finished = now()
+    packed = work / Path(core.ROOTFS).name
+    check_gzip(packed)
+    digest = sha256_file(packed)
+    debian_ = run.plan["debian"]
+    name = artifact_name(
+        image, debian_["suite"], debian_["architecture"], entry["identity"], digest, EXTENSIONS[entry["kind"]]
+    )
+    packages = installed(packed)
+    statements = image_records(
+        image=image,
+        entry=entry,
+        plan=run.plan,
+        lock=run.lock,
+        name=name,
+        digest=digest,
+        packages=packages,
+        source=run.source,
+        releases=run.releases,
+        builder_=run.builder_,
+        started=started,
+        finished=finished,
+    )
+    # Records first: an interrupted build leaves at most records without an artifact, which
+    # nothing reads, never an artifact that publish would refuse for lack of records.
+    (run.out_dir / records_name_for(digest)).write_text(records.record_lines(statements))
+    os.replace(packed, run.out_dir / name)
+    return Result(parents.ParentArtifact(image, "core", name, digest, run.out_dir / name), len(packages))
+
+
+def adds_layer(spec: definition.Image, entry: planfile.ImageEntry) -> bool:
+    """Whether an OCI image changes its parent's filesystem: it installs packages, modules or lock entries,
+    lays down a file tree or runs hooks. An image that only sets `oci` config adds no layer."""
+    return bool(entry["request"] or entry["inputs"] or entry["modules"] or spec.files is not None or spec.hooks)
+
+
+def find_by_name(run: Run, built: Mapping[str, parents.ParentArtifact]) -> parents.Finder:
+    """Where an artifact is, by its name: built in this run, in the output directory, or in a `dir://` parent target."""
+
+    def find(name: str) -> Path | None:
+        for one in built.values():
+            if one.name == name and one.path is not None:
+                return one.path
+        for directory in (run.out_dir, *run.directories):
+            if (directory / name).exists():
+                return directory / name
+        return None
+
+    return find
+
+
+def build_oci(run: Run, image: str, scratch: Path, built: Mapping[str, parents.ParentArtifact]) -> Result:
+    """One OCI image: its parent's layers, plus one layer when it changes the filesystem, a config, and
+    the layout with its records (DESIGN 5.3, 8.1)."""
+    entry = run.plan["images"][image]
+    spec = run.loaded.definition.images[image]
+    debian_ = run.plan["debian"]
+    suite, arch = debian_["suite"], debian_["architecture"]
+    parent_name = entry["parent"]
+    if parent_name is None:
+        raise commands.Failed(f"images.{image}: an OCI image needs a parent")
+    parent = parents.locate_parent(
+        image,
+        parent_name,
+        run.plan["images"][parent_name],
+        suite=suite,
+        arch=arch,
+        built=built,
+        out_dir=run.out_dir,
+        directories=run.directories,
+        registries=run.registries,
+        pull=pull_parent,
+        scratch=scratch / "pulled",
+    )
+    ancestry = parents.lineage(parent, find_by_name(run, built))
+    base = parents.base_of(parent)
+    try:
+        config = oci.merged_config(base.config, spec.kind_table)
+    except oci.OciError as error:
+        raise commands.Failed(f"images.{image}: {error}") from None
+    started = now()
+    layers = list(base.layers)
+    diff_ids = list(base.diff_ids)
+    if adds_layer(spec, entry):
+        work = scratch / "factory"
+        prepare_work(
+            work,
+            loaded=run.loaded,
+            lock=run.lock,
+            image=image,
+            entry=entry,
+            plan=run.plan,
+            keyring=run.sources.keyring,
+            cache=run.sources.cache,
+            owner=run.builder_.owner,
+            base=base,
+        )
+        run_builder(run.builder_, work, run.mirror, run.out_dir / f"{image}.build.log")
+        status = (work / Path(oci_build.STATUS).name).read_text(encoding="utf-8")
+        added = work / Path(oci_build.LAYER).name
+        if added.is_file():
+            diff_id = (work / Path(oci_build.DIFF_ID).name).read_text(encoding="ascii").strip()
+            if parents.gunzip_sha256(added) != diff_id:
+                raise commands.Failed(f"{image}: the builder's layer does not match its diff_id")
+            layers.append((added, sha256_file(added), added.stat().st_size))
+            diff_ids.append(diff_id)
+    else:
+        status = parents.dpkg_status([path for path, _, _ in base.layers])
+    finished = now()
+    try:
+        config_bytes = oci.image_config(config, diff_ids, arch)
+        annotations = oci.image_annotations(
+            identity=entry["identity"],
+            base_digest=parent.digest,
+            base_name=parent.name,
+            source=None if run.source is None else run.source.uri.removeprefix("git+"),
+            revision=None if run.source is None else run.source.revision,
+        )
+        layout = scratch / "layout"
+        descriptor = ocilayout.write_layout(layout, config=config_bytes, layers=layers, annotations=annotations)
+    except oci.OciError as error:
+        raise commands.Failed(f"images.{image}: {error}") from None
+    digest = descriptor.digest
+    name = artifact_name(image, suite, arch, entry["identity"], digest, EXTENSIONS[entry["kind"]])
+    packages = debian.installed_packages(status)
+    statements = image_records(
+        image=image,
+        entry=entry,
+        plan=run.plan,
+        lock=run.lock,
+        name=name,
+        digest=digest,
+        packages=packages,
+        source=run.source,
+        releases=run.releases,
+        builder_=run.builder_,
+        started=started,
+        finished=finished,
+        ancestors=[records.Parent(one.image, one.digest) for one in ancestry],
+    )
+    # Records first, as for core: the layout directory is renamed into place only once they are written.
+    (run.out_dir / records_name_for(digest)).write_text(records.record_lines(statements))
+    target = run.out_dir / name
+    if target.exists():
+        shutil.rmtree(target)
+    os.replace(layout, target)
+    return Result(parents.ParentArtifact(image, "oci", name, digest, target), len(packages))
+
+
+def split_parent_targets(texts: Sequence[str]) -> tuple[list[Path], list[published.OciTarget]]:
+    """The `--parents` targets: where parents not built in this run may be, `dir://` and `oci://`."""
+    directories: list[Path] = []
+    registries: list[published.OciTarget] = []
+    for text in texts:
+        try:
+            target = published.parse_target(text)
+        except ValueError as error:
+            raise commands.Usage(str(error)) from None
+        if isinstance(target, published.DirTarget):
+            directories.append(Path(target.path))
+        elif isinstance(target, published.OciTarget):
+            registries.append(target)
+        else:
+            raise commands.Usage(f"--parents {text}: a github-release:// target holds no parents; use dir:// or oci://")
+    return directories, registries
+
+
 def build_command(
     plan_path: Path,
     lock_path: Path,
@@ -446,6 +738,7 @@ def build_command(
     images: Sequence[str],
     builder_image: str,
     out: TextIO,
+    parent_targets: Sequence[str] = (),
 ) -> int:
     plan_bytes = commands.read_text(plan_path)
     try:
@@ -463,6 +756,7 @@ def build_command(
         )
     except ValueError as error:
         raise commands.Failed(f"{plan_path}: {error}") from None
+    directories, registries = split_parent_targets(parent_targets)
     chosen = selected(plan, images, out)
     if not chosen:
         print("nothing to build", file=out)
@@ -475,49 +769,14 @@ def build_command(
     source = definition_source(definition_path)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / PLAN_COPY).write_text(plan_bytes)
+    run = Run(plan, lock, loaded, sources, mirror, releases, builder_, source, out_dir, directories, registries)
+    built: dict[str, parents.ParentArtifact] = {}
     for image in chosen:
-        entry = plan["images"][image]
         with tempfile.TemporaryDirectory(prefix=f".work-{image}-", dir=out_dir) as scratch:
-            work = Path(scratch) / "factory"
-            prepare_work(
-                work,
-                loaded=loaded,
-                lock=lock,
-                image=image,
-                entry=entry,
-                plan=plan,
-                keyring=sources.keyring,
-                cache=sources.cache,
-                owner=builder_.owner,
-            )
-            started = now()
-            run_builder(builder_, work, mirror, out_dir / f"{image}.build.log")
-            finished = now()
-            packed = work / Path(core.ROOTFS).name
-            check_gzip(packed)
-            digest = sha256_file(packed)
-            debian_ = plan["debian"]
-            name = artifact_name(
-                image, debian_["suite"], debian_["architecture"], entry["identity"], digest, EXTENSIONS[entry["kind"]]
-            )
-            packages = installed(packed)
-            statements = image_records(
-                image=image,
-                entry=entry,
-                plan=plan,
-                lock=lock,
-                name=name,
-                digest=digest,
-                packages=packages,
-                source=source,
-                releases=releases,
-                builder_=builder_,
-                started=started,
-                finished=finished,
-            )
-            # Records first: an interrupted build leaves at most records without an artifact, which
-            # nothing reads, never an artifact that publish would refuse for lack of records.
-            (out_dir / records_name_for(digest)).write_text(records.record_lines(statements))
-            os.replace(packed, out_dir / name)
-        print(f"{image}: {name} ({len(packages)} packages)", file=out)
+            if plan["images"][image]["kind"] == "core":
+                result = build_core(run, image, Path(scratch))
+            else:
+                result = build_oci(run, image, Path(scratch), built)
+        built[image] = result.artifact
+        print(f"{image}: {result.artifact.name} ({result.packages} packages)", file=out)
     return 0

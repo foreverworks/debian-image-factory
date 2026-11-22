@@ -109,7 +109,7 @@ def provenance_of(**changes: object) -> Statement:
         "in_releases": IN_RELEASES,
         "builder_image": "ghcr.io/foreverworks/debian-image-factory-builder",
         "builder_digest": BUILDER,
-        "parent": None,
+        "ancestors": (),
         "builder_id": "https://github.com/example/images/.github/workflows/images.yml@refs/heads/main",
         "invocation_id": "https://github.com/example/images/actions/runs/1/attempts/1",
         "version": __version__,
@@ -446,7 +446,7 @@ class ProvenanceTest(unittest.TestCase):
 
     def test_the_dependencies_come_in_the_designed_order(self) -> None:
         lock = example_lock()
-        found = arr(obj(self.predicate(parent=Parent("core", PARENT))["buildDefinition"])["resolvedDependencies"])
+        found = arr(obj(self.predicate(ancestors=(Parent("core", PARENT),))["buildDefinition"])["resolvedDependencies"])
         names = [obj(one).get("name") or obj(one).get("uri") for one in found]
         self.assertEqual(
             obj(found[0]),
@@ -477,6 +477,25 @@ class ProvenanceTest(unittest.TestCase):
         )
         self.assertEqual(obj(found[8]), {"name": "parent: core", "digest": {"sha256": PARENT}})
 
+    def test_ancestors_come_nearest_first_as_parent_then_ancestor(self) -> None:
+        middle, top = "ee" * 32, "ff" * 32
+        found = arr(
+            obj(
+                self.predicate(ancestors=(Parent("oci-base", middle), Parent("core", top), Parent("older", PARENT)))[
+                    "buildDefinition"
+                ]
+            )["resolvedDependencies"]
+        )
+        tail = [obj(one) for one in found[-3:]]
+        self.assertEqual(
+            tail,
+            [
+                {"name": "parent: oci-base", "digest": {"sha256": middle}},
+                {"name": "ancestor: core", "digest": {"sha256": top}},
+                {"name": "ancestor: older", "digest": {"sha256": PARENT}},
+            ],
+        )
+
     def test_without_a_definition_or_a_parent_those_entries_are_absent(self) -> None:
         predicate = self.predicate(definition=None, invocation_id=None)
         definition = obj(predicate["buildDefinition"])
@@ -491,7 +510,7 @@ class ProvenanceTest(unittest.TestCase):
             {"identity": "ab"},
             {"recipe_digest": "x"},
             {"started_on": "yesterday"},
-            {"parent": Parent("core", "z")},
+            {"ancestors": (Parent("core", "z"),)},
             {"definition": DefinitionSource("git+https://example.com/a", "main", "f")},
         ):
             with self.subTest(change), self.assertRaises(ValueError):
@@ -512,7 +531,7 @@ class ProvenanceTest(unittest.TestCase):
 class RecordLinesTest(unittest.TestCase):
     def test_one_unsigned_envelope_per_line_that_decodes_back(self) -> None:
         first = provenance_of()
-        second = provenance_of(image="node-26", parent=Parent("core", PARENT))
+        second = provenance_of(image="node-26", ancestors=(Parent("core", PARENT),))
         text = record_lines([first, second])
         lines = text.splitlines()
         self.assertEqual(len(lines), 2)

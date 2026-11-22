@@ -177,14 +177,16 @@ Then build the core image and check it:
 ```sh
 scripts/builder build                      # the pinned builder image, from the factory's own snapshot
 debian-image-factory fetch plan.json       # every index and package the plan names, verified, in the cache
-debian-image-factory build plan.json --out out/    # core, offline, in the builder container
+debian-image-factory build plan.json --out out/    # core and OCI images, offline, in the builder container
 debian-image-factory test out/             # the core checks, recorded beside the artifact
 debian-image-factory publish out/ --to dir:///srv/images
 ```
 
 `build` needs Docker and nothing from the network: it reads the partial mirror
 `fetch` laid out. Each artifact lands in `out/` with its records in `<digest>.intoto.jsonl`: SLSA
-provenance, an SPDX SBOM and one test result per check. Plan again with `--against
+provenance, an SPDX SBOM and one test result per check. An OCI image lands as a directory
+`<image>-<suite>-<arch>-<identity16>-<digest12>.oci`, an OCI image layout: its parent's layers (for
+core's child, core's tarball itself) and at most one layer of its own. Plan again with `--against
 dir:///srv/images` and the core you just published reads `reuse`.
 
 OCI images publish to a registry instead: `publish out/ --to oci://ghcr.io/example/debian` pushes

@@ -1,6 +1,6 @@
 """The command line (DESIGN 9.1). Exit codes: 0 done, 1 a check or validation failed, 2 usage.
 
-This release has `lock check`, `lock snapshot`, `lock baseline`, `plan`, `fetch`, `build` (core),
+This release has `lock check`, `lock snapshot`, `lock baseline`, `plan`, `fetch`, `build` (core and oci),
 `test`, `publish` (to `dir://` and `oci://`) and `verify`; the other kinds and targets arrive in later releases.
 """
 
@@ -104,6 +104,14 @@ def parser() -> argparse.ArgumentParser:
         help=f"the builder container image (default {builder.BUILDER_IMAGE}, from scripts/builder build)",
     )
 
+    build.add_argument(
+        "--parents",
+        action="append",
+        default=[],
+        metavar="TARGET",
+        help="where to find a parent this run does not build, besides OUT: dir://PATH or oci://REGISTRY/REPO (repeat)",
+    )
+
     test = commands_.add_parser("test", help="run the built-in checks on the artifacts in OUT and attest each result")
     test.add_argument("out", type=Path, metavar="OUT", help="a build's output directory (plan.json and the artifacts)")
     sources_options(test)
@@ -198,6 +206,7 @@ def dispatch(arguments: argparse.Namespace) -> int:
             images=arguments.image,
             builder_image=arguments.builder_image,
             out=sys.stdout,
+            parent_targets=arguments.parents,
         )
     if arguments.command == "test":
         return checks.test_command(arguments.out, arguments.check, sources_of(arguments), sys.stdout, url=arguments.url)

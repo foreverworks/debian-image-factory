@@ -54,15 +54,16 @@ def grouped(suite: str) -> list[tuple[str, list[Suite]]]:
     return list(found.items())
 
 
-def build_sources(suite: str, components: Sequence[str]) -> str:
+def build_sources(suite: str, components: Sequence[str], *, mirror: str = MIRROR, keyring: str = BUILD_KEYRING) -> str:
     """The one-line apt sources mmdebstrap reads, one line per suite: the partial mirror, copied in
     with apt's `copy:` method (a `file:` mirror outside the chroot is refused) and verified with the
-    archive keyring.
+    archive keyring. `mirror` and `keyring` are where the reader of the sources sees them: the
+    defaults are the builder's, a child build reads them from inside the image's root.
 
     Valid-Until is not checked: security Release files expire, and the snapshot ID pins the content
     (DESIGN 7.7); signatures and hashes are still verified."""
     return "".join(
-        f"deb [signed-by={BUILD_KEYRING} check-valid-until=no] copy://{MIRROR}/{one.archive} {one.dist} "
+        f"deb [signed-by={keyring} check-valid-until=no] copy://{mirror}/{one.archive} {one.dist} "
         f"{' '.join(components)}\n"
         for one in suites(suite)
     )
@@ -116,6 +117,41 @@ def hook_name(index: int, path: str) -> str:
     return f"{index:02d}-{path.rsplit('/', 1)[-1]}"
 
 
+def files_lines() -> list[str]:
+    """The definition's file tree, over the root `$root`: modes as git keeps them, owned by root."""
+    return [
+        "# the definition's file tree, modes as git keeps them, owned by root",
+        f'tar -C "$root" --no-overwrite-dir -xpf {WORK}/files.tar',
+    ]
+
+
+def hook_lines(hooks: Sequence[str]) -> list[str]:
+    """Copy the staged inputs and build.env into the root, then run each hook in the chroot, in order,
+    with no network and reading only what fetch verified. The caller removes what it copied."""
+    lines = [
+        "# hooks run in the chroot, with no network, reading only what fetch verified",
+        f'mkdir -p "$root{HOOK_DIR}"',
+        f'cp -a {WORK}/run/. "$root{HOOK_DIR}/"',
+    ]
+    for index, hook in enumerate(hooks, start=1):
+        target = f"{HOOK_DIR}/hooks/{hook_name(index, hook)}"
+        inner = f'set -a; . {HOOK_DIR}/build.env; set +a; exec "$0"'
+        lines.append(f'chroot "$root" /bin/sh -c {shlex.quote(inner)} {shlex.quote(target)}')
+    return lines
+
+
+def identity_lines() -> list[str]:
+    """Remove every machine identity and everything only the build needed from the root `$root`
+    (DESIGN 5.3). Core and every child build end with exactly these lines."""
+    return [
+        "# no machine identity, and nothing only the build needed (DESIGN 5.3)",
+        'if [ -e "$root/etc/machine-id" ]; then : > "$root/etc/machine-id"; fi',
+        *(f'rm -f "$root/{path}"' for path in IDENTITY_FILES),
+        'rm -f "$root"/etc/ssh/ssh_host_*',
+        'rm -rf "$root/var/lib/cloud/instance" "$root/var/lib/cloud/instances"',
+    ]
+
+
 def customize_script(*, files: bool, hooks: Sequence[str]) -> str:
     """The script mmdebstrap runs as its customize hook, with the root directory as `$1`.
 
@@ -131,29 +167,10 @@ def customize_script(*, files: bool, hooks: Sequence[str]) -> str:
         f'install -m 0644 {WORK}/debian.sources "$root/etc/apt/sources.list.d/debian.sources"',
     ]
     if files:
-        lines += [
-            "# the definition's file tree, modes as git keeps them, owned by root",
-            f'tar -C "$root" --no-overwrite-dir -xpf {WORK}/files.tar',
-        ]
+        lines += files_lines()
     if hooks:
-        lines += [
-            "# hooks run in the chroot, with no network, reading only what fetch verified",
-            f'mkdir -p "$root{HOOK_DIR}"',
-            f'cp -a {WORK}/run/. "$root{HOOK_DIR}/"',
-        ]
-        for index, hook in enumerate(hooks, start=1):
-            target = f"{HOOK_DIR}/hooks/{hook_name(index, hook)}"
-            inner = f'set -a; . {HOOK_DIR}/build.env; set +a; exec "$0"'
-            lines.append(f'chroot "$root" /bin/sh -c {shlex.quote(inner)} {shlex.quote(target)}')
-        lines.append(f'rm -rf "$root{HOOK_DIR}"')
-    lines += [
-        "# no machine identity, and nothing only the build needed (DESIGN 5.3)",
-        'if [ -e "$root/etc/machine-id" ]; then : > "$root/etc/machine-id"; fi',
-        *(f'rm -f "$root/{path}"' for path in IDENTITY_FILES),
-        'rm -f "$root"/etc/ssh/ssh_host_*',
-        'rm -rf "$root/var/lib/cloud/instance" "$root/var/lib/cloud/instances"',
-        "",
-    ]
+        lines += [*hook_lines(hooks), f'rm -rf "$root{HOOK_DIR}"']
+    lines += [*identity_lines(), ""]
     return "\n".join(lines)
 
 
