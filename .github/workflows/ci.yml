@@ -2,10 +2,8 @@
 # the oldest supported one (3.13) through mypy's python_version and ruff's target-version. The full
 # matrix runs weekly (weekly.yml) and gates a release (release.yml).
 #
-# Where jobs run: while the repository is private, on the project's own self-hosted runners, picked by the
-# capability label debian-image-factory (debian-image-factory-kvm is the one for jobs that boot a VM); once
-# it is public, on GitHub's hosted ubuntu-26.04. A pull request from a fork never reaches the self-hosted
-# runners: every job skips it. The self-hosted runners start bare, so each job installs what it needs.
+# Where jobs run: on GitHub's hosted ubuntu-26.04 runners, which are free for a public repository. The jobs
+# that boot a VM use the hosted Linux runners' /dev/kvm. Each job installs what the runner image lacks.
 name: ci
 
 on:

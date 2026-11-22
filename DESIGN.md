@@ -1,9 +1,9 @@
 # Debian Image Factory: design
 
-Status: the first milestone (M1, the contract) is implemented: the definition, the lock rules on
-top of input-lock, identities, `lock check`, `lock snapshot`, `lock baseline`, `plan` and the pinned
-builder image. Everything from M2 on is design only. Written 2026-11-21 and revised the same day
-while M1 was built; every version this document names was read that day at the source listed in
+Status: milestones M1 to M6 are implemented (the contract, core, OCI, Incus, installer and OS images,
+and the nightly loop); version 1.0 (M7) is still to come. This document is the design they follow and
+is revised as they land. Written 2026-11-21; every version this document names was read that day at
+the source listed in
 [Versions](#versions-read-for-this-design).
 
 ## 1. The problem
@@ -209,11 +209,11 @@ recipe is `builder/Dockerfile`; its snapshot is the `debian_snapshot` of the rep
 `lock.json`, which also pins input-lock.
 A release publishes that builder image to `ghcr.io/<owner>/debian-image-factory-builder` and signs it
 (`release.yml` does both today); `push_layout` takes any single-image OCI layout and assumes none of
-the factory's annotations. What is **planned for the first public release** is that the `.pyz` pins
+the factory's annotations. What is **planned** is that the `.pyz` pins
 that image by digest, so a stranger's build uses exactly the builder the release published; the
 subsection below is that design, and nothing in it is published yet.
 
-#### The published builder (planned, first public release)
+#### The published builder (planned)
 
 - **Where.** `ghcr.io/foreverworks/debian-image-factory-builder`, tagged with the release
   (`vX.Y.Z`, as `release.yml` pushes it now) and always used by digest: the tag only tells a reader
@@ -259,12 +259,12 @@ subsection below is that design, and nothing in it is published yet.
   debian_image_factory/builder/image`). The certificate identity is the release workflow at a
   release tag, so an image pushed by any other workflow, ref or fork does not verify; the digest in
   an artifact's provenance is then the same reference, for anyone who wants to check what built it.
-- **While the repository is private** nothing changes: the default is the local tag, built by
-  `scripts/builder build` on the runner (as CI and the integration tier do), `release.yml` pushes
-  and signs the builder to the private package and puts no reference in the `.pyz`, and a consumer
-  inside the organisation who wants the published one passes `--builder-image <reference>` and logs
-  in to ghcr. Provenance records the image ID. Making the repository and the package public, and
-  the two `release.yml` steps swapping places with `build-pyz --builder`, are one release's work.
+- **Until the `.pyz` pins it** nothing changes in what a build uses: the default is the local tag,
+  built by `scripts/builder build` on the runner (as CI and the integration tier do). `release.yml`
+  pushes the builder to the public package and signs it, and puts no reference in the `.pyz`; a
+  consumer who wants the published one passes `--builder-image <reference>`. Provenance records the
+  image ID. The two `release.yml` steps swapping places with `build-pyz --builder` are one release's
+  work.
 
 - **In CI and by default locally**, the builder is a container image the factory release pins by
   digest. From the first milestone it is built by the factory's own release pipeline from a fixed
@@ -1292,8 +1292,7 @@ does): hooks and file trees live beside the definition, and provenance names the
 builds an image it recomputes the identity from them with the plan's package set and refuses a
 plan they no longer match, so records always describe what was built, and it verifies again, from the
 cache alone, every signed checksum list or vendor chain the image's inputs rely on (15.8). `--builder-image REF` names
-the builder; the default is the tag `scripts/builder build` gives. (Planned for the first public
-release: a `.pyz` carries the digest reference of the builder its release published, signed, and that
+the builder; the default is the tag `scripts/builder build` gives. (Planned: a `.pyz` carries the digest reference of the builder its release published, signed, and that
 is its default; 5.4.) A child whose parent this run does not build reads it from `out/` (by
 artifact name: the identity prefix and the digest the plan names), then from each `--parents TARGET`
 (`dir://` holding the core tarball or an `.oci` layout, or `oci://`, pulled by digest); a parent found
@@ -1423,7 +1422,7 @@ debian-image-factory` fills once the release exists. The Action reads three of i
   "extractVersion": "^v(?<version>.+)$",
   "sha256": "<sha256 of the .pyz>",
   "url": "https://github.com/foreverworks/debian-image-factory/releases/download/v{version}/debian-image-factory-{version}.pyz",
-  "version": "0.6.0"
+  "version": "0.6.1"
 }
 ```
 
@@ -1450,7 +1449,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - id: factory
-        uses: foreverworks/debian-image-factory@<commit> # v0.6.0
+        uses: foreverworks/debian-image-factory@<commit> # v0.6.1
         with:
           definition: images/factory.toml
           lock: images/lock.json
@@ -1516,8 +1515,8 @@ builder reference, so the Action builds the image itself, with `scripts/builder 
 the Action's own ref (`github.action_path`), at the snapshot of that ref's `lock.json`, and passes it with
 `--builder-image`. `build` refuses a builder whose byte-writing tools are not the ones the release pins
 (5.4), so an Action ref that does not match the release fails naming the tools that differ, and never
-writes bytes under a wrong identity. Until the builder is published, pin the Action at the commit of the
-release tag your lock names. From the first public release the `.pyz` names the builder by digest (5.4):
+writes bytes under a wrong identity. Until the `.pyz` names the builder, pin the Action at the commit of the
+release tag your lock names. Once it does (5.4):
 the Action then verifies that image's signature with cosign and runs `build` with its default, pulling it
 by digest, and the `scripts/builder` step goes; the Action's ref then stops mattering to the bytes.
 
@@ -1770,12 +1769,9 @@ commit with its version.
   and the Incus base in the builder the Action builds, tests, publishes to a `dir://` target and names
   both artifacts; the second night, a moment later, reads `changed=false` and runs nothing else.
 
-**Where it runs.** While the repository is private, its jobs run on the project's own self-hosted
-runners, picked by capability label (`debian-image-factory`, and `debian-image-factory-kvm` for jobs
-that boot a VM); they start bare, so each job installs what it needs. Once it is public, the same
-jobs run on GitHub's hosted runners, free for public repositories. Either way a pull request from a
-fork skips every job, so it never reaches anyone's own machines. Consumers run their own checks in
-their own CI.
+**Where it runs.** Its jobs run on GitHub's hosted runners, free for public repositories; the jobs
+that boot a VM use the hosted Linux runners' `/dev/kvm`. Each job installs what the runner image
+lacks. A pull request from a fork skips every job. Consumers run their own checks in their own CI.
 
 **The nightly** (`.github/workflows/nightly.yml`) runs the Action as `uses: ./` every night and on demand,
 on the plain runner label (it boots nothing), one at a time (a concurrency group, never cancelled, so two
@@ -1920,9 +1916,8 @@ each says what would change had it gone the other way.
 4. **Inputs bundles are off by default** (decided; `--bundle` turns them on). Where they are off,
    replay depends on snapshot.debian.org or the consumer's cache; where they are on, they cost
    hundreds of megabytes per retained good build.
-5. **Still open: making the repository public.** It stays private until its maintainers decide.
-   Before that, every file passes a scan for private data, and the examples use example.com names
-   only.
+5. **The repository is public** (decided). Every file passes a scan for private data before a push,
+   and the examples use example.com names only.
 6. **Open: the baseline as a top-level lock field.** M1 keeps the baseline in the reserved entry
    `debian-baseline` because input-lock refuses unknown top-level fields. Recommendation:
    keep the entry. It pins the archive state by checksum, needs no change to input-lock, and any

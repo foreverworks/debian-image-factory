@@ -1,7 +1,6 @@
 # Once a week: the static and unit tiers on every supported Python, 3.13 (Debian 13's) up to the newest
 # stable, and on the next pre-release, which is allowed to fail: it warns weeks before a break matters.
-# Runs on the project's self-hosted runners (label debian-image-factory) while the repository is private,
-# on GitHub's hosted ones once it is public; see ci.yml.
+# Runs on GitHub's hosted runners; see ci.yml.
 name: weekly
 
 on:

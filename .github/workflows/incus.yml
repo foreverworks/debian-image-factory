@@ -4,7 +4,7 @@
 # called by release.yml on a tag, where it gates the publish; the same command runs locally, under QEMU
 # TCG when there is no /dev/kvm.
 #
-# Where it runs: see boot.yml. The kvm capability label is the one for jobs that boot a VM.
+# Where it runs: see boot.yml. The VM uses the hosted runner's /dev/kvm.
 name: incus
 
 on:

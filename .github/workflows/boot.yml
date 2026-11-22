@@ -3,9 +3,8 @@
 # feature flag and a moved baseline), booted in QEMU (installer-boot, os-boot, two-clones). Run by hand
 # from the Actions tab; a release runs the same tests in its integration tier (release.yml).
 #
-# Where it runs: while the repository is private, on the project's own self-hosted runners with the
-# capability label debian-image-factory-kvm (they can boot a VM with KVM); once it is public, on GitHub's
-# hosted ubuntu-26.04, which has /dev/kvm. Without KVM the tests fall back to TCG, slower but the same.
+# Where it runs: on GitHub's hosted ubuntu-26.04, which has /dev/kvm. Without KVM the tests fall back to TCG,
+# slower but the same.
 name: boot
 
 on:

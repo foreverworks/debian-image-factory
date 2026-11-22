@@ -41,6 +41,7 @@ fi
 inner='
 set -eu
 snapshot="$1"; include="$2"
+work=$(mktemp -d)
 printf "%s\n" \
   "Types: deb" \
   "URIs: http://snapshot.debian.org/archive/debian/${snapshot}/" \
@@ -50,11 +51,11 @@ printf "%s\n" \
   "Types: deb" \
   "URIs: http://snapshot.debian.org/archive/debian-security/${snapshot}/" \
   "Suites: trixie-security" \
-  "Components: main" > /tmp/spike.sources
+  "Components: main" > "$work/spike.sources"
 set -- --mode=root --variant=apt --verbose --aptopt="Acquire::Check-Valid-Until \"false\""
 if [ -n "$include" ]; then set -- "$@" --include="$include"; fi
-mmdebstrap "$@" trixie /tmp/rootfs /tmp/spike.sources >&2
-dpkg-query --admindir=/tmp/rootfs/var/lib/dpkg -W -f "\${db:Status-Status}\t\${Package}\t\${Version}\t\${Architecture}\n"
+mmdebstrap "$@" trixie "$work/rootfs" "$work/spike.sources" >&2
+dpkg-query --admindir="$work/rootfs/var/lib/dpkg" -W -f "\${db:Status-Status}\t\${Package}\t\${Version}\t\${Architecture}\n"
 '
 
 mkdir -p "$(dirname "$out")"

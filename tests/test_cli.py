@@ -6,6 +6,7 @@ import http.server
 import io
 import json
 import os
+import stat
 import tempfile
 import threading
 import unittest
@@ -831,10 +832,36 @@ class SourcesTest(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual(commands.default_cache(), Path.home() / ".cache" / "debian-image-factory")
 
-    def test_the_default_cache_survives_a_missing_home_directory(self) -> None:
+    def no_home(self, scratch: str) -> contextlib.ExitStack:
         env = {key: value for key, value in os.environ.items() if key != "XDG_CACHE_HOME"}
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(Path, "home", side_effect=RuntimeError):
-            self.assertEqual(commands.default_cache(), Path(tempfile.gettempdir()) / "debian-image-factory-cache")
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
+        stack.enter_context(mock.patch.object(Path, "home", side_effect=RuntimeError))
+        stack.enter_context(mock.patch.object(tempfile, "tempdir", scratch))
+        return stack
+
+    def test_the_default_cache_survives_a_missing_home_directory_in_a_private_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dif-tmp-") as scratch, self.no_home(scratch):
+            cache = commands.default_cache()
+            self.assertEqual(cache, Path(scratch) / f"debian-image-factory-cache-{os.geteuid()}")
+            self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o700)
+            self.assertEqual(commands.default_cache(), cache)
+
+    def test_a_shared_directory_is_not_used_as_the_cache(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dif-tmp-") as scratch, self.no_home(scratch):
+            planted = Path(scratch) / f"debian-image-factory-cache-{os.geteuid()}"
+            planted.mkdir(mode=0o755)
+            planted.chmod(0o755)
+            with self.assertRaisesRegex(commands.Usage, "not a private directory"):
+                commands.default_cache()
+
+    def test_a_link_is_not_used_as_the_cache(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dif-tmp-") as scratch, self.no_home(scratch):
+            elsewhere = Path(scratch) / "elsewhere"
+            elsewhere.mkdir(mode=0o700)
+            (Path(scratch) / f"debian-image-factory-cache-{os.geteuid()}").symlink_to(elsewhere)
+            with self.assertRaisesRegex(commands.Usage, "not a private directory"):
+                commands.default_cache()
 
     def test_a_file_url_is_readable_through_the_default_reader(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dif-read-") as scratch:

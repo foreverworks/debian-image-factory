@@ -1,9 +1,8 @@
 # A tag vX.Y.Z on a commit of main publishes debian-image-factory-X.Y.Z.pyz, its .sha256 and its Sigstore
 # bundle as a GitHub release, and the builder image to ghcr.io signed with a keyless signature, once the
 # full matrix, the integration tier and the Incus boot contract (incus.yml) passed. The .pyz is reproducible: scripts/build-pyz.
-# Runs on the project's self-hosted runners (label debian-image-factory) while the repository is private,
-# on GitHub's hosted ones once it is public; see ci.yml. While the repository is private a tag runs every
-# check but publishes nothing: no release, no image, and no signature in Sigstore's public log.
+# Runs on GitHub's hosted runners; see ci.yml. A tag runs every check first, and publishes only when they
+# all pass.
 name: release
 
 on:

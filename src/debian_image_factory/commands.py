@@ -8,6 +8,7 @@ import datetime
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -41,14 +42,30 @@ ARCHIVES: Final = ("debian", "debian-security")
 
 
 def default_cache() -> Path:
-    """`$XDG_CACHE_HOME/debian-image-factory`, else `~/.cache/...`, else a directory under the temp dir."""
+    """`$XDG_CACHE_HOME/debian-image-factory`, else `~/.cache/...`, else a private directory of the temp dir."""
     base = os.environ.get("XDG_CACHE_HOME")
     if base:
         return Path(base) / "debian-image-factory"
     try:
         return Path.home() / ".cache" / "debian-image-factory"
     except RuntimeError:  # no home directory: a container run with a uid that has no passwd entry
-        return Path(tempfile.gettempdir()) / "debian-image-factory-cache"
+        return private_temp_cache()
+
+
+def private_temp_cache() -> Path:
+    """The cache for a run with no home directory: `debian-image-factory-cache-<uid>` in the temp dir, made
+    with mode 0700 and used only when it is a real directory that is the caller's own and closed to others, so
+    nobody else can plant files in it. Raises Usage when it is not (set XDG_CACHE_HOME or pass --cache)."""
+    uid = os.geteuid()
+    path = Path(tempfile.gettempdir()) / f"debian-image-factory-cache-{uid}"
+    path.mkdir(mode=0o700, exist_ok=True)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or stat.S_IMODE(info.st_mode) & 0o077:
+        raise Usage(
+            f"{path} is not a private directory of this user, so it is not used as the cache: "
+            "set XDG_CACHE_HOME or pass --cache"
+        )
+    return path
 
 
 class Failed(Exception):  # noqa: N818  # named for its exit status

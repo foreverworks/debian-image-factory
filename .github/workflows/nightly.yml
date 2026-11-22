@@ -8,8 +8,7 @@
 # A night that built something also prunes the directory (`prune`: the newest 5 good builds and 1 candidate per
 # image stay, nothing is pinned here), so the cache does not grow without end.
 #
-# Runs on the project's self-hosted runners (label debian-image-factory) while the repository is private, on
-# GitHub's hosted ones once it is public; see ci.yml. The images are not booted here, so no KVM label.
+# Runs on GitHub's hosted runners; see ci.yml. The images are not booted here, so /dev/kvm is not needed.
 name: nightly
 
 on:

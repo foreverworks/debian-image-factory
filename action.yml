@@ -217,9 +217,9 @@ runs:
         [ -z "$MIRROR" ] || args+=(--mirror "$MIRROR")
         python3 "$PYZ" "${args[@]}"
 
-    # The builder is not published yet (DESIGN 5.4): it is built here from the recipe at this Action's own ref.
-    # build refuses a builder whose byte-writing tools are not the release's, so pin the Action at the commit
-    # of the release your lock names until the release publishes its builder.
+    # The .pyz does not pin the published builder yet (DESIGN 5.4): it is built here from the recipe at this
+    # Action's own ref. build refuses a builder whose byte-writing tools are not the release's, so pin the
+    # Action at the commit of the release your lock names until the .pyz names its builder.
     - name: Build
       id: build
       if: steps.setup.outputs.build == 'true' && steps.summary.outputs.changed == 'true'

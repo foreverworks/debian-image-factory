@@ -10,11 +10,11 @@
     "debian-image-factory": {
       "datasource": "github-releases",
       "depName": "foreverworks/debian-image-factory",
-      "description": "The factory release this lock is built with. Placeholder checksum until the first release.",
+      "description": "The factory release this lock is built with. Placeholder checksum: fill it with `lock checksums --entry debian-image-factory` for the release you pin.",
       "extractVersion": "^v(?<version>.+)$",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "url": "https://github.com/foreverworks/debian-image-factory/releases/download/v{version}/debian-image-factory-{version}.pyz",
-      "version": "0.1.0"
+      "version": "0.6.1"
     },
     "example-tool": {
       "apt": "example-tool",

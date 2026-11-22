@@ -3,11 +3,12 @@
 **Every Debian image you ship, built from one archive snapshot, rebuilt only when something in it
 actually changed, and carrying standard records of what is inside and how it was made.**
 
-> **Status: core, OCI and Incus images build, test and publish.** The factory checks your lock
-> and definition, resolves every image's exact package set from a snapshot, tells you what would be
-> built and why, and builds core, OCI and Incus images with their SBOM, provenance and checks.
-> Installer and OS images, and the nightly loop, come with the next milestones. The full design is in [DESIGN.md](DESIGN.md). If something here is unclear,
-> please open an issue.
+> **Status: every kind of image builds, tests and publishes, and a nightly loop rebuilds only what
+> changed.** The factory checks your lock and definition, resolves every image's exact package set
+> from a snapshot, tells you what would be built and why, and builds core, OCI, Incus, installer and
+> OS images with their SBOM, provenance and checks. It is pre-1.0: the first public release is
+> v0.6.1, and the interface may still change before 1.0. The full design is in [DESIGN.md](DESIGN.md).
+> If something here is unclear, please open an issue.
 
 ## The problem
 
@@ -169,7 +170,9 @@ debian-image-factory plan > plan.json    # every image's package set and identit
 
 Planning needs only python3 3.13 or newer, apt and gpgv, so any Debian or Ubuntu machine will do.
 [examples/](examples/) has a lock and a definition covering every kind; run the two commands there.
-Until the first release is tagged, run the source directly: `scripts/vendor-input-lock` once, then
+Get `debian-image-factory-0.6.1.pyz` from the [v0.6.1 release](https://github.com/foreverworks/debian-image-factory/releases/tag/v0.6.1)
+(with its `.sha256` and its Sigstore bundle) and run it with `python3`; the commands here call it
+`debian-image-factory`. To run the source instead: `scripts/vendor-input-lock` once, then
 `PYTHONPATH=src:.vendor python3 -m debian_image_factory`.
 
 Then build the core image and check it:
@@ -263,7 +266,7 @@ your lock pins, so add the `debian-image-factory` entry to your `lock.json` (Ren
   "extractVersion": "^v(?<version>.+)$",
   "sha256": "<sha256 of the .pyz>",
   "url": "https://github.com/foreverworks/debian-image-factory/releases/download/v{version}/debian-image-factory-{version}.pyz",
-  "version": "0.6.0"
+  "version": "0.6.1"
 }
 ```
 
@@ -290,7 +293,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - id: factory
-        uses: foreverworks/debian-image-factory@<commit> # v0.6.0
+        uses: foreverworks/debian-image-factory@<commit> # v0.6.1
         with:
           definition: images/factory.toml
           lock: images/lock.json
@@ -315,8 +318,9 @@ The inputs are `definition`, `lock`, `params`, `snapshot`, `against`, `steps` (d
 `keep-work` (default `true`, so later steps can read the `plan` output; `false` removes the work directory,
 with the build output, when the run ends); the outputs are `changed`, `plan` (the path of
 `plan.json`) and `artifacts` (JSON of image to digest). The runner needs Docker to build, and `apt`
-and `gpgv` to plan (the Action installs the last two when they are missing). Until the first public
-release publishes the builder image, the Action builds it from its own checkout: pin the Action at the
+and `gpgv` to plan (the Action installs the last two when they are missing). The release also
+publishes the builder image to `ghcr.io/foreverworks/debian-image-factory-builder`, signed with Sigstore.
+Until the `.pyz` pins it, the Action builds the builder from its own checkout: pin the Action at the
 commit of the release your lock names. `.github/workflows/nightly.yml` is a working example, run on this
 repository's own definition; the inputs, the steps and what happens when nothing changed are in
 [DESIGN.md, section 9.2](DESIGN.md#92-the-github-action).
@@ -385,8 +389,8 @@ adds `verify`. The fourth builds Incus images and their children, boots them on 
 and boots both in QEMU in `test`, with the `deb` and `file` modules, feature flags and `lock checksums`.
 The sixth closes the nightly loop: `plan --snapshot latest --against` every kind of target, the
 GitHub Action, `prune` with its retention rule, inputs bundles and offline replay, `verify --pull`, and
-the optional `byte-equal` check; a night with no relevant upload builds nothing. Version 1.0, with
-optional signing and docs for strangers, comes next. The milestones are in
+the optional `byte-equal` check; a night with no relevant upload builds nothing. The first public
+release is v0.6.1. Version 1.0, with optional signing and docs for strangers, comes next. The milestones are in
 [DESIGN.md, section 14](DESIGN.md#14-milestones).
 
 `scripts/test static`, `scripts/test unit` and `scripts/test integration` run the same checks CI
