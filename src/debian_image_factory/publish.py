@@ -21,6 +21,7 @@ import tempfile
 import urllib.error
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, TextIO
 
@@ -151,8 +152,18 @@ def attach_to_tag(client: registry.Client, subject: str, referrer: oci.Descripto
         registry.put_manifest(client, oci.referrers_tag(subject), merged, oci.INDEX)
 
 
+def attach_time(start: datetime, position: int) -> str:
+    """The oci.CREATED of the record attached `position`th (from 0) in a push that started at `start`:
+    one microsecond apart, so records attached in one push read back in the order they were given."""
+    return (start + timedelta(microseconds=position)).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def push_layout(
-    client: registry.Client, layout: ocilayout.Layout, tags: Sequence[str], envelopes: Sequence[bytes]
+    client: registry.Client,
+    layout: ocilayout.Layout,
+    tags: Sequence[str],
+    envelopes: Sequence[bytes],
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> PushReport:
     """Push the image `layout` holds to the client's repository, tag it, and attach `envelopes` (DSSE
     envelopes, the exact bytes of each record) as referrers of its manifest.
@@ -183,12 +194,15 @@ def push_layout(
     attached = {one.envelope.digest for one in held.attached}
     subject = layout.descriptor
     added = skipped = 0
+    start = now()
     for envelope in envelopes:
         envelope_digest = oci.sha256_hex(envelope)
         if envelope_digest in attached:
             skipped += 1
             continue
-        manifest_bytes, blob = oci.referrer_manifest(envelope, envelope_predicate(envelope), subject)
+        manifest_bytes, blob = oci.referrer_manifest(
+            envelope, envelope_predicate(envelope), subject, attach_time(start, added)
+        )
         pushed += ensure_blob(client, blob.digest, blob.size, envelope, known)
         pushed += ensure_blob(client, oci.EMPTY_DIGEST, len(oci.EMPTY_BLOB), oci.EMPTY_BLOB, known)
         sent = registry.put_manifest(client, f"sha256:{oci.sha256_hex(manifest_bytes)}", manifest_bytes, oci.MANIFEST)

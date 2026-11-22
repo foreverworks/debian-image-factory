@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from typing import Final
 
+from input_lock.records import TestOutcome
+
 from debian_image_factory import oci, ocilayout, publish, registry
 from debian_image_factory.published import OciTarget
 from tests.support import fake_registry
@@ -360,6 +362,25 @@ class ReferrersTest(unittest.TestCase):
             self.assertEqual(found.problems, ())
             self.assertEqual(len(found.attached), 2)
             self.assertIsNone(registry.tag_index(client, digest))  # the tag schema was not needed
+
+    def test_records_read_back_in_attach_order_whatever_the_listing_order(self) -> None:
+        # the fake lists referrers by digest, as a registry may; "the last result wins" needs attach order
+        names = ("oci-run", "ancestry", "package-set", "two-clones", "sbom-complete", "no-machine-identity")
+        checks: list[tuple[str, TestOutcome]] = [(name, "PASSED") for name in names]
+        for fake in (Fake(), Fake(referrers_api=False, subject_header=False)):
+            with fake_registry.running(fake) as name, tempfile.TemporaryDirectory() as scratch:
+                client = client_for(name)
+                built = make_image(Path(scratch) / "out", checks=checks)
+                layout = ocilayout.read_layout(built.layout)
+                lines = [line for line in built.records.read_bytes().split(b"\n") if line]
+                publish.push_layout(client, layout, [], lines)
+                found = registry.referrers_of(client, built.digest)
+                envelopes, problems = registry.fetch_envelopes(client, found.attached)
+                self.assertEqual(problems, ())
+                self.assertEqual(list(envelopes), lines)
+                created = [one.created for one in found.attached]
+                self.assertEqual(created, sorted(created))
+                self.assertEqual(len(set(created)), len(lines))
 
     def test_the_api_is_followed_across_pages(self) -> None:
         with fake_registry.running(Fake(page_size=1)) as name, tempfile.TemporaryDirectory() as scratch:

@@ -577,8 +577,9 @@ The plan never keeps a list of what was built. It asks the targets, by identity:
   provenance rules below apply to. The artifact is named `oci://<registry>/<repository>@sha256:<manifest
   digest>`. A referrer that cannot be read, or an image that does not count, is listed under
   `rejected` with the reason. The tag names the latest image pushed for the identity: a build that
-  replaces a failed one moves it, and the older manifest stays reachable by digest. The order of the
-  records, which decides a check's last result, is the order the registry lists them in.
+  replaces a failed one moves it, and the older manifest stays reachable by digest. The records are
+  read in the order they were attached (each referrer's `org.opencontainers.image.created`, 8.2),
+  which decides a check's last result, whatever order the registry lists them in.
 - **File targets** (`github-release://`, `dir://`): artifact files are named
   `<image>-<suite>-<arch>-<first 16 hex of the identity>-<first 12 hex of the digest>.<ext>`. A
   listing filtered by the image and identity prefix answers; the provenance in the
@@ -885,12 +886,16 @@ And the OCI artifact that carries one record as a referrer:
              "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a", "size": 2},
   "layers": [{"mediaType": "application/vnd.dsse.envelope.v1+json", "digest": "sha256:<envelope digest>", "size": 4127,
               "annotations": {"in-toto.io/predicate-type": "https://slsa.dev/provenance/v1"}}],
-  "subject": {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:<oci-base manifest digest>", "size": 1043}
+  "subject": {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:<oci-base manifest digest>", "size": 1043},
+  "annotations": {"org.opencontainers.image.created": "2026-11-21T02:33:08.120004Z"}
 }
 ```
 
 (The config digest is the real one of the two-byte empty JSON object `{}`, as the OCI spec defines
-it.) Records never hold secrets, private keys, tokens or machine identities. They describe bits;
+it.) `org.opencontainers.image.created` is when the record was attached, one microsecond apart
+within one publish. Records of an OCI image are read in that order, whatever order the referrers API
+lists them in, so "the last result wins" (7.4) means the same on every registry; a referrer without
+the annotation reads first. Records never hold secrets, private keys, tokens or machine identities. They describe bits;
 what is actually running somewhere is for the consumer to read back from the running system.
 
 ### 8.3 Signing

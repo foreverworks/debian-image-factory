@@ -613,6 +613,8 @@ class Attached:
 
     referrer: oci.Descriptor
     envelope: oci.Descriptor
+    created: str = ""
+    """The referrer's attach time (oci.CREATED), empty when it has none: such records read first."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -626,9 +628,10 @@ class Referrers:
 
 
 def referrers_of(client: Client, digest: str) -> Referrers:
-    """The in-toto records attached to the manifest `digest`: the referrers API first, the referrers tag
-    when the registry has no API. Each referrer's manifest is fetched and checked; one that is not a
-    single DSSE envelope on the manifest it claims goes to `problems`."""
+    """The in-toto records attached to the manifest `digest`, in the order they were attached (each
+    referrer's oci.CREATED): the referrers API first, the referrers tag when the registry has no API.
+    Each referrer's manifest is fetched and checked; one that is not a single DSSE envelope on the
+    manifest it claims goes to `problems`."""
     listed = _referrers_api(client, digest)
     via: Literal["api", "tag"] = "api"
     if listed is None:
@@ -660,13 +663,16 @@ def referrers_of(client: Client, digest: str) -> Referrers:
         elif len(manifest.layers) != 1 or manifest.layers[0].media_type != oci.DSSE_ENVELOPE:
             problems.append(f"{where}: it does not carry exactly one DSSE envelope")
         else:
-            attached.append(Attached(one, manifest.layers[0]))
+            attached.append(Attached(one, manifest.layers[0], manifest.annotations.get(oci.CREATED, "")))
+    # attach order, whatever order the registry listed them in; a stable sort keeps the listing order
+    # for records attached in the same instant or without a time
+    attached.sort(key=lambda one: one.created)
     return Referrers(tuple(attached), via, tuple(problems))
 
 
 def fetch_envelopes(client: Client, attached: Sequence[Attached]) -> tuple[tuple[bytes, ...], tuple[str, ...]]:
-    """The envelope of each attached record, in listing order, each checked against its digest, and
-    the reasons for the ones that could not be read."""
+    """The envelope of each attached record, in the order given (referrers_of gives attach order), each
+    checked against its digest, and the reasons for the ones that could not be read."""
     found: list[bytes] = []
     problems: list[str] = []
     for one in attached:

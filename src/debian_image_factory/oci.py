@@ -45,6 +45,9 @@ BASE_NAME: Final = "org.opencontainers.image.base.name"
 SOURCE: Final = "org.opencontainers.image.source"
 REVISION: Final = "org.opencontainers.image.revision"
 IDENTITY: Final = "io.github.foreverworks.debian-image-factory.identity"
+CREATED: Final = "org.opencontainers.image.created"
+"""On a referrer: when its record was attached. Records are read in this order (DESIGN 8.2), since the
+referrers API lists them in an order of the registry's choosing and "the last result wins" needs one."""
 PREDICATE_TYPE: Final = "in-toto.io/predicate-type"
 """The annotation on a referrer's layer naming the predicate type of the record it carries."""
 
@@ -398,13 +401,17 @@ def parse_manifest(data: bytes) -> Manifest:
 # ---- referrers ----------------------------------------------------------------------------------
 
 
-def referrer_manifest(envelope: bytes, predicate_type: str, subject: Descriptor) -> tuple[bytes, Descriptor]:
+def referrer_manifest(
+    envelope: bytes, predicate_type: str, subject: Descriptor, created: str | None = None
+) -> tuple[bytes, Descriptor]:
     """The artifact manifest that carries one record (a DSSE envelope) as a referrer of `subject`, and
-    the descriptor of the envelope blob it names (DESIGN 8.2)."""
+    the descriptor of the envelope blob it names (DESIGN 8.2). `created` (RFC 3339, UTC) is when the
+    record is attached; it orders records when they are read back."""
     blob = descriptor_of(DSSE_ENVELOPE, envelope, {PREDICATE_TYPE: predicate_type})
     manifest = Manifest(
         Descriptor(EMPTY, EMPTY_DIGEST, len(EMPTY_BLOB)),
         (blob,),
+        {CREATED: created} if created is not None else {},
         subject=Descriptor(subject.media_type, subject.digest, subject.size),
         artifact_type=IN_TOTO_ARTIFACT,
     )
@@ -412,14 +419,16 @@ def referrer_manifest(envelope: bytes, predicate_type: str, subject: Descriptor)
 
 
 def referrer_descriptor(manifest_bytes: bytes) -> Descriptor:
-    """How a referrer is listed in a referrers index: its digest, size, artifactType and the predicate
-    type annotation of the record it carries."""
+    """How a referrer is listed in a referrers index: its digest, size, artifactType, the predicate
+    type annotation of the record it carries and when it was attached."""
     manifest = parse_manifest(manifest_bytes)
     annotations = (
         {PREDICATE_TYPE: manifest.layers[0].annotations[PREDICATE_TYPE]}
         if (manifest.layers and PREDICATE_TYPE in manifest.layers[0].annotations)
         else {}
     )
+    if CREATED in manifest.annotations:
+        annotations[CREATED] = manifest.annotations[CREATED]
     return Descriptor(
         MANIFEST,
         sha256_hex(manifest_bytes),
