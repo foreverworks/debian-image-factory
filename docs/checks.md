@@ -176,9 +176,11 @@ For an OCI image it reports two tests:
   artifact's digest.
 
 The parent is the artifact of the plan's parent image in OUT. A core parent that is not in OUT is known by
-the digest the plan names for it (`artifact`), which is all the first layer needs. An OCI parent that is not
-in OUT cannot be compared layer by layer, and neither can an image whose plan names no artifact for its
-parent: the check is then not run, with that reason, and never passed.
+the digest the plan names for it (`artifact`, `sha256:<hex>`), which is all the first layer needs. An OCI
+parent that is not in OUT is compared layer by layer through `test --parents oci://<registry>/<repository>`,
+which reads the parent's manifest (nothing else) from the first registry that holds it. Without `--parents`,
+when no registry has the parent, and for an image whose plan names no artifact for its parent, the check is not
+run, with that reason, and never passed.
 
 For an Incus image (whose root is its squashfs), an OS root and an installer kit (whose root is its
 initrd) it reports two tests:

@@ -193,7 +193,7 @@ class NightTest(test_cli.CliCase):
         self.assertEqual(self.images["incus-app"]["because"], [{"parent": "incus-base", "state": "build"}])
         for name in ("core", "installer", "os"):
             self.assertEqual(self.images[name]["identity"], first[name]["identity"], name)
-            self.assertEqual(self.images[name]["artifact"], digests[name], name)
+            self.assertEqual(self.images[name]["artifact"], f"sha256:{digests[name]}", name)
         for name in ("incus-base", "incus-app"):
             self.assertNotEqual(self.images[name]["identity"], first[name]["identity"], name)
         artifacts = json.loads(result.outputs["artifacts"]["json"])

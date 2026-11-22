@@ -738,7 +738,7 @@ A night when Debian published a new kernel and Renovate moved Node, abridged:
       "state": "build",
       "because": [{"input": "node-26", "from": "26.12.0", "to": "26.13.1"}]
     },
-    "incus-base": {"identity": "<incus-base identity>", "state": "wait", "artifact": "<incus-base fingerprint>",
+    "incus-base": {"identity": "<incus-base identity>", "state": "wait", "artifact": "sha256:<incus-base fingerprint>",
                    "waiting_for": ["incus-boot"]},
     "installer": {
       "identity": "<new installer identity>",
@@ -761,7 +761,9 @@ apt was asked for), `packages` (the resolved set), `inputs` (the lock entries it
 `build_fields`), `modules`, `trust` (for each input with `signed_by`: the keyring entry and the
 rendered `sums_url` and `sums_sig_url`, which `fetch` verifies and which enter no identity), `debs` (for each vendor
 `.deb` it installs: the package, its version and the repository, for `fetch` and the build, 6.4), `params` (the ones it reads), `apt_sources` and `checks` (the required
-ones). `because` says why an image builds: no artifact with this identity, a failed required check,
+ones). An image's `artifact`, when it has one (`reuse` or `wait`), is always `sha256:<hex>`, the form of every
+digest the factory writes: a tarball's sha256, an OCI image's manifest digest, an Incus image's fingerprint. Every
+reader takes that form and no other. `because` says why an image builds: no artifact with this identity, a failed required check,
 the parent builds, or `--rebuild`; with `--previous <plan.json>` it also lists what moved since
 that plan (packages, inputs, parameters, recipe). Files that look like an artifact but do not count
 are listed under `rejected`, with the reason.
@@ -1259,7 +1261,8 @@ debian-image-factory plan [--against TARGET]... [--snapshot lock|latest|ID] [--p
 debian-image-factory fetch plan.json [--mirror URL] [--bundle [--bundle-dir DIR]]
 debian-image-factory build [plan.json] --out out/ [--image NAME]... [--parents TARGET]... [--builder-image REF]
                            [--offline] [--bundle FILE] [--builder container|host]
-debian-image-factory test out/ [--check NAME]... [--url URL] [--definition FILE] [--twin DIR]...
+debian-image-factory test out/ [--check NAME]... [--url URL] [--definition FILE] [--parent FILE]...
+                           [--parents TARGET]... [--twin DIR]...
 debian-image-factory attest test-result --artifact DIGEST --check NAME --result PASSED|WARNED|FAILED ...
 debian-image-factory publish out/ --to TARGET... [--image NAME]... [--sign none|keyless|key:REF]
 debian-image-factory verify REF [--pull [--artifact NAME|SHA256]] [--require-checks] [--lock FILE] [--definition FILE]
@@ -1309,6 +1312,14 @@ is refused offline (give the parent as `dir://`, or build it in the same run).
 Targets are `oci://<registry>/<repository>`, `github-release://<owner>/<repo>@<tag>` and
 `dir://<path>`. `plan --against` looks identities up live in those targets (7.4); nothing about
 the published state is stored in the consumer's repository.
+
+`test` finds an image's parent in `out/`. A parent that is not there (a night on which only Node moved: Node
+builds, its Debian-built parent is reused from the registry) is known by the digest the plan names for it. For a
+core parent that digest is all `ancestry` needs. For an OCI parent `ancestry` also needs its layers, which
+`test --parents oci://<registry>/<repository>` reads: the parent's manifest, nothing else, from the first of
+the registries that holds it. Without `--parents`, or when no registry has the parent, `ancestry` is not run
+and says why, and a child whose required checks lack a result stays a candidate; with it, the child passes.
+`--parents` takes registries only: for an OS root or an installer kit `--parent FILE` gives the parent's file.
 
 `publish` writes `dir://` targets (files only: an OCI image layout is refused there) and `oci://`
 targets (OCI images only: a core tarball is refused there; when `out/` holds both, each target

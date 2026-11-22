@@ -1,5 +1,6 @@
 """plan.build_plan from Decisions (DESIGN 7.3, 7.4, 7.6): states, forced rebuilds, and what moved since a plan."""
 
+import hashlib
 import json
 import unittest
 from collections.abc import Mapping, Sequence
@@ -88,8 +89,13 @@ def listed(entry: Mapping[str, JsonValue], key: str) -> list[JsonValue]:
     return value
 
 
+def digest_of(name: str) -> str:
+    """A made-up artifact digest in hex for `name`."""
+    return hashlib.sha256(name.encode()).hexdigest()
+
+
 def reuse_all(spec: Definition) -> dict[str, Decision]:
-    return {name: Decision("reuse", artifact=f"sha256:{name}") for name in spec.images}
+    return {name: Decision("reuse", artifact=digest_of(name)) for name in spec.images}
 
 
 class StatesTest(unittest.TestCase):
@@ -100,7 +106,7 @@ class StatesTest(unittest.TestCase):
         document = make(self.inputs, reuse_all(self.spec))
         for name, entry in images_of(document).items():
             self.assertEqual(entry["state"], "reuse", name)
-            self.assertEqual(entry["artifact"], f"sha256:{name}")
+            self.assertEqual(entry["artifact"], f"sha256:{digest_of(name)}")
             self.assertNotIn("because", entry)
         self.assertEqual(plan.changed(document), [])
 
@@ -124,11 +130,11 @@ class StatesTest(unittest.TestCase):
     def test_a_wait_names_the_artifact_and_the_checks_it_waits_for(self) -> None:
         decisions = {
             **reuse_all(self.spec),
-            "incus-base": Decision("wait", artifact="sha256:cand", waiting_for=("incus-boot",)),
+            "incus-base": Decision("wait", artifact=digest_of("cand"), waiting_for=("incus-boot",)),
         }
         entry = images_of(make(self.inputs, decisions))["incus-base"]
         self.assertEqual(entry["state"], "wait")
-        self.assertEqual(entry["artifact"], "sha256:cand")
+        self.assertEqual(entry["artifact"], f"sha256:{digest_of('cand')}")
         self.assertEqual(entry["waiting_for"], ["incus-boot"])
 
     def test_a_parent_build_forces_its_children_to_build_even_when_they_could_be_reused(self) -> None:
@@ -144,7 +150,7 @@ class StatesTest(unittest.TestCase):
     def test_a_waiting_parent_makes_a_child_that_is_not_reusable_wait(self) -> None:
         decisions = {
             **reuse_all(self.spec),
-            "oci-base": Decision("wait", artifact="sha256:cand", waiting_for=("oci-run",)),
+            "oci-base": Decision("wait", artifact=digest_of("cand"), waiting_for=("oci-run",)),
             "node-26": Decision("build"),
         }
         entry = images_of(make(self.inputs, decisions))["node-26"]
@@ -156,24 +162,27 @@ class StatesTest(unittest.TestCase):
     def test_a_child_that_is_itself_waiting_under_a_waiting_parent_keeps_its_artifact_and_checks(self) -> None:
         decisions = {
             **reuse_all(self.spec),
-            "oci-base": Decision("wait", artifact="sha256:parent", waiting_for=("oci-run",)),
-            "node-26": Decision("wait", artifact="sha256:child", waiting_for=("locked-inputs",)),
+            "oci-base": Decision("wait", artifact=digest_of("parent"), waiting_for=("oci-run",)),
+            "node-26": Decision("wait", artifact=digest_of("child"), waiting_for=("locked-inputs",)),
         }
         entry = images_of(make(self.inputs, decisions))["node-26"]
         self.assertEqual(entry["state"], "wait")
-        self.assertEqual(entry["artifact"], "sha256:child")
+        self.assertEqual(entry["artifact"], f"sha256:{digest_of('child')}")
         self.assertEqual(entry["waiting_for"], ["locked-inputs"])
         self.assertEqual(entry["because"], [{"parent": "oci-base", "state": "wait"}])
 
     def test_a_waiting_parent_leaves_a_reusable_child_reused(self) -> None:
-        decisions = {**reuse_all(self.spec), "oci-base": Decision("wait", artifact="sha256:cand", waiting_for=("x",))}
+        decisions = {
+            **reuse_all(self.spec),
+            "oci-base": Decision("wait", artifact=digest_of("cand"), waiting_for=("x",)),
+        }
         entry = images_of(make(self.inputs, decisions))["node-26"]
         self.assertEqual(entry["state"], "reuse")
 
     def test_waiting_passes_down_to_grandchildren(self) -> None:
         decisions = {
-            "core": Decision("reuse", artifact="a"),
-            "oci-base": Decision("wait", artifact="b", waiting_for=("x",)),
+            "core": Decision("reuse", artifact=digest_of("a")),
+            "oci-base": Decision("wait", artifact=digest_of("b"), waiting_for=("x",)),
             "node-26": Decision("build"),
         }
         document = images_of(make(self.inputs, decisions))
@@ -190,10 +199,10 @@ class StatesTest(unittest.TestCase):
             spec, dict.fromkeys(("core", "a", "b", "c"), CORE_SET), {"debian_snapshot": SNAPSHOT, "inputs": {}}
         )
         decisions = {
-            "core": Decision("wait", artifact="x", waiting_for=("p",)),
+            "core": Decision("wait", artifact=digest_of("x"), waiting_for=("p",)),
             "a": Decision("build"),
-            "b": Decision("reuse", artifact="y"),
-            "c": Decision("reuse", artifact="z"),
+            "b": Decision("reuse", artifact=digest_of("y")),
+            "c": Decision("reuse", artifact=digest_of("z")),
         }
         got = {name: entry["state"] for name, entry in images_of(make(inputs, decisions, spec)).items()}
         self.assertEqual(got, {"core": "wait", "a": "wait", "b": "reuse", "c": "reuse"})
@@ -211,7 +220,7 @@ class StatesTest(unittest.TestCase):
         self.assertEqual(images_of(document)["node-26"]["because"], [{"parent": "oci-base", "state": "build"}])
 
     def test_rebuild_beats_a_waiting_parent(self) -> None:
-        decisions = {**reuse_all(self.spec), "oci-base": Decision("wait", artifact="c", waiting_for=("x",))}
+        decisions = {**reuse_all(self.spec), "oci-base": Decision("wait", artifact=digest_of("c"), waiting_for=("x",))}
         document = make(self.inputs, decisions, rebuild={"node-26": "r"})
         self.assertEqual(images_of(document)["node-26"]["state"], "build")
 
@@ -431,7 +440,7 @@ class PreviousPlanTest(unittest.TestCase):
     def test_only_builds_are_explained(self) -> None:
         packages = sets(installer=(*CORE_SET, ("linux-image-fixture", "1.1", "amd64")))
         after = inputs_for(packages=packages)
-        decisions = {**reuse_all(self.spec), "installer": Decision("reuse", artifact="sha256:installer")}
+        decisions = {**reuse_all(self.spec), "installer": Decision("reuse", artifact=digest_of("installer"))}
         document = make(after, decisions, previous=json.loads(json.dumps(self.plan_before)))
         self.assertNotIn("because", images_of(document)["installer"])
 
@@ -454,7 +463,7 @@ class SmallDefinitionTest(unittest.TestCase):
     def test_a_core_alone(self) -> None:
         spec = parse_definition("[images.core]\nkind = 'core'\n")
         inputs = inputs_for(spec, {"core": CORE_SET}, {"debian_snapshot": SNAPSHOT, "inputs": {}})
-        document = make(inputs, {"core": Decision("reuse", artifact="a")}, spec)
+        document = make(inputs, {"core": Decision("reuse", artifact=digest_of("a"))}, spec)
         self.assertEqual(images_of(document)["core"]["state"], "reuse")
         self.assertEqual(definition.top_down(spec), ["core"])
 

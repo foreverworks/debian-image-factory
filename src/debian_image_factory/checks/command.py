@@ -21,7 +21,7 @@ from typing import Final, TextIO, cast
 
 import input_lock.records as rec
 
-from .. import fileartifacts, incus, oci, ocilayout, published, records, squashfs
+from .. import fileartifacts, incus, oci, ocilayout, published, records, registry, squashfs
 from ..commands import Failed, Sources, Usage
 from ..definition import Module
 from ..planfile import ImageEntry, Plan, read_plan
@@ -86,10 +86,26 @@ type Clock = Callable[[], datetime]
 type TwoClones = Callable[[Path], CheckOutcome]
 type BootInstaller = Callable[[Path, int, vmrun.Vm], list[vm.Boot] | vmrun.Unready]
 type BootOs = Callable[[Path, vmrun.RootFacts, int, vmrun.Vm], list[vm.Boot] | vmrun.Unready]
+type ParentLayers = Callable[[published.OciTarget, str], tuple[str, ...]]
+"""The layer digests (hex, base first) of the image with manifest digest `digest` (hex) in a registry; an
+OSError says why it could not be read."""
 type LockedInputs = Callable[[ImageEntry, bytes | None, ProbeRunner, Mapping[str, Module] | None], CheckOutcome]
 """The `locked-inputs` check: the plan entry, the image's dpkg status (None when it has none), a runner
 that runs a `modules.Probe` in the image and gives (exit status, standard output), and the definition's
 modules (None when `test` was given no definition)."""
+
+
+def registry_layers(target: published.OciTarget, digest: str) -> tuple[str, ...]:
+    """The layers of an OCI image as its registry's manifest lists them: the manifest alone is read, no layer
+    is downloaded. OSError when the registry has no such image or cannot be read."""
+    client = registry.connect(target)
+    fetched = registry.get_manifest(client, oci.digest_text(digest))
+    if fetched is None:
+        raise registry.RegistryError(f"{client.name}: no manifest sha256:{digest}")
+    try:
+        return tuple(one.digest for one in oci.parse_manifest(fetched.data).layers)
+    except oci.OciError as error:
+        raise registry.RegistryError(f"{client.name}@sha256:{digest}: {error}") from None
 
 
 def locked_inputs_result(
@@ -119,6 +135,9 @@ class Effects:
     """Parent artifacts outside OUT, for `ancestry` of an OS or installer child (`test --parent`)."""
     twins: tuple[Path, ...] = ()
     """Output directories of other builds of the same plan, for `byte-equal` (`test --twin`)."""
+    parent_registries: tuple[published.OciTarget, ...] = ()
+    """Registries holding an OCI parent that is not in OUT, for its layers in `ancestry` (`test --parents`)."""
+    parent_layers: ParentLayers = registry_layers
     vm: vmrun.Vm = vmrun.VM
     boot_installer: BootInstaller = vmrun.boot_installer
     boot_os: BootOs = vmrun.boot_os
@@ -350,13 +369,16 @@ def planned_digest(entry: ImageEntry | None) -> str | None:
         return None
 
 
-def find_parent(found: Found, layout: ocilayout.Layout, plan: Plan, others: Sequence[Found]) -> ancestry.Parent | str:
+def find_parent(
+    found: Found, layout: ocilayout.Layout, plan: Plan, others: Sequence[Found], effects: Effects = Effects()
+) -> ancestry.Parent | str:
     """The parent artifact of an OCI image as `ancestry` needs it, or why it is not available.
 
     The parent is the artifact of the plan's parent image among `others` (the artifacts of this run); when
     the same image has several, the one the manifest's `base.digest` names. A parent not in the output is
     known by the digest the plan names for it: for a core parent that is its first layer's digest, which
-    is all `ancestry` needs; for an OCI parent its layers stay unknown.
+    is all `ancestry` needs; for an OCI parent its layers are read from the manifest the first of
+    `effects.parent_registries` holds, and stay unknown (the check is not run) when none is given.
     """
     entry = plan["images"][found.image]
     parent = entry["parent"]
@@ -375,7 +397,18 @@ def find_parent(found: Found, layout: ocilayout.Layout, plan: Plan, others: Sequ
         return f"the parent {parent} is not in the output and the plan names no artifact for it"
     if parent_entry is not None and parent_entry["kind"] == "core":
         return ancestry.Parent(digest, (digest,))
-    return ancestry.Parent(digest, None)
+    if not effects.parent_registries:
+        return ancestry.Parent(digest, None)
+    reasons: list[str] = []
+    for target in effects.parent_registries:
+        try:
+            return ancestry.Parent(digest, effects.parent_layers(target, digest))
+        except OSError as error:
+            reasons.append(str(error))
+    return (
+        f"the parent {parent} (sha256:{digest}) is not in the output and its manifest could not be read: "
+        + "; ".join(reasons)
+    )
 
 
 def blob_hits(needle: str, layout: ocilayout.Layout) -> list[tarball.Hit]:
@@ -439,7 +472,7 @@ def run_oci_checks(
                     ancestry.ancestry(
                         [one.digest for one in layout.manifest.layers],
                         layout.manifest.annotations,
-                        find_parent(found, layout, plan, others),
+                        find_parent(found, layout, plan, others, effects),
                     )
                 )
             elif name in (OCI_RUN, TWO_CLONES, LOCKED_INPUTS):

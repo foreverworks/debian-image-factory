@@ -16,8 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from input_lock.identity import HEX64
-
 from .. import commands, fileartifacts, incus, oci, ocilayout, planfile, published, records
 
 CORE_EXTENSION: Final = "tar.gz"
@@ -240,9 +238,10 @@ def named_digest(entry: planfile.ImageEntry) -> str | None:
     artifact = entry.get("artifact")
     if artifact is None:
         return None
-    if not isinstance(artifact, str) or not HEX64.fullmatch(artifact):
-        raise commands.Failed(f"the plan's artifact {artifact!r} is not a sha256 in hex")
-    return artifact
+    try:
+        return oci.parse_digest(artifact)
+    except oci.OciError:
+        raise commands.Failed(f"the plan's artifact {artifact!r} is not sha256:<hex>") from None
 
 
 def locate_parent(

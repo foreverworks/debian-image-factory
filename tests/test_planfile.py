@@ -65,12 +65,23 @@ class PlanFileTest(FetchCase):
 
     def test_optional_fields_are_kept_when_present(self) -> None:
         def add(d: dict[str, object]) -> None:
-            obj(d, "images", "app-a").update({"artifact": "sha256:x", "waiting_for": ["c"], "rejected": ["why"]})
+            obj(d, "images", "app-a").update(
+                {"artifact": f"sha256:{'ab' * 32}", "waiting_for": ["c"], "rejected": ["why"]}
+            )
 
         document = json.loads(self.plan_text)
         add(document)
         app_a = planfile.parse_plan(document)["images"]["app-a"]
-        self.assertEqual((app_a["artifact"], app_a["waiting_for"], app_a["rejected"]), ("sha256:x", ["c"], ["why"]))
+        self.assertEqual(
+            (app_a["artifact"], app_a["waiting_for"], app_a["rejected"]), (f"sha256:{'ab' * 32}", ["c"], ["why"])
+        )
+
+    def test_an_artifact_that_is_not_a_sha256_digest_is_refused(self) -> None:
+        for bad in ("ab" * 32, "sha256:x", 7):
+            document = json.loads(self.plan_text)
+            obj(document, "images", "app-a")["artifact"] = bad
+            with self.assertRaisesRegex(ValueError, "artifact"):
+                planfile.parse_plan(document)
 
     def test_every_top_level_field_is_checked(self) -> None:
         self.failing(lambda d: d.update(schema=2), "schema must be 1")

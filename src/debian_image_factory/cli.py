@@ -11,7 +11,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from . import __version__, checks, commands, definition, fetch, prune, publish, resolve, verify
+from . import __version__, checks, commands, definition, fetch, prune, publish, published, resolve, verify
 from . import tools as builder
 from .build import run as build_run
 
@@ -167,6 +167,13 @@ def parser() -> argparse.ArgumentParser:
         help="a parent artifact outside OUT, for ancestry of an OS root or installer kit (repeat)",
     )
     test.add_argument(
+        "--parents",
+        action="append",
+        default=[],
+        metavar="TARGET",
+        help="a registry holding an OCI parent OUT lacks, for ancestry: oci://REGISTRY/REPO (repeat)",
+    )
+    test.add_argument(
         "--twin",
         action="append",
         default=[],
@@ -281,6 +288,20 @@ def sources_of(arguments: argparse.Namespace) -> commands.Sources:
     return commands.Sources(service=arguments.mirror, keyring=arguments.keyring, cache=cache)
 
 
+def parent_registries(texts: Sequence[str]) -> tuple[published.OciTarget, ...]:
+    """The `test --parents` targets: registries only, since `test` reads a parent's manifest and nothing else."""
+    found: list[published.OciTarget] = []
+    for text in texts:
+        try:
+            target = published.parse_target(text)
+        except ValueError as error:
+            raise commands.Usage(str(error)) from None
+        if not isinstance(target, published.OciTarget):
+            raise commands.Usage(f"--parents {text}: test reads a parent's layers from a registry: oci://REGISTRY/REPO")
+        found.append(target)
+    return tuple(found)
+
+
 def dispatch(arguments: argparse.Namespace) -> int:
     if arguments.command == "lock":
         if arguments.lock_command == "check":
@@ -350,6 +371,7 @@ def dispatch(arguments: argparse.Namespace) -> int:
         effects = checks.Effects(
             modules=test_modules(arguments.definition),
             parents=tuple(arguments.parent),
+            parent_registries=parent_registries(arguments.parents),
             twins=tuple(arguments.twin),
             vm=checks.Vm(image=arguments.vm_image),
         )

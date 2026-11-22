@@ -353,7 +353,7 @@ class PlanTest(CliCase):
             run = self.run_plan("--snapshot", FIRST_ID, "--against", f"oci://{name}/images")
         self.assertEqual(run.code, 0)
         self.assertEqual(run.plan()["core"]["state"], "reuse")
-        self.assertEqual(run.plan()["core"]["artifact"], built.digest)
+        self.assertEqual(run.plan()["core"]["artifact"], f"sha256:{built.digest}")
         self.assertEqual(run.plan()["app-a"]["state"], "build")
 
     def test_against_a_tag_without_a_release_builds_too(self) -> None:
@@ -372,7 +372,7 @@ class PlanTest(CliCase):
             run = self.run_plan("--snapshot", FIRST_ID, "--against", "github-release://example/images@v1")
         self.assertEqual(run.code, 0)
         self.assertEqual(run.plan()["core"]["state"], "reuse")
-        self.assertEqual(run.plan()["core"]["artifact"], built.digest)
+        self.assertEqual(run.plan()["core"]["artifact"], f"sha256:{built.digest}")
         self.assertEqual(run.plan()["app-a"]["state"], "build")
 
     def test_a_release_that_cannot_be_read_is_exit_1_naming_it(self) -> None:

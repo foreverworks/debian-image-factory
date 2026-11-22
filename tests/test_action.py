@@ -89,7 +89,7 @@ def plan_document(**states: tuple[str, str]) -> dict[str, object]:
     for name, (kind, state) in states.items():
         entry: dict[str, object] = {"kind": kind, "state": state}
         if state != "build":
-            entry["artifact"] = "ab" * 32
+            entry["artifact"] = "sha256:" + "ab" * 32
         images[name] = entry
     return {"images": images}
 

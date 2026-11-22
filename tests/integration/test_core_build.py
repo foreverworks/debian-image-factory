@@ -199,7 +199,7 @@ class CoreBuildTest(unittest.TestCase):
         digest = published.parse_artifact_name(artifact(self.work / "out1").name)
         assert digest is not None
         self.assertEqual(core["state"], "reuse")
-        self.assertTrue(core["artifact"].startswith(digest.digest12))
+        self.assertTrue(core["artifact"].startswith(f"sha256:{digest.digest12}"))
 
 
 if __name__ == "__main__":

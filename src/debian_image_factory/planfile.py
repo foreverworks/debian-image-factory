@@ -21,6 +21,8 @@ NAME: Final = re.compile(r"[a-z0-9][a-z0-9.+-]*")
 """What a suite, component or architecture looks like: they enter URLs and paths, so nothing else passes."""
 STATES: Final = ("build", "reuse", "wait")
 DEB_FIELDS: Final = ("package", "registry_url", "version")
+ARTIFACT: Final = re.compile(r"sha256:[0-9a-f]{64}")
+"""How the plan names the artifact it reuses or waits for: `sha256:<hex>`, as every digest is written."""
 
 
 class Debian(TypedDict):
@@ -220,7 +222,9 @@ def parse_image(name: str, value: object) -> ImageEntry:
         "checks": _texts(member("checks"), f"{where}.checks"),
         "state": state,
     }
-    for key in ("artifact", "because", "waiting_for", "rejected"):
+    if "artifact" in entry:
+        image["artifact"] = _text(entry["artifact"], f"{where}.artifact", ARTIFACT)
+    for key in ("because", "waiting_for", "rejected"):
         if key in entry:
             image[key] = _json(entry[key], f"{where}.{key}")
     return image

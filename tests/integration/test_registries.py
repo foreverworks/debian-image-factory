@@ -21,9 +21,12 @@ import urllib.request
 from pathlib import Path
 from typing import Final
 
-from debian_image_factory import commands, oci, ocilayout, prune, publish, published, registry, targets, verify
+from debian_image_factory import cli, commands, oci, ocilayout, prune, publish, published, registry, targets, verify
+from tests.support import ocimage
 from tests.support.definitions import CORE, HEADER, child
 from tests.support.oci_fixtures import IDENTITY, make_image
+from tests.support.rootfs import IDENTITY as ROOT_IDENTITY
+from tests.support.rootfs import clean_files, write_artifact
 
 ZOT: Final = "ghcr.io/project-zot/zot:v2.1.23"
 DISTRIBUTION: Final = "docker.io/library/registry:3.1.2"
@@ -186,6 +189,68 @@ class RegistriesTest(unittest.TestCase):
 
     def test_prune_on_a_distribution_registry_with_deletes_disabled_is_refused_per_artifact(self) -> None:
         self.prune_check(self.registry(DISTRIBUTION, DELETE_DISABLED), deletes=False)
+
+    def images_check(self, name: str) -> None:
+        """`publish --image` and `{image}` send each image to its own repository, and `test --parents` reads the
+        parent's layers from the repository that holds it: a child built on a reused parent passes ancestry."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        parent_identity = "a1" * 32
+        parent = make_image(root / "parent", image="base", identity=parent_identity, content=b"base")
+        other = make_image(root / "parent", image="other", identity="b2" * 32, content=b"other")
+        pattern = f"oci://{name}/factory/{{image}}"
+
+        def client(image: str) -> registry.Client:
+            return registry.connect(published.OciTarget(name, f"factory/{image}"))
+
+        publish.publish_command(root / "parent", [pattern], "none", io.StringIO(), images=["base"])
+        self.assertEqual(registry.manifest_digest(client("base"), f"sha256:{parent.digest}"), parent.digest)
+        self.assertIsNone(
+            registry.manifest_digest(client("other"), f"sha256:{other.digest}"), "an image not named stays unpublished"
+        )
+
+        layout = ocilayout.read_layout(parent.layout)
+        layers = [ocilayout.blob_path(parent.layout, one.digest).read_bytes() for one in layout.manifest.layers]
+        out = root / "out"
+        out.mkdir()
+        core_path, core_digest = write_artifact(out, clean_files(), ROOT_IDENTITY)
+        built = ocimage.write_oci(
+            out, "node-26", [*layers, {"./srv/": None}], annotations={oci.BASE_DIGEST: f"sha256:{parent.digest}"}
+        )
+        entries = {
+            "core": ocimage.entry("core", identity=ROOT_IDENTITY, artifact=f"sha256:{core_digest}"),
+            "base": ocimage.entry("oci", parent="core", identity=parent_identity, artifact=f"sha256:{parent.digest}"),
+            "node-26": ocimage.entry("oci", parent="base", checks=("ancestry",)),
+        }
+        (out / "plan.json").write_text(ocimage.plan_json(entries))
+        self.assertEqual(core_path.is_file(), True)
+
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            code = cli.main(["test", str(out), "--parents", f"oci://{name}/factory/other"])
+        self.assertEqual(code, 0)
+        self.assertIn("node-26: ancestry not run", said.getvalue(), "the repository that lacks the parent says so")
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            code = cli.main(
+                [
+                    "test",
+                    str(out),
+                    "--parents",
+                    f"oci://{name}/factory/other",
+                    "--parents",
+                    f"oci://{name}/factory/base",
+                ]
+            )
+        self.assertEqual((code, "node-26: ancestry PASSED" in said.getvalue()), (0, True), said.getvalue())
+        self.assertTrue(built.path.is_dir())
+
+    def test_images_to_their_own_repositories_and_parents_read_from_one_zot(self) -> None:
+        self.images_check(self.registry(ZOT))
+
+    def test_images_to_their_own_repositories_and_parents_read_from_one_distribution_registry(self) -> None:
+        self.images_check(self.registry(DISTRIBUTION))
 
     def test_a_registry_with_the_referrers_api_zot(self) -> None:
         self.check(self.registry(ZOT), api=True)

@@ -248,17 +248,17 @@ class LocateTest(unittest.TestCase):
         self.assertEqual(self.locate(), self.base)
 
     def test_found_by_the_digest_the_plan_names(self) -> None:
-        entry = entry_for(self.base, "cd" * 32, artifact=self.base.digest)
+        entry = entry_for(self.base, "cd" * 32, artifact=f"sha256:{self.base.digest}")
         self.assertEqual(self.locate(entry=entry), self.base)
 
     def test_found_in_a_parent_target_directory(self) -> None:
         empty = self.dir / "empty"
         empty.mkdir()
-        entry = entry_for(self.base, "cd" * 32, artifact=self.base.digest)
+        entry = entry_for(self.base, "cd" * 32, artifact=f"sha256:{self.base.digest}")
         self.assertEqual(self.locate(entry=entry, out=empty, directories=[self.out]), self.base)
 
     def test_a_core_parent_is_a_tarball_checked_against_its_name(self) -> None:
-        entry = entry_for(self.core, "ab" * 32, artifact=self.core.digest)
+        entry = entry_for(self.core, "ab" * 32, artifact=f"sha256:{self.core.digest}")
         self.assertEqual(self.locate(parent="core", entry=entry), self.core)
         assert self.core.path is not None
         self.core.path.write_bytes(self.core.path.read_bytes() + b"x")
@@ -268,7 +268,7 @@ class LocateTest(unittest.TestCase):
     def test_a_parent_found_nowhere_fails_naming_the_image_the_digest_and_the_places(self) -> None:
         empty = self.dir / "empty"
         empty.mkdir()
-        entry = entry_for(self.base, "cd" * 32, artifact=self.base.digest)
+        entry = entry_for(self.base, "cd" * 32, artifact=f"sha256:{self.base.digest}")
         with self.assertRaises(commands.Failed) as caught:
             self.locate(entry=entry, out=empty, directories=[self.dir / "nowhere"])
         message = str(caught.exception)
@@ -284,14 +284,14 @@ class LocateTest(unittest.TestCase):
         assert self.base.path is not None
         wrong = self.out / self.base.name.replace(self.base.digest[:12], "0" * 12)
         self.base.path.rename(wrong)
-        entry = entry_for(self.base, "cd" * 32, artifact=self.base.digest)
+        entry = entry_for(self.base, "cd" * 32, artifact=f"sha256:{self.base.digest}")
         with self.assertRaises(commands.Failed):
             self.locate(entry=entry)
 
     def test_a_registry_is_asked_for_the_digest_the_plan_names(self) -> None:
         empty = self.dir / "empty"
         empty.mkdir()
-        entry = entry_for(self.base, "cd" * 32, artifact=self.base.digest)
+        entry = entry_for(self.base, "cd" * 32, artifact=f"sha256:{self.base.digest}")
         registry = published.OciTarget("registry.example", "images/oci-base")
         calls: list[tuple[str, str]] = []
 
@@ -308,7 +308,7 @@ class LocateTest(unittest.TestCase):
     def test_every_registry_is_tried_in_turn(self) -> None:
         empty = self.dir / "empty"
         empty.mkdir()
-        entry = entry_for(self.base, "cd" * 32, artifact=self.base.digest)
+        entry = entry_for(self.base, "cd" * 32, artifact=f"sha256:{self.base.digest}")
         first, second = (published.OciTarget(name, "images/oci-base") for name in ("one.example", "two.example"))
         calls: list[str] = []
 
@@ -332,7 +332,7 @@ class LocateTest(unittest.TestCase):
     def test_the_default_pull_names_the_registry_it_could_not_read(self) -> None:
         empty = self.dir / "empty"
         empty.mkdir()
-        entry = entry_for(self.base, "cd" * 32, artifact=self.base.digest)
+        entry = entry_for(self.base, "cd" * 32, artifact=f"sha256:{self.base.digest}")
         registry = published.OciTarget("127.0.0.1:9", "images/oci-base")  # nothing listens on port 9
         with self.assertRaisesRegex(commands.Failed, r"oci://127\.0\.0\.1:9/images/oci-base@sha256:"):
             self.locate(entry=entry, out=empty, registries=[registry], pull=run.pull_parent)

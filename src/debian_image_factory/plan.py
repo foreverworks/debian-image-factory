@@ -15,6 +15,7 @@ from input_lock.lock import render  # not in input-lock's __all__: renders any u
 from . import ENGINE, __version__
 from .definition import KIND_DEFAULTS, MODULE_PACKAGES, Definition, Param, required_checks, top_down
 from .identity import ImageInputs
+from .oci import digest_text
 from .published import Decision
 from .vendordeb import MODULE as VENDOR_DEB
 
@@ -147,6 +148,12 @@ def image_entry(definition: Definition, inputs: ImageInputs) -> dict[str, JsonVa
     }
 
 
+def named(artifact: str | None) -> str | None:
+    """How plan.json names an artifact: `sha256:<hex>`, the form of every digest the factory writes. An Incus
+    image's fingerprint is a sha256 too."""
+    return None if artifact is None else digest_text(artifact)
+
+
 def state_of(
     image: str,
     parent_state: str | None,
@@ -166,12 +173,12 @@ def state_of(
             "because": [{"parent": parent, "state": "wait"}],
         }
         if decision.state == "wait":
-            state["artifact"] = decision.artifact
+            state["artifact"] = named(decision.artifact)
         return state
     if decision.state == "reuse":
-        return {"state": "reuse", "artifact": decision.artifact}
+        return {"state": "reuse", "artifact": named(decision.artifact)}
     if decision.state == "wait":
-        return {"state": "wait", "artifact": decision.artifact, "waiting_for": list(decision.waiting_for)}
+        return {"state": "wait", "artifact": named(decision.artifact), "waiting_for": list(decision.waiting_for)}
     if decision.failed:
         return {"state": "build", "because": [{"failed": list(decision.failed)}]}
     return {"state": "build", "because": [{"published": "no artifact with this identity"}]}

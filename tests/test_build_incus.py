@@ -452,7 +452,7 @@ class LocateTest(TemporaryTest):
         return parents.locate_parent(
             "incus-app",
             "incus-base",
-            entry or entry_for(self.base, incusimage.BASE_IDENTITY, artifact=self.base.fingerprint),
+            entry or entry_for(self.base, incusimage.BASE_IDENTITY, artifact=f"sha256:{self.base.fingerprint}"),
             suite="trixie",
             arch="amd64",
             built=built or {},

@@ -217,6 +217,11 @@ oci://ghcr.io/example/debian` sends only the image `debian` (repeat `--image` fo
 hold is refused), and `{image}` in an `oci://` repository is replaced by each image's name, so `publish out/ --to
 oci://ghcr.io/example/{image}` sends `debian` to `ghcr.io/example/debian` and `node-26` to `ghcr.io/example/node-26`.
 
+A night on which only Node moved builds only the Node images: their Debian-built parent is reused from the registry,
+so `test` does not find it in `out/`. `test out/ --parents oci://ghcr.io/example/debian` reads the parent's manifest
+from there, so the child's `ancestry` check runs and passes instead of staying unrun, which would leave the new
+image a candidate that `plan` keeps waiting on.
+
 Published builds pile up, so `prune` clears them: `debian-image-factory prune --against
 oci://ghcr.io/example/debian --pin sha256:<digest> --dry-run` lists, for every image, the newest 5 good builds and
 the newest candidate it would keep (`--keep-good`, `--keep-candidates`) and the rest it would delete,

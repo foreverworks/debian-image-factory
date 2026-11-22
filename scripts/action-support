@@ -120,10 +120,6 @@ def summary_lines(document: dict[str, object]) -> list[str]:
     ]
 
 
-def digest_text(value: str) -> str:
-    return f"sha256:{value}" if SHA256.fullmatch(value) else value
-
-
 def built_artifacts(out: Path) -> dict[str, str]:
     """Image name to digest of what a build left in `out`: each artifact's name carries the image and the
     first 12 hex of its digest, and the records file beside it is named by the full digest."""
@@ -153,7 +149,7 @@ def artifacts_of(document: dict[str, object], out: Path | None) -> dict[str, str
         for name, entry in sorted(images.items()):
             artifact = entry.get("artifact") if isinstance(entry, dict) else None
             if isinstance(artifact, str):
-                found[str(name)] = digest_text(artifact)
+                found[str(name)] = artifact
     if out is not None:
         found.update(built_artifacts(out))
     return dict(sorted(found.items()))
