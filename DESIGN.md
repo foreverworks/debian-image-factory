@@ -1654,7 +1654,12 @@ commit with its version.
 - An Incus host for `incus-boot` and `two-clones` on Incus images: `scripts/incus-vm` boots Debian 13's
   genericcloud image (pinned by build directory and SHA512SUMS) under QEMU in a privileged docker
   container, KVM when `/dev/kvm` opens and TCG otherwise, installs Incus (6.0.4 in Debian 13) from
-  the lock's snapshot, shares directories over virtiofs and runs one command as root. `scripts/test incus` builds
+  the lock's snapshot, shares directories over virtiofs and runs one command as root. The prepared disk
+  is cached under a key that digests every input of its state: the base image's SHA512, the snapshot ID,
+  the whole prepare user-data (script, apt sources text and package list) and the disk size, so editing
+  any of them prepares a fresh disk. Without `--snapshot` the guest installs from the live mirrors,
+  which move, so the key also holds the UTC day: such a disk is at most a day old (a snapshot ID gives a
+  disk that never ages, and is what `scripts/test incus` passes). `scripts/test incus` builds
   core, `incus-base` and an Incus child of it from the example definition, runs every check on all
   three (the Incus checks inside the VM), then requires each image's checks to pass with
   `verify --require-checks`: the boot contract for the base and for a child. The `incus` workflow

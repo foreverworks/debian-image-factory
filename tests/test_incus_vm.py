@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "incus-vm"
@@ -299,9 +300,50 @@ class ChecksumTest(unittest.TestCase):
         self.assertIn(vm.CLOUD_BUILD, vm.CLOUD_URL)
         self.assertIn(vm.CLOUD_BUILD, vm.CLOUD_IMAGE)
 
-    def test_cache_key_names_the_base_and_the_snapshot(self) -> None:
-        self.assertEqual(vm.cache_key("ab" * 64, None), "abababababababab-current")
-        self.assertEqual(vm.cache_key("ab" * 64, "20261110T000000Z"), "abababababababab-20261110T000000Z")
+    def test_cache_key_names_the_snapshot_and_digests_every_input(self) -> None:
+        key = vm.cache_key("ab" * 64, "20261110T000000Z", "20261122", "text")
+        self.assertRegex(key, r"^20261110T000000Z-[0-9a-f]{16}$")
+        self.assertEqual(key, vm.cache_key("ab" * 64, "20261110T000000Z", "20261122", "text"))
+        later = vm.cache_key("ab" * 64, "20261110T000000Z", "20270101", "text")
+        self.assertEqual(key, later, "a snapshot ignores the day")
+        for changed in (
+            vm.cache_key("ac" * 64, "20261110T000000Z", "20261122", "text"),
+            vm.cache_key("ab" * 64, "20261111T000000Z", "20261122", "text"),
+            vm.cache_key("ab" * 64, "20261110T000000Z", "20261122", "other text"),
+        ):
+            self.assertNotEqual(changed, key)
+
+    def test_without_a_snapshot_the_key_holds_the_day(self) -> None:
+        today = vm.cache_key("ab" * 64, None, "20261122", "text")
+        self.assertRegex(today, r"^20261122-[0-9a-f]{16}$")
+        self.assertNotEqual(today, vm.cache_key("ab" * 64, None, "20261123", "text"))
+
+    def test_the_prepare_inputs_hold_the_script_the_sources_and_the_packages(self) -> None:
+        inputs = vm.prepare_inputs("20261110T000000Z")
+        script = vm.guest_script("0" * 16, "prepare", "20261110T000000Z", [], [])
+        self.assertIn(base64.b64encode(script.encode()).decode(), inputs)
+        self.assertIn("incus dnsmasq-base", script)
+        self.assertIn("snapshot.debian.org/archive/debian/20261110T000000Z/", script)
+        self.assertIn(f"disk={vm.DISK_SIZE}", inputs)
+        self.assertNotEqual(inputs, vm.prepare_inputs(None))
+        self.assertNotEqual(inputs, vm.prepare_inputs("20261111T000000Z"))
+
+    def test_a_change_to_the_prepare_script_the_sources_or_the_packages_changes_the_key(self) -> None:
+        def key() -> str:
+            return str(vm.cache_key("ab" * 64, "20261110T000000Z", "20261122", vm.prepare_inputs("20261110T000000Z")))
+
+        before = key()
+        for name, value in (
+            ("PREPARE_STEPS", vm.PREPARE_STEPS + "true\n"),
+            ("INCUS_PACKAGES", (*vm.INCUS_PACKAGES, "jq")),
+            ("DISK_SIZE", "12G"),
+        ):
+            with mock.patch.object(vm, name, value):
+                self.assertNotEqual(key(), before, name)
+        real = vm.apt_sources
+        with mock.patch.object(vm, "apt_sources", lambda snapshot: real(snapshot) + "# changed\n"):
+            self.assertNotEqual(key(), before, "apt sources text")
+        self.assertEqual(key(), before)
 
 
 class ShareDirectoryTest(unittest.TestCase):

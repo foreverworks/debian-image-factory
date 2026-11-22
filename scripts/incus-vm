@@ -24,12 +24,19 @@ kernel has no 9p), runs COMMAND and powers off.
 
 Cached under ${XDG_CACHE_HOME:-~/.cache}/debian-image-factory/incus-vm/ (delete it to start over):
   base/<image>.qcow2 and .sha512    the downloaded cloud image, verified once; never booted directly
-  prepared-<sha512 prefix>-<snapshot or "current">.qcow2
-                                    the base with incus installed and initialised, for that snapshot ID
-                                    (without --snapshot the key is "current": the archive as of that
-                                    first run, until the file is deleted). Its machine identity (host
-                                    keys, machine-id) is shared by every run and irrelevant to the checks,
-                                    which test containers. Every run boots a fresh overlay of it.
+  prepared-<snapshot or UTC day>-<digest>.qcow2
+                                    the base with incus installed and initialised. The digest covers every
+                                    input of that state: the base image's sha512, the snapshot ID, the whole
+                                    cloud-init user-data of the prepare step (so the prepare script, the
+                                    apt sources text and the package list) and the disk size, so a
+                                    change to any of them prepares a fresh disk and the old one is simply
+                                    no longer used (delete it to reclaim the space). Without --snapshot
+                                    the guest installs from the live mirrors, which move: the key then also
+                                    holds today's UTC date, so such a disk is at most a day old and is
+                                    prepared again on the next day.
+                                    Pass --snapshot for a disk that does not move. Its machine identity
+                                    (host keys, machine-id) is shared by every run and irrelevant to the
+                                    checks, which test containers. Every run boots a fresh overlay of it.
 
 Pins, read live on 2026-11-22: debian:trixie index digest from `docker buildx imagetools inspect`;
 the newest genericcloud build directory under https://cloud.debian.org/images/cloud/trixie/.
@@ -48,6 +55,7 @@ import time
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 # debian:trixie, the multi-arch index digest, read with `docker buildx imagetools inspect debian:trixie` on 2026-11-22.
@@ -214,8 +222,21 @@ def parse_sha512sums(text: str, name: str) -> str:
     raise KeyError(name)
 
 
-def cache_key(base_sha512: str, snapshot: str | None) -> str:
-    return f"{base_sha512[:16]}-{snapshot or 'current'}"
+def cache_key(base_sha512: str, snapshot: str | None, today: str, prepare_inputs: str) -> str:
+    """The name of a prepared disk: its snapshot ID (or, without one, the UTC day `today`, as YYYYMMDD) and a
+    digest of every input of the prepared state: the base image's sha512, the snapshot, the day when there is
+    no snapshot (the live mirrors move), and `prepare_inputs`, the text that drives the prepare step."""
+    digest = hashlib.sha256()
+    for part in (base_sha512, snapshot or "", "" if snapshot else today, prepare_inputs):
+        digest.update(f"{len(part)}:".encode() + part.encode() + b"\n")
+    return f"{snapshot or today}-{digest.hexdigest()[:16]}"
+
+
+def prepare_inputs(snapshot: str | None) -> str:
+    """Everything the prepare step is made of, as one text: the cloud-init user-data that runs it (the guest
+    script with its apt sources and package list, so any edit to them changes the text), the disk size the
+    overlay gets. The memory and CPUs of a run are the caller's and do not shape the installed state."""
+    return f"{user_data('0' * 16, 'prepare', snapshot, (), ())}\ndisk={DISK_SIZE}\n"
 
 
 def apt_sources(snapshot: str | None) -> str:
@@ -233,6 +254,9 @@ def apt_sources(snapshot: str | None) -> str:
     )
 
 
+INCUS_PACKAGES = ("incus", "dnsmasq-base")
+"""What the prepare step installs: incus, and the one recommendation `incus admin init --minimal` needs."""
+
 PREPARE_STEPS = """\
 exec >"$log" 2>&1
 set -eu
@@ -243,7 +267,7 @@ if [ -n "$SNAPSHOT" ]; then
 fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q --no-install-recommends incus dnsmasq-base
+apt-get install -y -q --no-install-recommends @PACKAGES@
 incus admin init --minimal
 incus admin waitready --timeout 120
 """
@@ -268,7 +292,7 @@ def guest_script(nonce: str, mode: str, snapshot: str | None, shares: Sequence[s
     if mode == "prepare":
         steps = (
             f"APT_SOURCES={shlex.quote(apt_sources(snapshot))}\nSNAPSHOT={shlex.quote(snapshot or '')}\n"
-            + PREPARE_STEPS
+            + PREPARE_STEPS.replace("@PACKAGES@", " ".join(INCUS_PACKAGES))
         )
     else:
         mounts = "\n".join(MOUNT_STEP.replace("@NAME@", name) for name in shares)
@@ -510,12 +534,13 @@ def boot(work: Path, disk: Path, mode: str, options: Options, nonce: str, deadli
 def inside(options: Options, cache: Path) -> int:
     deadline = time.monotonic() + options.timeout_minutes * 60
     base, sha512 = ensure_base(cache)
-    prepared = cache / f"prepared-{cache_key(sha512, options.snapshot)}.qcow2"
+    today = datetime.now(UTC).strftime("%Y%m%d")
+    prepared = cache / f"prepared-{cache_key(sha512, options.snapshot, today, prepare_inputs(options.snapshot))}.qcow2"
     nonce = hashlib.sha256(os.urandom(16)).hexdigest()[:16]
     with tempfile.TemporaryDirectory(prefix="incus-vm-") as scratch:
         work = Path(scratch)
         if not prepared.exists():
-            say(f"first run for this snapshot ({options.snapshot or 'current'}): installing incus, cached afterwards")
+            say(f"no prepared disk for {options.snapshot or 'today'} with these inputs: installing incus (cached)")
             overlay = work / "prepare.qcow2"
             create = ["qemu-img", "create", "-q", "-f", "qcow2", "-b", str(base), "-F", "qcow2", str(overlay)]
             run_checked([*create, DISK_SIZE])
