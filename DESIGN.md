@@ -160,6 +160,18 @@ own requirements.
   writer is a standard-library Python program run by the builder's own python3. An image that only
   sets `oci` config adds no layer and runs no container; when its parent is core, the base layer is
   core's tarball itself, so an image's first layer digest is the tarball's sha256.
+- **Installer and os children build as an OCI child does**, on a filesystem that is one file: a core
+  or os parent's tarball, unpacked as a single layer, or an installer parent's `initrd.img`. A kernel
+  package's postinst runs in the chroot with proc and the minimal `/dev` mounted, so initramfs-tools
+  writes `/boot/initrd.img-<kver>`. Before the identity removal the image's own apt sources
+  (`apt_sources`) replace the parent's, where core writes them, so an image pinned to the baseline
+  carries it and the build snapshot never appears; the root then ends as a booting root (below) and
+  is packed whole, not as a layer. An os image is every path of the root in one tarball, written by
+  the layer writer against an empty parent state. An installer is a kit (8.1): its one kernel, the
+  whole root as a newc initrd with `/init` linking to `/sbin/init`, and `kit.json`, written by a
+  second standard-library program run by the builder's python3, which the package also imports to
+  read an initrd back. These artifacts name nothing of their own ancestry, so a child reads its
+  parent's ancestors from the parent's provenance.
 - **Hooks and modules run with no network.** Everything they may use was fetched and verified
   before the build started and is handed to them as files plus `LOCK_*` environment variables
   (6.5). A hook that tries to download fails.
@@ -168,8 +180,9 @@ own requirements.
 - **Kind defaults are explicit.** Each kind installs a documented package set (for `incus`:
   systemd-sysv, udev, dbus, iproute2, netbase, systemd-resolved, cloud-init and what NoCloud needs)
   and, for kinds that boot, writes `uninitialized` into `/etc/machine-id` so systemd treats the
-  first boot as a first boot, plus a first-boot unit that creates SSH host keys when
-  `openssh-server` is present. The plan lists the defaults, so nothing arrives silently.
+  first boot as a first boot. That is also when SSH host keys are made: Debian 13's openssh-server
+  ships `sshd-keygen.service` (`ConditionFirstBoot=yes`), so the factory adds no unit of its own.
+  The plan lists the defaults, so nothing arrives silently.
 - **Timestamps come from the definition, not the clock.** `SOURCE_DATE_EPOCH` is
   `[debian] source_date_epoch`, by default the suite's release date (2025-08-09 for Debian 13).
   mmdebstrap and the factory's own writers clamp every timestamp to it. When an artifact was really
@@ -798,8 +811,15 @@ the rare case inputs cannot see (an archive key rotation, say).
 | core | `core-trixie-amd64-<identity16>-<digest12>.tar.gz` | sha256 of the file | gzip |
 | oci | `oci-base-trixie-amd64-<identity16>-<digest12>.oci/`, an OCI image layout directory, pushed to a registry | image manifest digest | layers `application/vnd.oci.image.layer.v1.tar+gzip` |
 | incus | `<name>.incus.tar.gz` (metadata.yaml, templates) and `<name>.rootfs.squashfs` | Incus fingerprint: sha256 of the metadata file followed by the rootfs file | gzip tarball, squashfs with its gzip compressor |
-| installer | `installer-trixie-amd64-<identity16>-<digest12>.tar`, a kit holding `vmlinuz`, `initrd.img`, `kit.json` | sha256 of the kit tarball; kernel and initrd are listed as subjects too | initrd gzip, kit tarball uncompressed |
-| os | `os-trixie-amd64-<identity16>-<digest12>.tar.gz` | sha256 of the file | gzip |
+| installer | `installer-trixie-amd64-<identity16>-<digest12>.tar`, a kit: exactly `kit.json`, `vmlinuz`, `initrd.img`, in that order, mode 0644, owned by 0:0 with no names, time stamped `source_date_epoch` | sha256 of the kit tarball; `vmlinuz` and `initrd.img` follow it as subjects, by sha256 | initrd gzip -9 -n, kit tarball uncompressed |
+| os | `os-trixie-amd64-<identity16>-<digest12>.tar.gz`, the whole root filesystem as a PAX tar sorted by path, parents first, numeric owners and no names, times clamped to `source_date_epoch` | sha256 of the file | gzip -9 -n |
+
+A kit's `vmlinuz` is the image's one kernel, `/boot/vmlinuz-<kver>` (a root with none or several fails
+the build, naming them). Its `initrd.img` is the whole root, `/boot` included, as a newc cpio: sorted
+by path with parents first, numeric owners, times clamped, inode numbers assigned in order, hard links
+kept as newc hard links, device nodes and symbolic links kept, no xattrs, and `/init` a link to
+`/sbin/init`. `kit.json` is canonical JSON and a newline:
+`{"files":{"initrd.img":{"sha256":"..","size":N},"vmlinuz":{..}},"image":"<image>","kernel":"<kver>","schema":1}`.
 
 Compression is gzip, or the format the target ecosystem reads by default, for everything published.
 zstd is supported per image (`compression = "zstd"`) for consumers who control every reader. The

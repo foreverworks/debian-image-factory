@@ -52,15 +52,17 @@ from .. import plan as plan_module
 from .. import tools as builder
 from ..identity import FileFact
 from ..published import artifact_name, records_name_for
-from . import boot, core, parents
+from . import boot, booting, core, initrd, parents
 from . import incus as incus_build
 from . import oci as oci_build
 
-SUPPORTED_KINDS: Final = ("core", "oci", "incus")
-"""The kinds this release builds; the others arrive with their milestones."""
-EXTENSIONS: Final[Mapping[str, str]] = {"core": "tar.gz", "oci": oci.LAYOUT_EXT, "incus": incus.METADATA_EXT}
+SUPPORTED_KINDS: Final = ("core", "oci", "incus", "installer", "os")
+"""The kinds this release builds."""
+EXTENSIONS: Final[Mapping[str, str]] = parents.EXTENSIONS
 LAYER_PROGRAM: Final = "layer.py"
 """The layer writer's file name in the package and in the work directory."""
+INITRD_PROGRAM: Final = "initrd.py"
+"""The kit writer's file name in the package and in the work directory."""
 PLAN_COPY: Final = "plan.json"
 """The plan a build ran from, copied byte for byte into the output directory for `test`."""
 
@@ -212,10 +214,11 @@ def prepare_work(
     keyring: Path,
     cache: Path,
     owner: str | None,
-    base: parents.Base | None = None,
+    parent: parents.ParentArtifact | None = None,
 ) -> None:
-    """Write everything the builder reads for one image into `work`. An OCI image (`base` is its parent's
-    layers) gets the layer program and its parent's layers instead of core's sources and mmdebstrap."""
+    """Write everything the builder reads for one image into `work`. A child (`parent` is the artifact it
+    is built on) gets the writer programs and its parent's filesystem instead of mmdebstrap: an OCI image
+    its parent's layers, an os image its parent's tarball, an installer its parent's tarball or kit."""
     spec = loaded.definition.images[image]
     suite = plan["debian"]["suite"]
     components = plan["debian"]["components"]
@@ -224,11 +227,14 @@ def prepare_work(
     shutil.copyfile(keyring, work / "keyring.pgp")
     if spec.files is not None:
         (work / "files.tar").write_bytes(files_tar(loaded.root, spec.files, loaded.files, epoch))
-    if base is None:
+    if entry["kind"] != "oci":
+        try:
+            sources = core.image_sources(entry["apt_sources"], suite, components, plan["baseline"])
+        except ValueError as error:
+            raise commands.Failed(f"images.{image}: {error}") from None
+        (work / Path(core.SOURCES).name).write_text(sources)
+    if parent is None:
         (work / "build.list").write_text(core.build_sources(suite, components))
-        (work / "debian.sources").write_text(
-            core.image_sources(entry["apt_sources"], suite, components, plan["baseline"])
-        )
         stage_run(work, loaded=loaded, lock=lock, image=image, entry=entry, cache=cache, scripts=spec.hooks)
         (work / "customize.sh").write_text(core.customize_script(files=spec.files is not None, hooks=spec.hooks))
         (work / "build.sh").write_text(
@@ -243,24 +249,48 @@ def prepare_work(
     for name in entry["modules"]:
         for helper, text in modules.helper_files(loaded.definition.modules[name]).items():
             (work / helper).write_text(text)
-    (work / LAYER_PROGRAM).write_text(
-        resources.files("debian_image_factory.build").joinpath(LAYER_PROGRAM).read_text(encoding="utf-8")
-    )
-    (work / "layers").mkdir()
-    for index, (path, _, _) in enumerate(base.layers):
-        place(path, work / "layers" / oci_build.layer_name(index))
-    (work / "build.sh").write_text(
-        oci_build.build_script(
-            layers=len(base.layers),
+    for program in (LAYER_PROGRAM, INITRD_PROGRAM) if entry["kind"] in booting.KINDS else (LAYER_PROGRAM,):
+        (work / program).write_text(
+            resources.files("debian_image_factory.build").joinpath(program).read_text(encoding="utf-8")
+        )
+    lines = module_lines(loaded.definition, entry, epoch)
+    debs = deb_paths(entry)
+    if parent.path is None:
+        raise commands.Failed(f"{parent.name} is only known by name: its files are needed to build on it")
+    if parent.kind == "installer":
+        place(parent.path, work / Path(booting.PARENT_KIT).name)
+        layers = 0
+    else:
+        files = parents.layer_files(parent)
+        (work / "layers").mkdir()
+        for index, path in enumerate(files):
+            place(path, work / "layers" / oci_build.layer_name(index))
+        layers = len(files)
+    if entry["kind"] == "oci":
+        script = oci_build.build_script(
+            layers=layers,
             request=entry["request"],
             source_date_epoch=epoch,
             owner=owner,
             files=spec.files is not None,
-            module_lines=module_lines(loaded.definition, entry, epoch),
+            module_lines=lines,
             hooks=scripts,
-            debs=deb_paths(entry),
+            debs=debs,
         )
-    )
+    else:
+        script = booting.build_script(
+            kind=entry["kind"],
+            image=image,
+            parent_kind=parent.kind,
+            request=entry["request"],
+            source_date_epoch=epoch,
+            owner=owner,
+            files=spec.files is not None,
+            module_lines=lines,
+            hooks=scripts,
+            debs=debs,
+        )
+    (work / "build.sh").write_text(script)
 
 
 def vouched(cache: Path, entry: planfile.ImageEntry) -> list[records.Remote]:
@@ -437,7 +467,8 @@ def image_records(
 ) -> list[Statement]:
     """Provenance and SBOM of one artifact (DESIGN 8.2). `ancestors` are the images it descends from,
     nearest first (none for core). The artifact is the first subject, under `name` and `digest`; `files`
-    adds the (name, sha256) of each file an artifact of several files is made of (an Incus image's two)."""
+    adds the (name, sha256) of each file an artifact of several files is made of or holds (an Incus
+    image's two, an installer kit's kernel and initrd, DESIGN 8.1)."""
     builder_id, invocation = records.run_details(os.environ, __version__)
     entries = sorted(entry["inputs"])
     subjects = [subject(name, digest), *(subject(file_name, sha256) for file_name, sha256 in files)]
@@ -650,22 +681,7 @@ def build_oci(run: Run, image: str, scratch: Path, built: Mapping[str, parents.P
     spec = run.loaded.definition.images[image]
     debian_ = run.plan["debian"]
     suite, arch = debian_["suite"], debian_["architecture"]
-    parent_name = entry["parent"]
-    if parent_name is None:
-        raise commands.Failed(f"images.{image}: an OCI image needs a parent")
-    parent = parents.locate_parent(
-        image,
-        parent_name,
-        run.plan["images"][parent_name],
-        suite=suite,
-        arch=arch,
-        built=built,
-        out_dir=run.out_dir,
-        directories=run.directories,
-        registries=run.registries,
-        pull=pull_parent,
-        scratch=scratch / "pulled",
-    )
+    parent = find_parent(run, image, scratch, built)
     ancestry = parents.lineage(parent, find_by_name(run, built))
     base = parents.base_of(parent)
     try:
@@ -687,7 +703,7 @@ def build_oci(run: Run, image: str, scratch: Path, built: Mapping[str, parents.P
             keyring=run.sources.keyring,
             cache=run.sources.cache,
             owner=run.builder_.owner,
-            base=base,
+            parent=parent,
         )
         run_builder(run.builder_, work, run.mirror, run.out_dir / f"{image}.build.log")
         status = (work / Path(oci_build.STATUS).name).read_text(encoding="utf-8")
@@ -894,6 +910,99 @@ def build_incus(run: Run, image: str, scratch: Path, built: Mapping[str, parents
     return Result(artifact, len(packages))
 
 
+def find_parent(
+    run: Run, image: str, scratch: Path, built: Mapping[str, parents.ParentArtifact]
+) -> parents.ParentArtifact:
+    """The artifact `image` is built on: built in this run, in the output directory, or in --parents."""
+    entry = run.plan["images"][image]
+    parent_name = entry["parent"]
+    if parent_name is None:
+        raise commands.Failed(f"images.{image}: an {entry['kind']} image needs a parent")
+    return parents.locate_parent(
+        image,
+        parent_name,
+        run.plan["images"][parent_name],
+        suite=run.plan["debian"]["suite"],
+        arch=run.plan["debian"]["architecture"],
+        built=built,
+        out_dir=run.out_dir,
+        directories=run.directories,
+        registries=run.registries,
+        pull=pull_parent,
+        scratch=scratch / "pulled",
+    )
+
+
+def kit_subjects(kit: Path) -> tuple[str, list[tuple[str, str]]]:
+    """The kernel version an installer kit names and the subjects after the kit itself: its `vmlinuz`
+    and `initrd.img` by sha256, once the kit's layout and every digest kit.json names are checked."""
+    try:
+        described = initrd.read_kit(str(kit))
+    except (initrd.InitrdError, OSError, tarfile.TarError) as error:
+        raise commands.Failed(f"the builder's kit is not one: {error}") from None
+    files = described["files"]
+    kernel = described.get("kernel")
+    assert isinstance(files, dict)  # read_kit checked it
+    if not isinstance(kernel, str):
+        raise commands.Failed("the builder's kit.json names no kernel")
+    return kernel, [(name, str(files[name]["sha256"])) for name in initrd.KIT_MEMBERS[1:]]
+
+
+def build_booting(run: Run, image: str, scratch: Path, built: Mapping[str, parents.ParentArtifact]) -> Result:
+    """One installer or os image: its parent's filesystem, the child build, then the kit or the root
+    filesystem tarball and its records (DESIGN 5.3, 8.1)."""
+    entry = run.plan["images"][image]
+    kind = entry["kind"]
+    debian_ = run.plan["debian"]
+    parent = find_parent(run, image, scratch, built)
+    ancestors = parents.file_ancestors(parent, find_by_name(run, built))
+    work = scratch / "factory"
+    prepare_work(
+        work,
+        loaded=run.loaded,
+        lock=run.lock,
+        image=image,
+        entry=entry,
+        plan=run.plan,
+        keyring=run.sources.keyring,
+        cache=run.sources.cache,
+        owner=run.builder_.owner,
+        parent=parent,
+    )
+    started = now()
+    run_builder(run.builder_, work, run.mirror, run.out_dir / f"{image}.build.log")
+    finished = now()
+    packed = work / Path(booting.ROOTFS if kind == "os" else booting.KIT).name
+    also: list[tuple[str, str]] = []
+    if kind == "os":
+        check_gzip(packed)
+    else:
+        _, also = kit_subjects(packed)
+    digest = sha256_file(packed)
+    name = artifact_name(image, debian_["suite"], debian_["architecture"], entry["identity"], digest, EXTENSIONS[kind])
+    packages = debian.installed_packages((work / Path(oci_build.STATUS).name).read_text(encoding="utf-8"))
+    statements = image_records(
+        image=image,
+        entry=entry,
+        plan=run.plan,
+        lock=run.lock,
+        name=name,
+        digest=digest,
+        packages=packages,
+        source=run.source,
+        releases=[*run.releases, *vouched(run.sources.cache, entry)],
+        builder_=run.builder_,
+        started=started,
+        finished=finished,
+        ancestors=ancestors,
+        files=also,
+    )
+    # Records first, as for core.
+    (run.out_dir / records_name_for(digest)).write_text(records.record_lines(statements))
+    os.replace(packed, run.out_dir / name)
+    return Result(parents.ParentArtifact(image, kind, name, digest, run.out_dir / name), len(packages))
+
+
 def split_parent_targets(texts: Sequence[str]) -> tuple[list[Path], list[published.OciTarget]]:
     """The `--parents` targets: where parents not built in this run may be, `dir://` and `oci://`."""
     directories: list[Path] = []
@@ -962,8 +1071,10 @@ def build_command(
                 result = build_core(run, image, Path(scratch))
             elif kind == "incus":
                 result = build_incus(run, image, Path(scratch), built)
-            else:
+            elif kind == "oci":
                 result = build_oci(run, image, Path(scratch), built)
+            else:
+                result = build_booting(run, image, Path(scratch), built)
         built[image] = result.artifact
         print(f"{image}: {result.artifact.name} ({result.packages} packages)", file=out)
     return 0

@@ -435,5 +435,59 @@ class CommandLineTest(Fixture):
         self.assertEqual(broken.returncode, 1)
 
 
+class FullTest(Fixture):
+    """`pack --full`: every path of the root, as an os image's tarball, compared with an empty state."""
+
+    def full(self, name: str = "root") -> tuple[Path, int]:
+        out = self.dir / f"{name}.tar.gz"
+        return out, layer.pack(str(self.root), str(self.state), EPOCH, str(out), None, None, full=True)
+
+    def test_every_path_is_written_sorted_with_no_whiteouts_and_hard_links_kept(self) -> None:
+        self.parent(
+            [
+                directory("etc"),
+                regular("etc/passwd", b"root\n"),
+                hardlink("etc/passwd-copy", "etc/passwd"),
+                symlink("etc/alias", "passwd"),
+                regular("gone", b"x"),
+            ]
+        )
+        (self.root / "gone").unlink()
+        (self.root / "new").write_bytes(b"new\n")
+        out, count = self.full()
+        members = tar_members(out)
+        self.assertEqual(
+            [member.name for member in members], ["etc", "etc/alias", "etc/passwd", "etc/passwd-copy", "new"]
+        )
+        self.assertEqual(count, 5)
+        by_name = {member.name: member for member in members}
+        self.assertTrue(by_name["etc/passwd-copy"].islnk())
+        self.assertEqual(by_name["etc/passwd-copy"].linkname, "etc/passwd")
+        self.assertEqual({(member.uname, member.gname) for member in members}, {("", "")})
+        self.assertFalse(any(".wh." in member.name for member in members))
+        self.assertEqual(
+            sorted(path.name for path in self.dir.iterdir()), ["parent.tar.gz", "root", "root.tar.gz", "state.json"]
+        )
+
+    def test_an_unchanged_root_is_written_whole_and_the_same_root_gives_the_same_bytes(self) -> None:
+        self.parent([directory("etc"), regular("etc/hostname", b"h\n")])
+        first, count = self.full("first")
+        self.assertEqual(count, 2, "nothing changed, and still every path")
+        second, _ = self.full("second")
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        self.assertEqual(first.read_bytes()[4:8], b"\0\0\0\0", "a zero gzip time stamp")
+
+    def test_the_states_absent_devices_are_written(self) -> None:
+        device = info("dev/console", tarfile.CHRTYPE, 0o600)
+        device.devmajor, device.devminor = 5, 1
+        self.parent([directory("dev"), (device, b"")])
+        if not layer.read_state(str(self.state))["dev/console"].absent:
+            self.skipTest("running as root: the node was made")
+        out, _ = self.full()
+        console = {member.name: member for member in tar_members(out)}["dev/console"]
+        self.assertTrue(console.ischr())
+        self.assertEqual((console.devmajor, console.devminor, console.mode), (5, 1, 0o600))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,8 @@ IMAGE_KEYRING: Final = "/usr/share/keyrings/debian-archive-keyring.pgp"
 """The keyring the image's own apt sources name (debian-archive-keyring installs it)."""
 ROOTFS: Final = f"{WORK}/rootfs.tar.gz"
 """What the build leaves in the work directory: the packed root filesystem."""
+SOURCES: Final = f"{WORK}/debian.sources"
+"""The image's own apt sources (`image_sources`), written into the work directory for the build to install."""
 HOOK_DIR: Final = "/run/factory"
 """Where hooks find their inputs and build.env inside the image; removed before packing (DESIGN 6.5)."""
 
@@ -152,20 +154,24 @@ def identity_lines() -> list[str]:
     ]
 
 
+def sources_lines() -> list[str]:
+    """The image's own apt sources (`debian.sources` in the work directory) replace whatever apt sources
+    the root `$root` has: core's build sources, or a booting child's parent's sources."""
+    return [
+        "# the image's own apt sources replace the ones the build read the mirror with",
+        'rm -f "$root/etc/apt/sources.list"',
+        'find "$root/etc/apt/sources.list.d" -mindepth 1 -delete',
+        f'install -m 0644 {SOURCES} "$root/etc/apt/sources.list.d/debian.sources"',
+    ]
+
+
 def customize_script(*, files: bool, hooks: Sequence[str]) -> str:
     """The script mmdebstrap runs as its customize hook, with the root directory as `$1`.
 
     In order: the image's own apt sources replace the build's; the definition's file tree is copied
     over the root; each hook runs in the chroot with its inputs and build.env under /run/factory;
     then every machine identity and build-only file is removed (DESIGN 5.3)."""
-    lines = [
-        "set -eu",
-        'root="$1"',
-        "# the image's own apt sources replace the ones the build read the mirror with",
-        'rm -f "$root/etc/apt/sources.list"',
-        'find "$root/etc/apt/sources.list.d" -mindepth 1 -delete',
-        f'install -m 0644 {WORK}/debian.sources "$root/etc/apt/sources.list.d/debian.sources"',
-    ]
+    lines = ["set -eu", 'root="$1"', *sources_lines()]
     if files:
         lines += files_lines()
     if hooks:
