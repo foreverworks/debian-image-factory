@@ -40,11 +40,17 @@ Kinds: all that use lock entries. Brought by: core in M2 (a core has no lock ent
 nothing to ask there), oci in M3, incus in M4, installer and os in M5.
 
 It proves that every lock entry the image uses is installed at its locked version. An entry that is
-a Debian package is looked up in dpkg; any other entry is asked through its module's own version
-probe.
+a Debian package (it has an `apt` field) is looked up in dpkg; any other entry is asked through its
+module's own version probe, a command run in the image whose output must be the locked version. For
+`builtin:node-tarball` that is `<prefix>/bin/node --version`, which must print `v<version>`.
 
-PASSED when every entry is at its locked version. FAILED when one is missing or at another version.
-It reports one test, named like the check.
+An entry that nothing installs is not probed: the Node.js release keyring (the entry a `signed_by`
+names) is a trust root `fetch` used to verify the signed checksums, so it is listed as passed with the
+note "trust root, not installed". An entry with no module and no `apt` field is used by the image's
+own hooks, which the check cannot see; it is listed as passed with a note saying so.
+
+PASSED when every entry is at its locked version. FAILED when one is missing or at another version,
+naming the entry, the command and what it printed. It reports one test per entry.
 
 ## no-machine-identity
 
@@ -61,7 +67,17 @@ PASSED when every test passes, FAILED when any fails; it never warns. The tests 
   so the first boot creates the identity.
 - `no-dbus-machine-id`: there is no `/var/lib/dbus/machine-id`.
 - `no-ssh-host-keys`: there are no SSH host keys (`/etc/ssh/ssh_host_*`).
-- `no-private-keys`: no file matches the patterns of private keys and tokens.
+- `no-private-keys`: no file holds a private key block or a credential token. The key block is the
+  `-----BEGIN ... PRIVATE KEY-----` header at the start of a line, followed by the key's own first
+  line. The tokens are the shapes with a fixed, documented prefix and length: GitHub (`ghp_`, `gho_`,
+  `ghu_`, `ghs_`, `ghr_`, `github_pat_`), AWS access key IDs (`AKIA`, `ASIA`; AWS's own sample ending
+  in `EXAMPLE` is ignored), Slack (`xoxb-`, `xoxp-`, `xoxa-`, `xoxr-`, `xoxs-`, `xapp-`), npm (`npm_`),
+  PyPI (`pypi-AgEIcHlwaS5vcmc`) and GitLab (`glpat-`). Plain files are searched wherever they are,
+  `/usr/share/doc`, `/usr/share/man` and `/usr/share/info` included; only compressed documentation
+  there (`.gz`, `.bz2`, `.xz`, `.zst`) is left alone, since no text can be read from its bytes.
+  Executables are not searched for tokens (programs carry sample strings; Debian's own `gh` holds
+  one), only for key blocks. A failure names the file and the kind of token with a redacted form
+  (`ghp_…(40 characters)`), never the token.
 - `no-random-seed`: there is no saved random seed, which would make two clones start from the
   same entropy.
 - `no-cloud-init-state`: there is no cloud-init instance state, so cloud-init runs as a first boot

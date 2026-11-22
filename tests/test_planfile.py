@@ -93,7 +93,7 @@ class PlanFileTest(FetchCase):
     def test_every_image_field_is_checked(self) -> None:
         for key in (
             "kind", "parent", "identity", "parent_identity", "recipe", "apt_sources", "request", "packages",
-            "inputs", "modules", "params", "checks", "state",
+            "inputs", "modules", "trust", "params", "checks", "state",
         ):  # fmt: skip
             self.failing(lambda d, key=key: obj(d, "images", "core").pop(key), rf"images\.core\.{key} is missing")  # type: ignore[misc]  # bound per key
         self.failing(lambda d: obj(d, "images").update(core=[]), r"images\.core must be an object")
@@ -102,6 +102,28 @@ class PlanFileTest(FetchCase):
         self.failing(lambda d: obj(d, "images", "core").update(checks=[1]), r"images\.core\.checks\[0\] must be")
         self.failing(lambda d: obj(d, "images", "core").update(modules={}), r"images\.core\.modules must be a list")
         self.failing(lambda d: obj(d, "images", "core").update(params=[]), r"images\.core\.params must be an object")
+        self.failing(lambda d: obj(d, "images", "core").update(trust=[]), r"images\.core\.trust must be an object")
+        self.failing(
+            lambda d: obj(d, "images", "core").update(trust={"a": 3}), r"images\.core\.trust\.a must be an object"
+        )
+        self.failing(
+            lambda d: obj(d, "images", "core").update(trust={"a": {"sums_url": "https://x.example/s"}}),
+            r"images\.core\.trust\.a\.signed_by is missing",
+        )
+        self.failing(
+            lambda d: obj(d, "images", "core").update(trust={"a": {"signed_by": "k", "url": "https://x.example/s"}}),
+            r"images\.core\.trust\.a has fields \['url'\]",
+        )
+        self.failing(
+            lambda d: obj(d, "images", "core").update(
+                trust={"a": {"signed_by": "k", "sums_sig_url": "https://x.example/s"}}
+            ),
+            r"sums_sig_url needs a sums_url",
+        )
+        self.failing(
+            lambda d: obj(d, "images", "core").update(trust={"a": {"signed_by": 3}}),
+            r"images\.core\.trust\.a\.signed_by must be non-empty text",
+        )
         self.failing(lambda d: obj(d, "images", "core").update(parent=4), r"images\.core\.parent must be")
 
     def test_packages_are_three_texts(self) -> None:

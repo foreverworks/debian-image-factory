@@ -37,6 +37,7 @@ class ExampleLockTest(unittest.TestCase):
         data = example_lock_data()
         del data["debian_snapshot"]
         del entry_of(data, "node-26")["used_by"]
+        entry_of(data, "node-release-keys")["module"] = None
         with self.assertRaises(input_lock.LockError) as caught:
             lockrules.check(data, example_definition())
         self.assertEqual(len(str(caught.exception).splitlines()), 2)
@@ -49,7 +50,7 @@ class EntryRulesTest(unittest.TestCase):
     def test_a_normal_entry_without_used_by_fails(self) -> None:
         data = example_lock_data()
         del entry_of(data, "node-26")["used_by"]
-        found = problems_of(data)
+        found = [line for line in problems_of(data) if "builtin:node-tarball" not in line]
         self.assertEqual(len(found), 1)
         self.assertIn("inputs.node-26: no used_by: name the images that install it", found[0])
 
@@ -78,12 +79,13 @@ class EntryRulesTest(unittest.TestCase):
     def test_a_null_module_is_the_images_own_hooks(self) -> None:
         data = example_lock_data()
         entry_of(data, "node-26")["module"] = None
+        entry_of(data, "node-release-keys")["module"] = None
         self.assertEqual(problems_of(data), [])
 
     def test_used_by_naming_an_unknown_image_fails_through_input_lock(self) -> None:
         data = example_lock_data()
         entry_of(data, "node-26")["used_by"] = ["ghost"]
-        found = problems_of(data)
+        found = [line for line in problems_of(data) if "builtin:node-tarball" not in line and "signed_by" not in line]
         self.assertEqual(len(found), 1)
         self.assertIn("inputs.node-26.used_by names ['ghost'], which are not among", found[0])
 

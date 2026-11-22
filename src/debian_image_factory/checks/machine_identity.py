@@ -43,7 +43,8 @@ def machine_id_problem(member: Member | None, content: bytes | None) -> str | No
 
 
 def no_machine_identity(members: Sequence[Member], contents: Mapping[str, bytes], key_files: Sequence[str]) -> Result:
-    """`key_files` are the regular files `scan_tarball` found holding a private key block."""
+    """`key_files` are what `scan_tarball` found holding a private key block or a credential token (the
+    token itself is never named: its file, kind and a redacted form are)."""
     by_path = {member.path: member for member in members}
     passed: list[str] = []
     failed: list[str] = []

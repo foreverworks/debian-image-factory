@@ -18,7 +18,9 @@ MAX_WANTED: Final = 32 * 1024 * 1024
 HITS_LIMIT: Final = 20
 
 DOC_TREES: Final = ("/usr/share/doc/", "/usr/share/man/", "/usr/share/info/")
-"""Packages' own documentation, where a key block in a file is an example, not a leaked key: not searched."""
+COMPRESSED_DOCS: Final = (".gz", ".bz2", ".xz", ".zst")
+"""Packages' own documentation, compressed: bytes that no key block or token can be read from, and so not
+searched. A plain file in the same trees is searched like any other: a key left in `/usr/share/doc` is a key."""
 
 type Kind = Literal["file", "dir", "symlink", "hardlink", "other"]
 
@@ -44,7 +46,8 @@ class Scan:
     contents: Mapping[str, bytes]
     """The files asked for, by path (absent when the tarball has none, or it is not a regular file)."""
     key_files: tuple[str, ...]
-    """Regular files holding a private key block, sorted, outside the documentation trees."""
+    """Regular files holding a private key block or a credential token, sorted, but for the compressed
+    documentation files. A token is named `<path> (<kind>: <redacted>)`, never shown."""
     needle_hits: tuple[Hit, ...]
     """Where the needle was found, in archive order, at most HITS_LIMIT."""
 
@@ -111,7 +114,7 @@ def scan_tarball(path: Path, wanted: frozenset[str], needle: str | None, keys: b
                     stream = [contents[member.path]]
                 else:
                     stream = chunks_of(handle)
-                search_keys = keys and not member.path.startswith(DOC_TREES)
+                search_keys = keys and not (member.path.startswith(DOC_TREES) and member.path.endswith(COMPRESSED_DOCS))
                 if needle_bytes is None and not search_keys:
                     continue
                 found = scanning.scan(stream, needle_bytes, search_keys)
@@ -119,4 +122,5 @@ def scan_tarball(path: Path, wanted: frozenset[str], needle: str | None, keys: b
                 hit("content", member.path)
             if found.key:
                 key_files.append(member.path)
+            key_files.extend(f"{member.path} ({token.kind}: {token.redacted})" for token in found.tokens)
     return Scan(tuple(members), contents, tuple(sorted(key_files)), tuple(hits))

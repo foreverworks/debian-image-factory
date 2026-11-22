@@ -97,6 +97,10 @@ class FailingTest(unittest.TestCase):
         found = run([], keys=["/root/.ssh/id_rsa", "/srv/key.pem"])
         self.assertEqual(found.failed, ("no-private-keys: /root/.ssh/id_rsa", "no-private-keys: /srv/key.pem"))
 
+    def test_tokens_are_named_as_the_scan_reports_them(self) -> None:
+        found = run([], keys=["/root/.npmrc (npm token: npm_…(40 characters))"])
+        self.assertEqual(found.failed, ("no-private-keys: /root/.npmrc (npm token: npm_…(40 characters))",))
+
     def test_random_seeds(self) -> None:
         found = run([file("/var/lib/systemd/random-seed"), file("/var/lib/urandom/random-seed")])
         self.assertEqual(self.failed(found), ["no-random-seed", "no-random-seed"])

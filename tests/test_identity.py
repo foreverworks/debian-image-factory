@@ -279,8 +279,8 @@ class DefinitionRowsTest(IdentityCase):
         self.assertNotEqual(text, example_text() + EXTRA)
         self.assertEqual(self.changed_by_definition(text), ["node-26", "node-child"])
 
-    def test_a_module_gaining_a_key_does_the_same(self) -> None:
-        text = (example_text() + EXTRA).replace('prefix = "/usr/local"', 'prefix = "/usr/local"\nlinks = false')
+    def test_a_module_changing_a_key_does_the_same(self) -> None:
+        text = (example_text() + EXTRA).replace('prefix = "/usr/local"', 'prefix = "/opt/node"')
         self.assertEqual(self.changed_by_definition(text), ["node-26", "node-child"])
 
     def test_a_modules_use_change_does_the_same(self) -> None:

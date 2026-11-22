@@ -258,6 +258,16 @@ class DocumentTest(unittest.TestCase):
         self.assertEqual(node["identity"], self.inputs["node-26"].identity)
         self.assertEqual(node["parent_identity"], self.inputs["oci-base"].identity)
         self.assertEqual(node["modules"], ["node"])
+        self.assertEqual(
+            node["trust"],
+            {
+                "node-26": {
+                    "signed_by": "node-release-keys",
+                    "sums_url": "https://nodejs.org/dist/v26.13.1/SHASUMS256.txt.asc",
+                }
+            },
+        )
+        self.assertEqual(found["core"]["trust"], {})
         self.assertIsNone(found["core"]["parent"])
         self.assertIsNone(found["core"]["parent_identity"])
 

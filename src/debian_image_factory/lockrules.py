@@ -7,24 +7,27 @@ only what needs the definition:
 - every entry names its images in `used_by` (optional in input-lock, required here), except the
   reserved entries, which name none;
 - `module`, when set, names a module the definition declares;
+- an entry's `signed_by` keyring is `used_by` every image the entry is: the keyring is a trust root `fetch`
+  reads for each of them, and the plan of an image carries it;
+- an image that uses a `builtin:node-tarball` module has exactly one release tarball entry (told by its
+  rendered url) among the module's entries, and that entry has `signed_by` and `sums_url`
+  (`nodejs.tarball_problems`);
 - `debian_snapshot` is present;
 - the baseline snapshot, when an image's `apt_sources` points at it, is the reserved entry
   `debian-baseline`: its `version` is the snapshot ID and it pins the debian archive's `InRelease`
   for the suite at that ID by sha256 (input-lock 0.1 has no top-level field for a second snapshot).
 
-Pure functions over the lock's data and a parsed definition. `SNAPSHOT_ID` and `entry_problems`
-come from `input_lock.lock`, outside the package's `__all__`: the pinned version is what they are
-read from, and a test fails if a new release moves them.
+Pure functions over the lock's data and a parsed definition.
 """
 
 from collections.abc import Mapping
 from typing import Final, cast
 
 import input_lock
-from input_lock import Entry, JsonValue, Lock
-from input_lock.lock import SNAPSHOT_ID
-from input_lock.lock import entry_problems as entry_format_problems
+from input_lock import SNAPSHOT_ID, Entry, JsonValue, Lock
+from input_lock import entry_problems as entry_format_problems
 
+from . import nodejs
 from .definition import Definition, Param
 
 FACTORY_ENTRY: Final = "debian-image-factory"
@@ -78,6 +81,53 @@ def entry_problems(name: str, entry: Entry, definition: Definition) -> list[str]
     return found
 
 
+def signer_problems(inputs: Mapping[str, Entry]) -> list[str]:
+    """Every keyring a `signed_by` names is used by every image the signed entry is."""
+    found: list[str] = []
+    for name, entry in sorted(inputs.items()):
+        signer = entry.get("signed_by")
+        keyring = inputs.get(signer) if isinstance(signer, str) else None
+        if keyring is None:
+            continue  # input-lock names a signed_by that is not an entry
+        missing = sorted(set(input_lock.used_by(entry) or []) - set(input_lock.used_by(keyring) or []))
+        if missing:
+            found.append(
+                f"inputs.{name}.signed_by names {signer}, whose used_by lacks {missing}: "
+                "the keyring is a trust root that each of those images' plans carries"
+            )
+    return found
+
+
+def module_problems(inputs: Mapping[str, Entry], definition: Definition) -> list[str]:
+    """What the modules need of the entries an image gives them: for `builtin:node-tarball`, one signed
+    release tarball per image. `inputs` are entries input-lock found well formed."""
+    found: list[str] = []
+    for module_name, module in sorted(definition.modules.items()):
+        if module.use != nodejs.MODULE:
+            continue
+        for image in sorted(definition.images):
+            urls: dict[str, str] = {}
+            signed: dict[str, bool] = {}
+            for name, entry in sorted(inputs.items()):
+                if (
+                    name in RESERVED
+                    or module_of(entry) != module_name
+                    or image not in (input_lock.used_by(entry) or [])
+                ):
+                    continue
+                try:
+                    urls[name] = input_lock.render_url(entry)
+                except ValueError:
+                    continue  # input-lock names the placeholder it lacks
+                signed[name] = "signed_by" in entry and "sums_url" in entry
+            if urls:
+                found.extend(
+                    f"images.{image}: module {module_name} ({module.use}): {problem}"
+                    for problem in nodejs.tarball_problems(urls, signed)
+                )
+    return found
+
+
 def problems(data: JsonValue, definition: Definition) -> list[str]:
     """Every way `data` is not a lock this definition can build from; [] when it is one."""
     found = input_lock.problems(data, images=definition.images)
@@ -87,10 +137,15 @@ def problems(data: JsonValue, definition: Definition) -> list[str]:
         found.append("debian_snapshot is required: the build snapshot (`lock snapshot --latest` writes it)")
     inputs = data.get("inputs")
     if isinstance(inputs, dict):
+        well_formed: dict[str, Entry] = {}
         for name, raw in sorted(inputs.items()):
             if isinstance(raw, dict) and not entry_format_problems(name, raw):
                 # input-lock found this entry well formed, so its fields are strings, lists of names or null
-                found.extend(entry_problems(name, cast(Entry, raw), definition))
+                entry = cast(Entry, raw)
+                well_formed[name] = entry
+                found.extend(entry_problems(name, entry, definition))
+        found.extend(signer_problems(well_formed))
+        found.extend(module_problems(well_formed, definition))
         if needs_baseline(definition) and BASELINE_ENTRY not in inputs:
             users = sorted(name for name, image in definition.images.items() if image.apt_sources != "live")
             found.append(
