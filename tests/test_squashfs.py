@@ -21,7 +21,7 @@ from debian_image_factory.checks.tarball import Hit, Member
 from debian_image_factory.squashfs import Entry, SquashfsError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "squashfs"
-LISTED = ("tree-gzip", "tree-uncompressed", "bigblock", "bigdir", "xattrs", "xattrs-added", "scan")
+LISTED = ("tree-gzip", "tree-uncompressed", "bigblock", "bigdir", "xattrs", "xattrs-added", "scan", "incus-root")
 NEEDLE = "20261121T004329Z"
 KEY_FILES = ("/root/id", "/srv/key", "/usr/share/doc/ssh/example")
 

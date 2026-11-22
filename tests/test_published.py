@@ -248,6 +248,89 @@ class ParseRecordsTest(unittest.TestCase):
         self.assertEqual(len(parse_envelopes("\n" + prov() + "\n\n")), 1)
 
 
+class AncestorsTest(unittest.TestCase):
+    """The images a build descends from, read from its provenance's resolved dependencies."""
+
+    def ancestors(self, dependencies: object) -> tuple[tuple[str, str], ...]:
+        statement_ = {
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [{"name": NAME, "digest": {"sha256": DIGEST}}],
+            "predicateType": PROVENANCE_PREDICATE,
+            "predicate": {
+                "buildDefinition": {
+                    "externalParameters": {"image": "node-26"},
+                    "internalParameters": {"identity": IDENTITY},
+                    "resolvedDependencies": dependencies,
+                },
+                "runDetails": {"builder": {"id": "https://example.com/builder"}, "metadata": {}},
+            },
+        }
+        body = {
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": base64.b64encode(json.dumps(statement_).encode()).decode(),
+            "signatures": [],
+        }
+        (record,) = parse_envelopes(json.dumps(body) + "\n")
+        assert record.build is not None
+        return record.build.ancestors
+
+    def test_the_parent_then_each_ancestor_are_kept_in_order(self) -> None:
+        got = self.ancestors(
+            [
+                {"name": "parent: incus-app", "digest": {"sha256": "11" * 32}},
+                {"name": "ancestor: incus-base", "digest": {"sha256": "22" * 32}},
+                {"name": "ancestor: core", "digest": {"sha256": "33" * 32}},
+            ]
+        )
+        self.assertEqual(got, (("incus-app", "11" * 32), ("incus-base", "22" * 32), ("core", "33" * 32)))
+
+    def test_the_order_of_the_file_is_the_order_returned_not_a_sorted_one(self) -> None:
+        got = self.ancestors(
+            [
+                {"name": "parent: zzz", "digest": {"sha256": "ff" * 32}},
+                {"name": "ancestor: aaa", "digest": {"sha256": "00" * 32}},
+            ]
+        )
+        self.assertEqual([name for name, _ in got], ["zzz", "aaa"])
+
+    def test_other_dependencies_are_ignored_whatever_their_shape(self) -> None:
+        got = self.ancestors(
+            [
+                {"uri": "git+https://example.com/images@" + "9a" * 20, "digest": {"gitCommit": "9a" * 20}},
+                {"name": "lock.json", "digest": {"sha256": "44" * 32}},
+                {"name": "recipe of node-26", "digest": {"sha256": "not checked"}},
+                {"name": "parent:no-space", "digest": {"sha256": "bad"}},
+                {"name": 7},
+                "text",
+                None,
+                {"name": "parent: core", "digest": {"sha256": "55" * 32}},
+            ]
+        )
+        self.assertEqual(got, (("core", "55" * 32),))
+
+    def test_a_name_with_a_colon_in_the_image_is_kept_whole(self) -> None:
+        got = self.ancestors([{"name": "parent: a: b", "digest": {"sha256": "66" * 32}}])
+        self.assertEqual(got, (("a: b", "66" * 32),))
+
+    def test_no_dependencies_or_not_a_list_mean_no_ancestors(self) -> None:
+        values: list[object] = [[], None, {}, "parent: core", 3]
+        for value in values:
+            self.assertEqual(self.ancestors(value), (), repr(value))
+
+    def test_an_ancestor_with_a_malformed_digest_is_a_malformed_record(self) -> None:
+        bad: list[object] = [
+            {"name": "parent: core"},
+            {"name": "parent: core", "digest": "55" * 32},
+            {"name": "parent: core", "digest": {"sha256": "short"}},
+            {"name": "parent: core", "digest": {"sha256": "AB" * 32}},
+            {"name": "ancestor: core", "digest": {"sha256": 5}},
+            {"name": "ancestor: core", "digest": {"sha512": "55" * 32}},
+        ]
+        for dependency in bad:
+            with self.assertRaisesRegex(RecordsError, "has no sha256 digest"):
+                self.ancestors([{"name": "parent: ok", "digest": {"sha256": "11" * 32}}, dependency])
+
+
 class NamesTest(unittest.TestCase):
     def test_artifact_name_has_the_designed_shape(self) -> None:
         self.assertEqual(NAME, f"node-26-trixie-amd64-{IDENTITY[:16]}-{DIGEST[:12]}.tar.gz")
