@@ -58,9 +58,11 @@ def write_image(
     *,
     ancestors: Sequence[tuple[str, str]] = (),
     packages: Sequence[Package] = BASE,
+    removed: Sequence[str] | None = (),
 ) -> Image:
     """The image's two files and its records (provenance naming `ancestors`, nearest first as (image, sha256),
-    and an SBOM of `packages`) into `out`."""
+    recording `removed` as the paths its build took from the parent unless None, and an SBOM of `packages`)
+    into `out`."""
     meta = metadata_of(image, identity)
     fingerprint = hashlib.sha256(meta + rootfs).hexdigest()
     names = incus.names(image, "trixie", "amd64", identity, fingerprint)
@@ -82,7 +84,8 @@ def write_image(
             {"image": image},
             dependencies,
             "https://example.com/builder",
-            internal_parameters={"identity": identity},
+            internal_parameters={"identity": identity}
+            | ({} if removed is None else {"removedFromParent": [str(path) for path in removed]}),
             metadata={"finishedOn": "2026-11-21T02:19:41Z"},
         ),
     )

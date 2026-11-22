@@ -305,9 +305,9 @@ def provenance_statement(
     download of `entries`, `recipe of <image>`, each InRelease, the builder image, then the ancestors,
     nearest first: `parent: <name>` for the first, `ancestor: <name>` for each further one up to core (none
     for core itself). `reason` is recorded only when there is one. Every value is the caller's: nothing here
-    reads a clock, an environment or a file. `removed_from_parent`, for an OS root or an installer kit, is
-    the parent's paths the artifact does not hold, sorted (internalParameters `removedFromParent`), which
-    `ancestry` holds the artifact to."""
+    reads a clock, an environment or a file. `removed_from_parent`, for an Incus image, an OS root or an
+    installer kit, is the parent's paths the artifact does not hold, sorted (internalParameters
+    `removedFromParent`), which `ancestry` holds the artifact to."""
     external: dict[str, JsonValue] = {"image": image}
     dependencies: list[ResourceDescriptor] = []
     if definition is not None:

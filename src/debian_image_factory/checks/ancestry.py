@@ -1,6 +1,6 @@
 """`ancestry` (DESIGN 11), pure. For an OCI image: the parent's layers are the image's first layers, by
-digest. For a root filesystem (an OS root, an installer's initrd): the parent's files are all there, but
-for those the child says it removed. For an Incus image, the parent's files are all in the image.
+digest. For a root filesystem (an Incus image's squashfs, an OS root, an installer's initrd): the parent's files
+are all there, but for those the child's provenance says its build removed.
 
 A core parent is one tarball, which an OCI child carries byte for byte as its first layer, so the layer's
 digest is the tarball's sha256. An OCI parent's own layers, in order, are the start of the child's. The
@@ -8,7 +8,6 @@ child's manifest also names the parent in `org.opencontainers.image.base.digest`
 parent artifact's digest. Digests are sha256 in hex throughout.
 """
 
-import fnmatch
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -21,26 +20,6 @@ LAYERS_FIRST = "parent-layers-are-first"
 BASE_DIGEST = "base-digest-annotation"
 PARENT_FILES = "parent-files-present"
 PROVENANCE_PARENT = "provenance-names-parent"
-
-REMOVED_BY_EVERY_BUILD: Final = (
-    "/etc/hostname",
-    "/etc/resolv.conf",
-    "/etc/ssh/ssh_host_*",
-    "/var/lib/dbus/machine-id",
-    "/var/lib/systemd/random-seed",
-    "/var/lib/urandom/random-seed",
-    "/var/lib/cloud/instance",
-    "/var/lib/cloud/instances",
-    "/var/lib/cloud/instances/*",
-    "/var/log/*",
-    "/var/cache/ldconfig/aux-cache",
-    "/var/lib/apt/lists/*",
-    "/var/cache/apt/*",
-    "/run/*",
-    "/tmp/*",
-)
-"""What every child build removes from its root, whatever its parent held (build/core.py's identity lines
-and build/oci.py's cleanup): a parent path that matches is not missing from its child."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,23 +83,6 @@ def names_parent(named: str | None, parent_digest: str) -> tuple[list[str], list
     return [], [f"{PROVENANCE_PARENT}: the provenance names {named or 'no parent'}, the parent is {parent_digest}"]
 
 
-def removed_by_every_build(path: str) -> bool:
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in REMOVED_BY_EVERY_BUILD)
-
-
-def files_ancestry(
-    members: Sequence[Member], parent_members: Sequence[Member], parent_digest: str, named: str | None
-) -> CheckOutcome:
-    """`members` are the image's, `parent_members` its parent artifact's (digest `parent_digest`), and
-    `named` the parent digest the image's provenance names. Every path of the parent is in the image,
-    but what every build removes; the provenance names this parent."""
-    ok_files, bad_files = parent_files(
-        members, parent_members, removed_by_every_build, lambda path: f"{path} is the parent's and not the image's"
-    )
-    ok_named, bad_named = names_parent(named, parent_digest)
-    return result(ANCESTRY, [*ok_files, *ok_named], failed=[*bad_files, *bad_named])
-
-
 # ---- root filesystems ------------------------------------------------------------------------------
 
 ROOT: Final = "/"
@@ -141,11 +103,11 @@ def root_ancestry(
     named: str | None,
     recorded: Collection[str] | str,
 ) -> CheckOutcome:
-    """`ancestry` of an OS root or an installer kit's root. `parent` is the parent artifact's members (or why
-    they cannot be read), `named` the parent digest the child's provenance names, `recorded` the paths its
-    provenance says the build removed from the parent (or why they cannot be read). Every path of the parent
-    is in the child but for the recorded ones, and the provenance names this parent. A parent that is not
-    here is not run, never passed."""
+    """`ancestry` of a root filesystem built on a parent's: an OS root, an installer kit's root, an Incus
+    image's. `parent` is the parent artifact's members (or why they cannot be read), `named` the parent
+    digest the child's provenance names, `recorded` the paths its provenance says the build removed from the
+    parent (or why they cannot be read). Every path of the parent is in the child but for the recorded ones,
+    and the provenance names this parent. A parent that is not here is not run, never passed."""
     if isinstance(parent, str):
         return NotRun(ANCESTRY, parent)
     if isinstance(recorded, str):

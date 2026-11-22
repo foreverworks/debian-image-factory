@@ -51,7 +51,7 @@ from .. import (
 )
 from .. import plan as plan_module
 from .. import tools as builder
-from ..checks import ancestry, kit, tarball
+from ..checks import ancestry, kit, squashfs_scan, tarball
 from ..identity import FileFact
 from ..published import artifact_name, records_name_for
 from . import boot, booting, core, initrd, parents
@@ -869,7 +869,7 @@ def build_incus(run: Run, image: str, scratch: Path, built: Mapping[str, parents
         pull=pull_parent,
         scratch=scratch / "pulled",
     )
-    ancestry = parents.incus_lineage(parent)
+    lineage = parents.incus_lineage(parent)
     work = scratch / "factory"
     prepare_incus_work(work, run, image, parent)
     started = now()
@@ -902,8 +902,9 @@ def build_incus(run: Run, image: str, scratch: Path, built: Mapping[str, parents
         builder_=run.builder_,
         started=started,
         finished=finished,
-        ancestors=ancestry,
+        ancestors=lineage,
         files=[(names.metadata, sha256_file(metadata)), (names.rootfs, sha256_file(rootfs))],
+        removed_from_parent=incus_removed_from(parent, rootfs),
     )
     # Records first, as for core; then the rootfs, and the metadata tarball last: it is the file that
     # makes the pair an artifact (fileartifacts), so an interrupted build never leaves a half.
@@ -964,6 +965,18 @@ def removed_from(parent: parents.ParentArtifact, packed: Path, kind: str) -> lis
     if parent.path is None:
         raise commands.Failed(f"the parent {parent.image} of a booting image has no artifact file here")
     return ancestry.removed_from_parent(root_members(packed, kind), root_members(parent.path, parent.kind))
+
+
+def incus_removed_from(parent: parents.ParentArtifact, rootfs: Path) -> list[str]:
+    """The parent's paths an Incus image's new root does not hold, for its provenance (DESIGN 11, `ancestry`):
+    the parent is a core tarball or another Incus image's squashfs."""
+    if parent.path is None:
+        raise commands.Failed(f"the parent {parent.image} of an Incus image has no artifact file here")
+    if parent.kind == "incus":
+        held = squashfs_scan.scan_squashfs(parents.incus_rootfs(parent), frozenset(), None, False).members
+    else:
+        held = root_members(parent.path, parent.kind)
+    return ancestry.removed_from_parent(squashfs_scan.scan_squashfs(rootfs, frozenset(), None, False).members, held)
 
 
 def build_booting(run: Run, image: str, scratch: Path, built: Mapping[str, parents.ParentArtifact]) -> Result:

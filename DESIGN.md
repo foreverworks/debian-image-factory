@@ -1237,7 +1237,7 @@ Each runs on the exact artifact and emits one test result.
 | `no-machine-identity` | all | `/etc/machine-id` absent, empty or `uninitialized`; no `/var/lib/dbus/machine-id`, no SSH host keys, no private key block and no credential token of a documented shape (GitHub, AWS, Slack, npm, PyPI, GitLab) in any plain file, `/usr/share/doc`, `man` and `info` included (only compressed documentation is skipped; executables are searched for keys only), no random seed, no cloud-init instance state, no `/etc/hostname` content, no `/etc/resolv.conf` file (a symlink, as systemd-resolved makes, is fine). For OCI the files are those of the layers merged with whiteouts applied, except that a private key or token in a layer counts even when a later layer deletes it, because it still ships |
 | `two-clones` | all | two instances of the artifact share no identity: machine IDs and SSH host keys, where present, differ. Core and OCI run as two rootless containers, Incus as two instances, the installer and OS as two VMs (the boots of `installer-boot` and `os-boot`, run at once), each reporting its machine ID and host key digest |
 | `sbom-complete` | all | the SBOM lists every installed package and locked input |
-| `ancestry` | children | the parent's filesystem is the base: for OCI, the parent's layers are the first layers by digest; elsewhere, the parent's files are present unless the child's own records say it removed them (an OS root's and an installer kit's provenance lists them, `removedFromParent`), and for those and Incus the provenance names the parent |
+| `ancestry` | children | the parent's filesystem is the base: for OCI, the parent's layers are the first layers by digest; elsewhere (Incus, OS root, installer kit), the parent's files are present unless the child's own records say it removed them (its provenance lists them, `removedFromParent`, written by the build from a comparison of the two roots), and the provenance names the parent |
 | `same-resolution` | core | a second resolution of the same lock gives the same package set |
 | `no-build-snapshot` | all | the build snapshot ID appears nowhere in the artifact's bytes, including the build-time `file://` source, which the `apt_sources` rendering replaces before the image is packed; skipped with a note when the baseline ID equals the build ID. A release test also builds one package set at two different build snapshots and compares the bytes |
 | `byte-equal` | all, optional | two builds from the same inputs give the same digest; WARNED, never FAILED, when they differ |
@@ -1345,7 +1345,8 @@ identities of the images that install it, and nothing else.
   core, `incus-base` and an Incus child of it from the example definition, runs every check on all
   three (the Incus checks inside the VM), then requires each image's checks to pass with
   `verify --require-checks`: the boot contract for the base and for a child. The `incus` workflow
-  runs that tier by hand on a runner with KVM.
+  runs that tier by hand on a runner with KVM, and a release tag runs it after the integration tier,
+  gating the publish.
 
 **Where it runs.** While the repository is private, its jobs run on the project's own self-hosted
 runners, picked by capability label (`debian-image-factory`, and `debian-image-factory-kvm` for jobs

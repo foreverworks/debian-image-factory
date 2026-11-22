@@ -526,8 +526,12 @@ def run_incus_checks(
                 else:
                     held = scan_parent(parent, frozenset())
                     outcomes.append(
-                        ancestry.files_ancestry(
-                            scanned.members, held.members, parent.digest, parent_named(records_text, found.digest)
+                        ancestry.root_ancestry(
+                            scanned.members,
+                            held.members,
+                            parent.digest,
+                            parent_named(records_text, found.digest),
+                            recorded_removals(records_text, found.digest),
                         )
                     )
             elif name in hosted:
@@ -574,8 +578,9 @@ def parent_candidates(parent: str, plan: Plan, others: Sequence[Found], given: S
 def root_parent(
     found: Found, plan: Plan, others: Sequence[Found], given: Sequence[Path]
 ) -> tuple[str, tuple[tarball.Member, ...]] | str:
-    """The parent's root filesystem for `ancestry` of an OS root or an installer kit, or why it is not
-    available. When there are several artifacts of the parent image, the one the plan names is taken."""
+    """The parent's root filesystem for `ancestry` of an OS root or an installer kit (an Incus image's is
+    `file_parent`'s), or why it is not available. When there are several artifacts of the parent image,
+    the one the plan names is taken."""
     parent = plan["images"][found.image]["parent"]
     if parent is None:
         return "the image has no parent"

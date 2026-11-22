@@ -49,7 +49,7 @@ jobs:
   integration:
     name: integration tier
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    # the tier boots images in QEMU (installer, OS): a runner with KVM, as boot.yml uses
+    # the tier boots images in QEMU (installer, OS, and Incus's VM): a runner with KVM, as boot.yml uses
     runs-on: ${{ github.event.repository.private && 'debian-image-factory-kvm' || 'ubuntu-26.04' }}
     timeout-minutes: 120
     steps:
@@ -79,6 +79,10 @@ jobs:
 
       - name: Integration tests (docker and the network)
         run: scripts/test integration
+
+      # the boot contract of the Incus kind on an Incus host in a VM (scripts/incus-vm), as incus.yml runs it
+      - name: The Incus boot contract for a base and a child
+        run: scripts/builder build && scripts/test incus
 
   publish:
     name: publish the release

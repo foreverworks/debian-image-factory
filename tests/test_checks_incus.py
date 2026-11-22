@@ -15,10 +15,9 @@ from unittest import mock
 
 import input_lock.records as rec
 
-from debian_image_factory import records
-from debian_image_factory.checks import ancestry, command, incus_host
+from debian_image_factory import records, squashfs
+from debian_image_factory.checks import command, incus_host
 from debian_image_factory.checks.model import INCUS_BOOT, TWO_CLONES, CheckOutcome, NotRun, Result
-from debian_image_factory.checks.tarball import Member
 from debian_image_factory.commands import Sources
 from debian_image_factory.planfile import Plan, parse_plan
 from tests.support import incusimage
@@ -749,94 +748,6 @@ class TwoClonesTest(Scratch):
         self.assertEqual(self.host.instances, {})
 
 
-# ---- ancestry by files ------------------------------------------------------------------------------
-
-
-def files(*paths: str) -> list[Member]:
-    return [Member(path, "file", "") for path in paths]
-
-
-PARENT = "11" * 32
-OTHER = "22" * 32
-
-
-class FilesAncestryTest(unittest.TestCase):
-    def test_an_image_that_holds_every_parent_file_and_names_the_parent_passes(self) -> None:
-        got = ran(ancestry.files_ancestry(files("/etc/a", "/etc/b", "/new"), files("/etc/a", "/etc/b"), PARENT, PARENT))
-        self.assertEqual((got.check, got.outcome), ("ancestry", "PASSED"))
-        self.assertEqual(got.passed, ("parent-files-present", "provenance-names-parent"))
-
-    def test_a_parent_file_the_image_lacks_fails_and_is_named(self) -> None:
-        got = ran(ancestry.files_ancestry(files("/etc/a"), files("/etc/a", "/etc/b", "/usr/c"), PARENT, PARENT))
-        self.assertEqual(got.outcome, "FAILED")
-        self.assertEqual(
-            got.failed,
-            (
-                "parent-files-present: /etc/b is the parent's and not the image's",
-                "parent-files-present: /usr/c is the parent's and not the image's",
-            ),
-        )
-        self.assertEqual(got.passed, ("provenance-names-parent",))
-
-    def test_a_long_list_of_missing_files_is_cut_and_counted(self) -> None:
-        parent = files(*(f"/data/{number:03d}" for number in range(40)))
-        got = ran(ancestry.files_ancestry([], parent, PARENT, PARENT))
-        self.assertEqual(len(got.failed), 26)
-        self.assertEqual(got.failed[-1], "parent-files-present: and 15 more")
-
-    def test_what_every_build_removes_is_not_missing(self) -> None:
-        removed = [
-            "/etc/hostname",
-            "/etc/resolv.conf",
-            "/etc/ssh/ssh_host_ed25519_key",
-            "/etc/ssh/ssh_host_rsa_key.pub",
-            "/var/lib/dbus/machine-id",
-            "/var/lib/systemd/random-seed",
-            "/var/lib/urandom/random-seed",
-            "/var/lib/cloud/instance",
-            "/var/lib/cloud/instances",
-            "/var/lib/cloud/instances/i-1/user-data.txt",
-            "/var/log/dpkg.log",
-            "/var/log/apt/term.log",
-            "/var/cache/ldconfig/aux-cache",
-            "/var/lib/apt/lists/deb.example_dists_Release",
-            "/var/cache/apt/pkgcache.bin",
-            "/run/lock",
-            "/tmp/scratch",
-        ]
-        got = ran(ancestry.files_ancestry(files("/etc/a"), files("/etc/a", *removed), PARENT, PARENT))
-        self.assertEqual(got.outcome, "PASSED", got.failed)
-
-    def test_what_looks_like_a_removed_path_but_is_not_one_is_missing(self) -> None:
-        paths = [
-            "/etc/hostname.d",
-            "/var/lib/cloud/data",
-            "/etc/ssh/sshd_config",
-            "/var/lib/apt/extended_states",
-            "/var/cache/debconf/config.dat",
-        ]
-        got = ran(ancestry.files_ancestry([], files(*paths), PARENT, PARENT))
-        self.assertEqual(len(got.failed), len(paths), got.failed)
-
-    def test_a_provenance_that_names_another_parent_or_none_fails(self) -> None:
-        for named, text in ((OTHER, OTHER), (None, "no parent")):
-            got = ran(ancestry.files_ancestry(files("/a"), files("/a"), PARENT, named))
-            self.assertEqual(got.outcome, "FAILED")
-            self.assertEqual(
-                got.failed,
-                (f"provenance-names-parent: the provenance names {text}, the parent is {PARENT}",),
-            )
-            self.assertEqual(got.passed, ("parent-files-present",))
-
-    def test_both_failing_at_once_lists_both(self) -> None:
-        got = ran(ancestry.files_ancestry([], files("/a"), PARENT, None))
-        self.assertEqual(len(got.failed), 2)
-        self.assertEqual(got.passed, ())
-
-    def test_no_parent_files_at_all_is_fine(self) -> None:
-        self.assertEqual(ran(ancestry.files_ancestry(files("/a"), [], PARENT, PARENT)).outcome, "PASSED")
-
-
 # ---- test on an output directory --------------------------------------------------------------------
 
 
@@ -1154,8 +1065,43 @@ class AncestryRunTest(Base):
         self.out.app.rootfs.unlink()
         status, printed = self.out.run(self.host, ["ancestry"])
         self.assertEqual(status, 1, printed)
-        self.assertIn("parent-files-present: /var/lib/dpkg/status is the parent's and not the image's", printed)
+        self.assertIn(
+            f"parent-files-present: /var/lib/dpkg/status is in the parent sha256:{self.out.base.fingerprint[:12]}, "
+            "not here and not recorded as removed",
+            printed,
+        )
         self.assertEqual(self.out.results(child)["ancestry"], "FAILED")
+
+    def test_a_child_whose_provenance_records_what_it_removed_passes(self) -> None:
+        parent_paths = {entry.path for entry in squashfs.entries(io.BytesIO(self.out.root_fs))}
+        child_paths = {entry.path for entry in squashfs.entries(io.BytesIO(incusimage.fixture("scan")))}
+        child = write_image(
+            self.out.root,
+            "incus-app",
+            APP_IDENTITY,
+            incusimage.fixture("scan"),
+            ancestors=[("incus-base", self.out.base.fingerprint)],
+            removed=sorted(parent_paths - child_paths - {"/"}),
+        )
+        self.out.app.metadata.unlink()
+        self.out.app.rootfs.unlink()
+        status, printed = self.out.run(self.host, ["ancestry"])
+        self.assertEqual(status, 0, printed)
+        self.assertEqual(self.out.results(child)["ancestry"], "PASSED")
+
+    def test_a_child_whose_provenance_records_no_removals_fails(self) -> None:
+        again = write_image(
+            self.out.root,
+            "incus-app",
+            APP_IDENTITY,
+            self.out.root_fs,
+            ancestors=[("incus-base", self.out.base.fingerprint)],
+            removed=None,
+        )
+        self.assertEqual(again.fingerprint, self.out.app.fingerprint)
+        status, printed = self.out.run(self.host, ["ancestry"])
+        self.assertEqual(status, 1, printed)
+        self.assertIn("parent-files-present: the provenance records no removedFromParent list", printed)
 
     def test_a_provenance_that_names_another_parent_fails(self) -> None:
         # the same pair again, with a provenance that names another digest for its parent

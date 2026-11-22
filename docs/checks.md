@@ -180,7 +180,8 @@ the digest the plan names for it (`artifact`), which is all the first layer need
 in OUT cannot be compared layer by layer, and neither can an image whose plan names no artifact for its
 parent: the check is then not run, with that reason, and never passed.
 
-For an OS root and an installer kit (whose root is its initrd) it reports two tests:
+For an Incus image (whose root is its squashfs), an OS root and an installer kit (whose root is its
+initrd) it reports two tests:
 
 - `parent-files-present`: every path of the parent's root is in the child's, except the ones the child's
   provenance records as removed (`removedFromParent`, docs/build-type-v1.md). The build writes that list
@@ -189,8 +190,10 @@ For an OS root and an installer kit (whose root is its initrd) it reports two te
   whose bytes no longer match its record fails, and so does one without the record.
 - `provenance-names-parent`: the child's provenance names this parent by digest.
 
-The parent is the plan's parent image in OUT, or a file given with `test --parent`; when there are
-several, the one the plan names.
+For an OS root and an installer kit, the parent is the plan's parent image in OUT, or a file given with
+`test --parent`; when there are several, the one the plan names. For an Incus image it is the parent
+image's one artifact in OUT (a core tarball or an Incus image); with none, or several, the check is not
+run.
 
 ## same-resolution
 
