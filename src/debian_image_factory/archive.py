@@ -196,6 +196,19 @@ def fetch_suite(
     return SuiteIndex(base_url, dist, in_release, tuple(sorted(files.items())))
 
 
+def _publish(target: Path, data: bytes) -> None:
+    """Write `data` to `target` so no reader ever sees a partial file (temp file in the same directory, then rename)."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=target.parent, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(temp, target)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
+
+
 def lay_out_mirror(indices: Sequence[SuiteIndex], dest: Path) -> Path:
     """Write a partial mirror apt can read through `file:` sources, and return `dest`.
 
@@ -203,16 +216,17 @@ def lay_out_mirror(indices: Sequence[SuiteIndex], dest: Path) -> Path:
     path, compressed as fetched and uncompressed (apt's `file:` method reads the plain paths, never
     by-hash ones). apt verifies the signature and the hashes itself. A source line is
     `deb [signed-by=<keyring>] file:<dest>/<archive-name> <dist> <component>`.
+
+    Several processes or threads may lay out the same `dest` at once (it is shared by snapshot): every
+    file is published by an atomic rename, so a concurrent writer or reader sees a whole file or none,
+    never a half-written one, and files with the same name always carry the same verified bytes.
     """
     for index in indices:
         dist_dir = dest / archive_name(index.base_url) / "dists" / index.dist
         in_release = dist_dir / "InRelease"
         if in_release.exists() and in_release.read_bytes() != index.release:
             raise ArchiveError(f"two different InRelease files for {dist_dir}")
-        dist_dir.mkdir(parents=True, exist_ok=True)
-        in_release.write_bytes(index.release)
+        _publish(in_release, index.release)
         for path, local in index.files:
-            target = dist_dir / path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(local, target)
+            _publish(dist_dir / path, local.read_bytes())
     return dest

@@ -212,6 +212,34 @@ class ArchiveTest(unittest.TestCase):
             listing = json.loads((self.fixture.listings_dir / f"{name}.json").read_text())
             self.assertEqual(listing, {"_comment": "", "result": {name: list(self.fixture.listed_ids)}})
 
+    def test_concurrent_layouts_of_one_mirror(self) -> None:
+        import concurrent.futures
+        import threading
+
+        main = self.fetch("debian", 0)
+        security = self.fetch("debian-security", 1)
+        mirror = self.tmp / "shared-mirror"
+        start = threading.Barrier(8)
+
+        def lay_out(_: int) -> None:
+            start.wait()
+            for _round in range(5):
+                archive.lay_out_mirror([main, security], mirror)
+
+        with concurrent.futures.ThreadPoolExecutor(8) as pool:
+            for result in pool.map(lay_out, range(8)):
+                self.assertIsNone(result)
+        self.assertEqual((mirror / "debian/dists/trixie/InRelease").read_bytes(), main.release)
+        self.assertEqual([p for p in mirror.rglob(".tmp-*")], [])
+
+    def test_different_in_release_is_refused(self) -> None:
+        main = self.fetch("debian", 0)
+        mirror = self.tmp / "other-mirror"
+        archive.lay_out_mirror([main], mirror)
+        changed = archive.SuiteIndex(main.base_url, main.dist, main.release + b"x", main.files)
+        with self.assertRaises(archive.ArchiveError):
+            archive.lay_out_mirror([changed], mirror)
+
     def test_mirror_layout_and_apt_accepts_it(self) -> None:
         security = self.fetch("debian-security", 1)
         main = self.fetch("debian", 0)

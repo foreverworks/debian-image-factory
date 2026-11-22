@@ -2,6 +2,8 @@
 
 ## 0.6.3 (not yet tagged)
 
+- Laying out the shared mirror publishes every file by an atomic rename, so parallel builds and test processes sharing one
+  snapshot directory no longer fail with "two different InRelease files" when one reads a file another is writing.
 - The boot checks' guest writes its `FACTORY-REPORT` line to its own serial port (`ttyS1`) instead of the console, where a
   kernel message printed at the same moment could split the line and fail a boot that had worked. A boot with no
   report now names QEMU's exit status and any half-written report line.
