@@ -5,6 +5,7 @@ images made from a squashfs fixture."""
 import hashlib
 import io
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -302,6 +303,64 @@ class CompareClonesTest(unittest.TestCase):
         got = incus_host.compare_clones(first, second, ssh=True)
         self.assertEqual(len(got.failed), 2)
         self.assertEqual(len(got.passed), 4)
+
+
+class BootWaitScriptTest(unittest.TestCase):
+    """The script runs in the instance; here under sh, with systemctl and cloud-init stubs on PATH."""
+
+    def wait(self, script: str, states: Sequence[str], *, cloud_init: bool = True) -> list[str]:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            calls = root / "calls"
+            (root / "states").write_text("".join(f"{state}\n" for state in states))
+            stubs = {
+                # each call without --wait answers the next state, and the last one from then on
+                "systemctl": f"""echo "systemctl $*" >> {calls}
+[ "$2" = --wait ] && {{ echo offline; exit 1; }}
+state=$(head -n1 {root}/states)
+[ "$(wc -l < {root}/states)" -gt 1 ] && sed -i 1d {root}/states
+echo "$state"
+""",
+                "cloud-init": f'echo "cloud-init $*" >> {calls}\n',
+            }
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for name, body in stubs.items():
+                if name == "cloud-init" and not cloud_init:
+                    continue
+                stub = bin_dir / name
+                stub.write_text("#!/bin/sh\n" + body)
+                stub.chmod(0o755)
+            # only the stubs and the tools the script and the stubs use, so a cloud-init on this host is not found
+            for tool in ("grep", "head", "sed", "wc", "sleep"):
+                found = shutil.which(tool)
+                assert found is not None, tool
+                (bin_dir / tool).symlink_to(found)
+            env = {"PATH": str(bin_dir)}
+            subprocess.run([shutil.which("sh") or "/bin/sh", "-c", script], env=env, check=True, timeout=30)
+            return calls.read_text().splitlines()
+
+    def test_an_offline_answer_is_asked_again_until_the_boot_finished_then_cloud_init_is_awaited(self) -> None:
+        calls = self.wait(incus_host.CLONE_WAIT_SCRIPT, ["offline", "starting", "degraded"])
+        self.assertEqual(
+            calls,
+            [
+                "systemctl is-system-running --wait",
+                "systemctl is-system-running",
+                "systemctl is-system-running",
+                "systemctl is-system-running",
+                "cloud-init status --wait",
+            ],
+        )
+
+    def test_without_cloud_init_the_wait_ends_with_systemd(self) -> None:
+        calls = self.wait(incus_host.CLONE_WAIT_SCRIPT, ["running"], cloud_init=False)
+        self.assertEqual(calls[-1], "systemctl is-system-running")
+
+    def test_incus_boot_waits_for_systemd_only(self) -> None:
+        calls = self.wait(incus_host.SYSTEMD_WAIT_SCRIPT, ["offline", "running"])
+        self.assertNotIn("cloud-init status --wait", calls)
+        self.assertEqual(calls.count("systemctl is-system-running"), 2)
 
 
 class BootTestsTest(unittest.TestCase):

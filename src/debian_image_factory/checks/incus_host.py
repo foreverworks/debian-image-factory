@@ -242,9 +242,26 @@ def in_instance(
     return run(["exec", name, "--", "sh", "-c", script], timeout)
 
 
-def wait_for_boot(name: str, run: Runner) -> None:
-    """Until systemd says the boot ended, whatever it says (a degraded system has booted too)."""
-    in_instance(name, "systemctl is-system-running --wait >/dev/null 2>&1; true", run, BOOT_TIMEOUT)
+SYSTEMD_WAIT_SCRIPT: Final = (
+    "systemctl is-system-running --wait >/dev/null 2>&1; "
+    "until systemctl is-system-running 2>/dev/null | grep -Eqx 'running|degraded|maintenance|stopping'; "
+    "do sleep 1; done; true"
+)
+"""Until systemd says the boot ended, whatever it says (a degraded system has booted too). An exec that
+comes before systemd answers on its bus gets "offline" at once, so the state is asked again until it is
+a finished one."""
+
+CLONE_WAIT_SCRIPT: Final = (
+    SYSTEMD_WAIT_SCRIPT.removesuffix("true")
+    + "if command -v cloud-init >/dev/null; then cloud-init status --wait >/dev/null 2>&1; fi; true"
+)
+"""The same, then until cloud-init is done: its ssh module may delete and regenerate the host keys at
+first boot, so a clone is read only after it."""
+
+
+def wait_for_boot(name: str, run: Runner, *, cloud_init: bool) -> None:
+    """incus-boot waits for systemd only: read_boot then awaits cloud-init and judges a hang itself."""
+    in_instance(name, CLONE_WAIT_SCRIPT if cloud_init else SYSTEMD_WAIT_SCRIPT, run, BOOT_TIMEOUT)
 
 
 def addresses(name: str, run: Runner, sleep: Sleep) -> tuple[str, ...]:
@@ -300,7 +317,7 @@ def incus_boot(imported: Imported, run: Runner = run_incus, sleep: Sleep = time.
                     if restarted.returncode != 0:
                         failed.append(f"{prefix}-{stage}-restart: {restarted.stderr.strip()}")
                         continue
-                wait_for_boot(name, run)
+                wait_for_boot(name, run, cloud_init=False)
                 ok, warn, bad = boot_tests(f"{prefix}-{stage}", token, read_boot(name, run, sleep))
                 passed += ok
                 warned += warn
@@ -322,7 +339,7 @@ def two_clones(imported: Imported, *, ssh: bool, run: Runner = run_incus) -> Che
             if problem is not None:
                 return NotRun(TWO_CLONES, problem)
         for name in names:
-            wait_for_boot(name, run)
+            wait_for_boot(name, run, cloud_init=True)
             read = in_instance(name, READ_SCRIPT, run)
             if read.returncode != 0:
                 return NotRun(TWO_CLONES, f"an instance could not be read: {read.stderr.strip()}")
