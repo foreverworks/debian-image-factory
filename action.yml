@@ -231,6 +231,7 @@ runs:
         DEFINITION: ${{ inputs.definition }}
         LOCK: ${{ inputs.lock }}
         MIRROR: ${{ inputs.mirror }}
+        AGAINST: ${{ inputs.against }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
@@ -238,6 +239,14 @@ runs:
         builder=$("$ACTION_PATH/scripts/builder" build)
         args=(build "$PLAN" --out "$WORK/out" --lock "$LOCK" --definition "$DEFINITION" --builder-image "$builder")
         [ -z "$MIRROR" ] || args+=(--mirror "$MIRROR")
+        # A night on which only Node moved builds the child and reuses its parent from where it is published: the
+        # parent is read from the targets that can hold one (a release holds none). A registry is read with the
+        # Docker config, so log in in an earlier step.
+        while read -r target; do
+          case "$target" in
+            oci://* | dir://*) args+=(--parents "$target") ;;
+          esac
+        done <<< "$AGAINST"
         python3 "$PYZ" "${args[@]}"
 
     # QEMU uses /dev/kvm when it opens and emulates otherwise, slower and with the same result (DESIGN 12). The
@@ -252,12 +261,20 @@ runs:
         WORK: ${{ steps.setup.outputs.work }}
         DEFINITION: ${{ inputs.definition }}
         MIRROR: ${{ inputs.mirror }}
+        AGAINST: ${{ inputs.against }}
         VM: ${{ steps.summary.outputs.vm }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
         args=(test "$WORK/out" --definition "$DEFINITION" --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
         [ -z "$MIRROR" ] || args+=(--mirror "$MIRROR")
+        # The parent of an image this run built on a reused parent is read from a registry that holds it (its
+        # layers, for the ancestry check): test takes registries only.
+        while read -r target; do
+          case "$target" in
+            oci://*) args+=(--parents "$target") ;;
+          esac
+        done <<< "$AGAINST"
         if [ "$VM" = true ]; then
           args+=(--vm-image "$("$ACTION_PATH/scripts/builder" vm)")
         fi

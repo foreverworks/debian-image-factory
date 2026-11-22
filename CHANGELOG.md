@@ -10,3 +10,5 @@
 - `test --parents oci://REGISTRY/REPOSITORY` reads the manifest of an OCI parent that is not in `out/`, so the
   `ancestry` check of its child runs.
 - `plan.json` names each artifact as `sha256:<hex>`.
+- The Action's `build` step passes each `oci://` and `dir://` line of `against` as `--parents`, and its `test` step
+  each `oci://` line, so a night on which only a child moved finds its reused parent.

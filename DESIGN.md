@@ -1503,7 +1503,7 @@ tier):
 | `lock` | `lock.json` | the lock, whose `debian-image-factory` entry names the release |
 | `params` | none | a JSON file of parameter values, `plan --params` |
 | `snapshot` | `lock` | `plan --snapshot`: `lock`, `latest` or an ID |
-| `against` | none | targets, one per line: `plan --against` each, and where `publish` writes |
+| `against` | none | targets, one per line: `plan --against` each, and where `publish` writes; `build` gets each `oci://` and `dir://` one as `--parents` and `test` each `oci://` one, so a parent that was reused is found where it is published (a `github-release://` target holds no parents) |
 | `steps` | `plan,fetch,build,test` | the steps to run; `plan` is required and `build` needs `fetch`, `test` needs `build` |
 | `publish` | `false` | `true` publishes what was built to the `against` targets (needs `build`) |
 | `sign` | `none` | `publish --sign` |
@@ -1523,7 +1523,8 @@ the Docker config (9.1), so the workflow logs in before the Action with `docker/
 commit with its version as a comment, as the example shows; on ghcr.io the workflow's token with
 `packages: write` is enough. Publishing to a release needs `contents: write`; a job that only plans
 needs read access (`contents: read`, and `packages: read` for a ghcr.io package). Without them `plan`
-or `publish` fails with the registry's or GitHub's refusal, named in the error.
+or `publish` fails with the registry's or GitHub's refusal, named in the error. The `build` and `test` steps read a
+reused parent from a registry with the same Docker config, and need no token.
 
 **One run per image and target at a time.** Two runs that publish the same image to the same target
 race: both see `build`, both push, and on a registry without the referrers API both rewrite the tag

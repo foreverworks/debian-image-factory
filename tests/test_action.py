@@ -399,6 +399,97 @@ class InputChecksTest(unittest.TestCase):
         self.assertIn("publish is true or false, not 'yes'", self.run_setup(publish="yes").log)
 
 
+FAKE_FACTORY: Final = """\
+import json, os, sys
+argv = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(argv) + "\\n")
+if argv[0] == "plan":
+    with open(argv[argv.index("--out") + 1], "w", encoding="utf-8") as plan:
+        json.dump({"images": {"core": {"kind": "core", "state": "build"}}}, plan)
+"""
+
+
+class ParentsTest(unittest.TestCase):
+    """The build and test steps hand the targets of `against` that can hold a parent to the factory as --parents:
+    a night on which only Node moved builds the child while its parent is reused from the target."""
+
+    AGAINST: Final = (
+        "oci://ghcr.io/example/debian\n"
+        "\n"
+        "  oci://ghcr.io/example/{image}\n"
+        "dir:///srv/published\n"
+        "github-release://example/images@v1\n"
+        "\n"
+    )
+
+    def commands(self, against: str) -> dict[str, list[str]]:
+        """What each factory command was given, by its name, from a run of plan, fetch, build and test."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            factory = root / "factory.py"
+            factory.write_text(FAKE_FACTORY)
+            docker = root / "bin" / "docker"
+            docker.parent.mkdir()
+            docker.write_text("#!/bin/sh\nexit 0\n")  # the builder image is built by scripts/builder: stand-in
+            docker.chmod(0o755)
+            log = root / "calls.log"
+            env = {**support_env(), "PATH": f"{docker.parent}:{os.environ['PATH']}", "FAKE_LOG": str(log)}
+            result = run_action(
+                {"pyz": str(factory), "against": against},
+                scratch=root / "temp",
+                cwd=root,
+                env=env,
+                skip=("prerequisites",),
+                until="test",
+            )
+            self.assertTrue(result.ok, result.log)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+        return {call[0]: call for call in calls}
+
+    @staticmethod
+    def parents(call: list[str]) -> list[str]:
+        return [call[number + 1] for number, word in enumerate(call) if word == "--parents"]
+
+    def test_build_reads_parents_from_registries_and_directories_and_never_from_a_release(self) -> None:
+        self.assertEqual(
+            self.parents(self.commands(self.AGAINST)["build"]),
+            ["oci://ghcr.io/example/debian", "oci://ghcr.io/example/{image}", "dir:///srv/published"],
+        )
+
+    def test_test_reads_parents_from_registries_only(self) -> None:
+        self.assertEqual(
+            self.parents(self.commands(self.AGAINST)["test"]),
+            ["oci://ghcr.io/example/debian", "oci://ghcr.io/example/{image}"],
+        )
+
+    def test_plan_still_looks_every_target_up(self) -> None:
+        plan = self.commands(self.AGAINST)["plan"]
+        self.assertEqual(
+            [plan[number + 1] for number, word in enumerate(plan) if word == "--against"],
+            [
+                "oci://ghcr.io/example/debian",
+                "oci://ghcr.io/example/{image}",
+                "dir:///srv/published",
+                "github-release://example/images@v1",
+            ],
+        )
+
+    def test_a_target_with_no_parents_to_give_adds_no_flag(self) -> None:
+        for against in ("", "github-release://example/images@v1\n"):
+            with self.subTest(against=against):
+                found = self.commands(against)
+                self.assertEqual((self.parents(found["build"]), self.parents(found["test"])), ([], []))
+        self.assertEqual(self.parents(self.commands("dir:///srv/published")["test"]), [])
+
+    def test_the_token_still_reaches_only_plan_and_publish(self) -> None:
+        """A registry is read with the Docker config, so build and test need no token."""
+        steps = {step.id: step for step in action.read_steps()}
+        for name in ("build", "test"):
+            self.assertEqual(steps[name].env["AGAINST"], "${{ inputs.against }}")
+            self.assertNotIn("inputs.token", " ".join(steps[name].env.values()))
+
+
 class CleanupTest(unittest.TestCase):
     """keep-work false makes the last step remove the work directory, passed or failed; by default it stays."""
 

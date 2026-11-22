@@ -226,7 +226,9 @@ target.
 A night on which only Node moved builds only the Node images: their Debian-built parent is reused from the registry,
 so `test` does not find it in `out/`. `test out/ --parents oci://ghcr.io/example/debian` reads the parent's manifest
 from there, so the child's `ancestry` check runs and passes instead of staying unrun, which would leave the new
-image a candidate that `plan` keeps waiting on.
+image a candidate that `plan` keeps waiting on. In the GitHub Action, the `build` step passes every `oci://` and
+`dir://` target of `against` as `--parents`, and the `test` step every `oci://` one, so such a night needs nothing
+more from you; the registry is read with the Docker config, like `plan`'s.
 
 Published builds pile up, so `prune` clears them: `debian-image-factory prune --against
 oci://ghcr.io/example/debian --pin sha256:<digest> --dry-run` lists, for every image, the newest 5 good builds and
