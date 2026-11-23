@@ -84,7 +84,7 @@ position.
 
 This is SLSA Build L1 provenance: the factory writes it as part of the build, and it is complete and
 machine readable. It is not signed by the build platform, so it does not by itself prove that the
-build ran where it says. Envelopes are unsigned by default (`"signatures": []`); `--sign keyless`
+build ran where it says. Envelopes are unsigned by default (`"signatures": []`); from release 0.7.0, `--sign keyless`
 or `--sign key:<...>` adds a signature without changing any field described here. A CI platform that
 generates and signs its own attestation can add it beside this one, and that one carries whatever
 level the platform claims.

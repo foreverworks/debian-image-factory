@@ -6,9 +6,10 @@ actually changed, and carrying standard records of what is inside and how it was
 > **Status: every kind of image builds, tests and publishes, and a nightly loop rebuilds only what
 > changed.** The factory checks your lock and definition, resolves every image's exact package set
 > from a snapshot, tells you what would be built and why, and builds core, OCI, Incus, installer and
-> OS images with their SBOM, provenance and checks. It is pre-1.0: the first public release is
-> v0.6.3, and the interface may still change before 1.0. The full design is in [DESIGN.md](DESIGN.md).
-> If something here is unclear, please open an issue.
+> OS images with their SBOM, provenance and checks. The latest release is v0.6.3 and the interface
+> may still change before 1.0. The development branch adds record signing and parallel builds, for
+> release 0.7.0; where this page describes those, it says so. The full design is in
+> [DESIGN.md](DESIGN.md).
 
 ## The problem
 
@@ -51,7 +52,8 @@ same recipe can differ for reasons nobody wrote down.
 
   OCI images carry them in the registry, linked to the image; files carry them in a
   `<digest>.intoto.jsonl` beside them. Any tool that speaks these standards can read them. They are
-  unsigned unless you switch signing on (`publish --sign keyless` or `--sign key:<path>`, below).
+  unsigned unless you switch signing on (`publish --sign keyless` or `--sign key:<path>`, from release 0.7.0; see
+  below).
 - **No root needed.** Rootless Docker, or a Debian machine with user namespaces, is enough to build
   everything. Only the boot tests want KVM.
 
@@ -65,6 +67,47 @@ same recipe can differ for reasons nobody wrote down.
 
 If you only need one container image and the official `debian` image plus a Dockerfile serves you
 well, keep doing that. The factory pays off when you have several shapes, or need the records.
+
+## What you need first
+
+- **To plan** (`lock check`, `plan`): any Debian or Ubuntu machine with python3 3.13 or newer, `apt` and
+  `gpgv`, and network access to snapshot.debian.org.
+- **To build and test**: Docker, rootless is enough, and nothing from the network while it builds. The boot
+  checks of the Incus, installer and OS images want QEMU in a container and use KVM when `/dev/kvm`
+  opens.
+- **To publish**: a directory, a container registry you can push to, or a GitHub release, with the
+  credentials for it.
+- **Cost**: the factory is free ([MIT](LICENSE)) and needs no account. Your registry and your CI runners are
+  yours to pay for.
+
+## Try it
+
+The latest release, v0.6.3, is one file. Download it with its checksum, check it, and put it on your PATH as
+`debian-image-factory` (the commands below call it that; `python3 debian-image-factory-0.6.3.pyz` works too).
+The release also carries a Sigstore bundle, `debian-image-factory-0.6.3.pyz.sigstore.json`.
+
+```sh
+gh release download v0.6.3 -R foreverworks/debian-image-factory     # or take the three files from the release page
+sha256sum -c debian-image-factory-0.6.3.pyz.sha256                  # debian-image-factory-0.6.3.pyz: OK
+install -m 755 debian-image-factory-0.6.3.pyz ~/.local/bin/debian-image-factory
+git clone --branch v0.6.3 https://github.com/foreverworks/debian-image-factory && cd debian-image-factory/examples
+debian-image-factory lock check
+debian-image-factory plan > plan.json
+```
+
+`lock check` reports that the lock and the definition agree and that each snapshot ID is complete:
+
+```text
+lock.json and factory.toml agree: 6 images, 6 entries
+debian_snapshot 20261121T004329Z: completed; debian serves 20261120T203430Z, debian-security serves 20261121T004329Z
+inputs.debian-baseline 20261108T000000Z: completed; debian serves 20261107T205437Z, debian-security serves 20261107T192849Z
+```
+
+`plan.json` holds the six images of the example, a core, two OCI images, an Incus image, an installer and an OS
+image, each with its exact package set and identity. Nothing is published yet, so every image has the state
+`build`. Planning took about ten seconds here. Building all six took 5 minutes 16 seconds on a 16-CPU machine
+with the 228 packages already downloaded; a first run also downloads them. The commands for it are under
+"What using it will look like" below, run from `examples/`.
 
 ## How it works
 
@@ -168,17 +211,14 @@ debian-image-factory lock check          # the lock and the definition agree; sn
 debian-image-factory plan > plan.json    # every image's package set and identity, and what would be built
 ```
 
-Planning needs only python3 3.13 or newer, apt and gpgv, so any Debian or Ubuntu machine will do.
-[examples/](examples/) has a lock and a definition covering every kind; run the two commands there.
-Get `debian-image-factory-0.6.3.pyz` from the [v0.6.3 release](https://github.com/foreverworks/debian-image-factory/releases/tag/v0.6.3)
-(with its `.sha256` and its Sigstore bundle) and run it with `python3`; the commands here call it
-`debian-image-factory`. To run the source instead: `scripts/vendor-input-lock` once, then
+[examples/](examples/) has a lock and a definition covering every kind; the [v0.6.3 release](https://github.com/foreverworks/debian-image-factory/releases/tag/v0.6.3)
+is the `.pyz` named in "Try it" above. To run the source instead: `scripts/vendor-input-lock` once, then
 `PYTHONPATH=src:.vendor python3 -m debian_image_factory`.
 
-Then build the core image and check it:
+Then build the images and check them:
 
 ```sh
-scripts/builder build                      # the pinned builder image, from the factory's own snapshot
+../scripts/builder build                   # the pinned builder image, from the factory's own snapshot
 debian-image-factory fetch plan.json       # the indices, packages and inputs of the images that build, verified, in the cache
 debian-image-factory build plan.json --out out/    # every kind, offline, in the builder container
 debian-image-factory test out/             # each kind's checks, recorded beside the artifact
@@ -192,6 +232,12 @@ provenance, an SPDX SBOM and one test result per check. An OCI image lands as a 
 `<image>-<suite>-<arch>-<identity16>-<digest12>.oci`, an OCI image layout: its parent's layers (for
 core's child, core's tarball itself) and at most one layer of its own. Plan again with `--against
 dir:///srv/images` and the core you just published reads `reuse`.
+
+What you see on the example: `publish` copies core, the Incus image, the installer and the OS image, and says
+that the two OCI images publish only to `oci://` targets. In the second plan core reads `reuse`, the OCI images
+`build` (nothing holds them yet), and the Incus image, the installer and the OS image `wait`: `test` reported
+their boot checks as `not run` (no Incus host, and no boot image for QEMU, which `scripts/builder vm` builds),
+so they are still candidates. A candidate becomes a good build when its required checks have passed (the boot checks are described below), and the plan reuses good builds.
 
 To keep an image's exact inputs, `fetch plan.json --bundle` writes one `.inputs.tar` per image that
 builds, into `bundles/` beside the plan (or `--bundle-dir DIR`). It holds the signed indices, the
@@ -332,7 +378,7 @@ token to `plan` and `publish` and to no other step, and needs `contents: write` 
 put that token in a step's environment by itself, which is why the input exists.
 
 The inputs are `definition`, `lock`, `params`, `snapshot`, `against`, `steps` (default
-`plan,fetch,build,test`), `publish`, `sign` (`none`, `keyless` or `key:REF`; not `none` installs cosign 3.1.4, and `keyless` needs `id-token: write`), `mirror`, `jobs` (images built at a time, `build --jobs`; `sign` and `jobs` need factory 0.7.0 or newer, and the Action stops early with a message when your lock pins an older release), `token` (default the workflow's token) and
+`plan,fetch,build,test`), `publish`, `sign` (`none`, `keyless` or `key:REF`; not `none` installs cosign 3.1.4, and `keyless` needs `id-token: write`), `mirror`, `jobs` (images built at a time, `build --jobs`; `sign` and `jobs` need factory 0.7.0, not yet released, or newer, and the Action stops early with a message when your lock pins an older release), `token` (default the workflow's token) and
 `keep-work` (default `true`, so later steps can read the `plan` output; `false` removes the work directory,
 with the build output, when the run ends); the outputs are `changed`, `plan` (the path of
 `plan.json`) and `artifacts` (JSON of image to digest). The runner needs Docker to build, and `apt`
@@ -382,10 +428,11 @@ retained build can be rebuilt with snapshot.debian.org unreachable.
 
 **Do I need to trust the factory's builds?** You do not have to take its word. Every record names
 the lock digest, the snapshot indices, the recipe, the parent and the builder, so you can check an
-artifact against your own lock. Records are unsigned by default; Sigstore keyless signing in CI, or
-your own key, can be switched on without changing anything else (next question).
+artifact against your own lock. Records are unsigned by default; from release 0.7.0, Sigstore keyless
+signing in CI, or your own key, can be switched on without changing anything else (next question).
 
-**How do I sign records?** `publish --sign keyless` signs each record with Sigstore through the CI's OIDC
+**How do I sign records?** Signing is on the development branch and arrives with release 0.7.0; v0.6.3 accepts
+only `--sign none`. `publish --sign keyless` signs each record with Sigstore through the CI's OIDC
 identity (the job needs `permissions: id-token: write`; the signature goes to the public Rekor log), and
 `--sign key:<path or KMS URI>` signs with a key you hold, which is never sent to a log. Both call cosign
 3.1.4, which must be on PATH (the Action installs it when `sign` is not `none`). The factory never holds a
@@ -409,21 +456,28 @@ The architecture is part of every identity, so others can follow once someone ne
 **What language is it in?** Python 3.13 or newer, using only the standard library at run time, so
 it runs on the python3 Debian already ships. It is distributed as a single `.pyz` file.
 
-## Status and roadmap
+## Status
 
-The first milestone brought the lock and definition checks, identities, `lock check`, `lock
-snapshot`, `lock baseline`, `plan` and a pinned builder image. The second builds core: `fetch` and
-its partial mirror, an offline core build that gives the same bytes from the same inputs, its SBOM
-and provenance, the core checks behind `test`, and the `dir://` target. The third builds OCI images
-with one added layer per child, publishes them to registries with their records as referrers, and
-adds `verify`. The fourth builds Incus images and their children, boots them on an Incus host in
-`test`, and publishes files to GitHub releases. The fifth builds installer kits and OS root filesystems
-and boots both in QEMU in `test`, with the `deb` and `file` modules, feature flags and `lock checksums`.
-The sixth closes the nightly loop: `plan --snapshot latest --against` every kind of target, the
-GitHub Action, `prune` with its retention rule, inputs bundles and offline replay, `verify --pull`, and
-the optional `byte-equal` check; a night with no relevant upload builds nothing. The first public
-release is v0.6.3. Version 1.0, with docs for strangers, comes next. The milestones are in
-[DESIGN.md, section 14](DESIGN.md#14-milestones).
+Built and in the latest release, v0.6.3:
+
+- the lock and definition checks, identities, `lock check`, `lock snapshot`, `lock baseline`, `lock
+  checksums` and `plan`, with the pinned builder image;
+- `fetch` and its partial mirror, and offline builds of core (the same bytes from the same inputs), OCI
+  images (one added layer per child), Incus images, installer kits and OS root filesystems, each with its
+  SBOM and provenance;
+- `test` with every kind's checks, including the boot checks in an Incus host or QEMU;
+- `publish` to a directory, a registry (records as referrers) and a GitHub release, and `verify`;
+- the nightly loop: `plan --snapshot latest --against` every kind of target, the GitHub Action, `prune`
+  with its retention rule, inputs bundles and offline replay, and the optional `byte-equal` check. A night
+  with no relevant upload builds nothing.
+
+Built on the development branch, for release 0.7.0: record signing and parallel builds (`build --jobs`).
+
+Planned: the `.pyz` pinning the published builder image, `--builder host`, zstd compression, and for 1.0 a
+full example repository, once a real deployment has run every kind through its own promotion. What is
+planned and why is in [DESIGN.md, section 14](DESIGN.md#14-what-is-built-and-what-is-planned).
+
+## Running the tests
 
 `scripts/test static`, `scripts/test unit` and `scripts/test integration` run the same checks CI
 does (the last needs Docker and network access to snapshot.debian.org); `scripts/test boot` runs only
@@ -435,7 +489,11 @@ of workers and `-j 1` runs serially. Each worker's
 log is in `dist/test-<tier>/`, and the failures of all of them are printed together at the end.
 `--shard I/N` runs one slice of a tier, which is how CI spreads the integration tier over several
 runners, and `--measure` refreshes `tests/durations.json`, the timings the schedule is built from.
-Issues and questions are welcome.
+
+## Where to ask
+
+Open an [issue](https://github.com/foreverworks/debian-image-factory/issues) for a question, a bug or something unclear in
+this page. Report a security problem privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License
 

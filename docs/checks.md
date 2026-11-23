@@ -46,12 +46,11 @@ Each layer is read once, as a stream, so a large image never sits in memory. The
 the three checks use the loaded image by its ID, and it is removed by that ID afterwards. When docker is
 missing, unusable, or refuses the layout, those checks are listed as not run and write no record.
 
-Where a check below names a later milestone (M3 brings oci, M4 incus, M5 the installer and the OS
-image), the factory does not build that kind yet, and its checks arrive with it.
+Each check below starts with the kinds of image it applies to.
 
 ## package-set
 
-Kinds: all. Brought by: core in M2, oci in M3, incus in M4, installer and os in M5.
+Kinds: all.
 
 It proves that the image holds exactly the packages the plan resolved. The check reads the image's
 own dpkg status and compares it with the plan's resolved set, so a package that was pulled in
@@ -62,8 +61,7 @@ packages. It reports one test, named like the check.
 
 ## locked-inputs
 
-Kinds: all that use lock entries. Brought by: core in M2 (a core has no lock entries, so it has
-nothing to ask there), oci in M3, incus in M4, installer and os in M5.
+Kinds: all that use lock entries (a core has none, so it has nothing to ask there).
 
 It proves that every lock entry the image uses is installed at its locked version. An entry that is
 a Debian package (it has an `apt` field) is looked up in dpkg; any other entry is asked through its
@@ -83,7 +81,7 @@ as the entrypoint, and its exit status and output are what the check compares.
 
 ## no-machine-identity
 
-Kinds: all. Brought by: core in M2, oci in M3, incus in M4, installer and os in M5; the same tests apply to every kind.
+Kinds: all, with the same tests for every kind.
 
 It proves that the artifact carries nothing that belongs to the machine that built it. An image
 with a machine ID, SSH host keys or a hostname baked in would give every clone the same identity,
@@ -117,7 +115,7 @@ PASSED when every test passes, FAILED when any fails; it never warns. The tests 
 
 ## two-clones
 
-Kinds: all. Brought by: core and oci in M3, incus in M4, installer and os in M5.
+Kinds: all.
 
 It proves that two instances of the artifact share no identity: their machine IDs and SSH host
 keys, where they have them, differ. A core and an OCI image run as two rootless containers, an Incus
@@ -144,7 +142,7 @@ in a VM).
 
 ## sbom-complete
 
-Kinds: all. Brought by: core in M2, oci in M3, incus in M4, installer and os in M5.
+Kinds: all.
 
 It proves that the SBOM lists every installed package and every locked input, so the SBOM can be
 trusted as the inventory. The check compares the SBOM's packages with the image's dpkg status and
@@ -158,7 +156,7 @@ the kit tarball first, then `vmlinuz` and `initrd.img`, by the sha256 of the byt
 
 ## ancestry
 
-Kinds: children. Brought by: oci in M3, incus in M4, installer and os in M5.
+Kinds: children.
 
 It proves that a child really is built on its parent. For an OCI image, the parent's layers are
 the first layers, by digest. For the other kinds, the parent's files are present unless the child's
@@ -199,7 +197,7 @@ run.
 
 ## same-resolution
 
-Kinds: core. Brought by: core in M2.
+Kinds: core.
 
 It proves that the resolution is repeatable: a second resolution of the same lock, against the same
 snapshot, gives the same package set. If it did not, the identity would name something that cannot
@@ -209,7 +207,7 @@ PASSED when the two sets are equal. FAILED when they differ.
 
 ## no-build-snapshot
 
-Kinds: all. Brought by: core in M2, oci in M3, incus in M4, installer and os in M5.
+Kinds: all.
 
 It proves that the build snapshot's timestamp appears nowhere in the artifact's bytes, including the
 build-time `file://` source, which the `apt_sources` rendering replaces before the image is packed.
@@ -221,7 +219,7 @@ PASSED when the ID is found nowhere. FAILED when it is found, naming the files.
 
 ## byte-equal
 
-Kinds: all, optional. Brought by: M6.
+Kinds: all, optional.
 
 It reports whether two builds from the same inputs give the same digest. A difference is not a
 fault of the artifact, so this check never fails: it is WARNED when the digests differ, and the
@@ -240,7 +238,7 @@ was compared, not that it matched.
 
 ## oci-run
 
-Kinds: oci. Brought by: M3.
+Kinds: oci.
 
 It proves that the image runs under rootless Docker with its declared user and entrypoint, and that
 its `cmd` exits 0.
@@ -255,7 +253,7 @@ arguments, no network and standard input closed, which gives a shell or a REPL e
 
 ## incus-boot
 
-Kinds: incus. Brought by: M4.
+Kinds: incus.
 
 It proves that the image boots and is usable in an Incus host inside a virtual machine: cloud-init
 finishes through NoCloud from both `cloud-init.user-data` and the older `user.user-data`, creates the
@@ -274,7 +272,7 @@ datasource was NoCloud), `-user-created`, `-commands-ran` (a token written by `r
 
 ## installer-boot
 
-Kinds: installer. Brought by: M5.
+Kinds: installer.
 
 It proves that QEMU boots the kit from RAM to a serial marker, and that the running kernel is the
 packaged one.
@@ -284,16 +282,16 @@ PASSED when the marker appears with that kernel. FAILED otherwise.
 QEMU boots `vmlinuz` with `initrd.img` as the whole system and `console=ttyS0`. The guest reports
 through two systemd credentials passed as SMBIOS OEM strings: a unit that waits for the boot to finish
 and writes one `FACTORY-REPORT` line (running kernel, machine ID, SSH host key digest, system state) to
-a second serial port (`ttyS1`, apart from the console, so the kernel's messages cannot split the line), then
+a second serial port (`ttyS1`, apart from the console, so the kernel's messages cannot split the line; releases before 0.7.0 wrote to the console), then
 powers off, and a drop-in that makes `multi-user.target` want it. The artifact is
 never changed. The tests are `kit-json-matches-files` (the members are what kit.json lists),
-`report-arrived` and `running-kernel-is-the-kit-kernel`. A boot that does not report names why (QEMU's exit status, and whether a half-written report line
+`report-arrived` and `running-kernel-is-the-kit-kernel`. From release 0.7.0 a boot that does not report names why (QEMU's exit status, and whether a half-written report line
 reached the port) and the end of its console log, and the whole log is kept beside the kit as `<kit>.boot-<n>.serial.log`. The
 check is not run when docker or the boot image (`scripts/builder vm`, `test --vm-image`) is missing.
 
 ## os-boot
 
-Kinds: os. Brought by: M5.
+Kinds: os.
 
 It proves that the root filesystem boots as a system: the test harness lays it onto a scratch disk,
 QEMU boots it to multi-user, the installed and the running kernel match, and the first boot creates
