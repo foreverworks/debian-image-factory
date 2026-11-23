@@ -73,8 +73,7 @@ def second_resolution(
     service: str,
 ) -> tuple[Package, ...] | NotRun | str:
     """The package set of resolving core again from `<cache>/mirror/<debian ID>_<debian-security ID>`. A NotRun when
-    the mirror or
-    a tool is missing; a string when apt ran and could not resolve (the second resolution failed)."""
+    the mirror or a tool is missing; a string when apt ran and could not resolve (the second resolution failed)."""
     mirror = cache / "mirror" / stem(snapshots)
     if not mirror.is_dir():
         return NotRun(SAME_RESOLUTION, f"no fetched mirror at {mirror}: run fetch first")

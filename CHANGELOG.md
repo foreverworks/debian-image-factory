@@ -1,10 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 (2026-11-23)
 
 - The `debian` and `debian-security` archives are pinned separately, so a Debian security fix can be built with as
   soon as its own archive lists it, instead of after a later snapshot of the security archive (a median of 30
-  minutes, and 42 hours at the worst this autumn). A snapshot ID that an archive itself lists always serves itself
+  minutes, and 42 hours at the worst, 1 September to 23 November 2026). A snapshot ID that an archive itself lists always serves itself
   and is complete, so each archive's ID only has to be listed by that archive.
 - The lock has `debian_snapshots`, an exact ID per archive, which needs `"schema": 3` and input-lock 0.3.0 (the
   factory pins it now). `debian_snapshot`, one ID for both archives, is still read: each archive then serves the
@@ -24,7 +24,8 @@
   refused, so fetch again. The partial mirror is `<cache>/mirror/<debian ID>_<debian-security ID>/<archive>/`; what
   the builder sees, the artifacts' bytes and every identity are unchanged, and the engine revision does not move.
 - Provenance is written under [build type v2](docs/build-type-v2.md): `internalParameters.buildSnapshots` replaces
-  `buildSnapshot`, and each `InRelease` address carries its own archive's ID. `verify` accepts v1 and v2 records.
+  `buildSnapshot`, and each `InRelease` address carries its own archive's ID. `verify` accepts v1 and v2 records;
+  0.7.0 and earlier accept v1 only, so a verifier moves to 0.8.0 before it meets records 0.8.0 wrote.
 - `no-build-snapshot` looks for both build snapshot IDs. An ID equal to the baseline's still only warns, and the other
   ID is still searched.
 - `scripts/spike-core` takes `--debian ID --debian-security ID` as well as `--snapshot ID`.

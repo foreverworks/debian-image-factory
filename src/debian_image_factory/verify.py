@@ -51,8 +51,8 @@ from . import (
 
 BUILD_TYPE: Final = re.compile(re.escape(records.REPOSITORY) + r"/blob/v[0-9][0-9A-Za-z.+-]*/docs/build-type-v[12]\.md")
 """The `buildType` of any release of this factory, of either build type (v1 names one `buildSnapshot`, v2 a
-`buildSnapshots` per archive): the document names its release, so a verifier of one release still reads what
-another built."""
+`buildSnapshots` per archive): the document names its release, so a verifier reads what earlier
+releases built. A release that writes v2 needs a verifier that knows v2."""
 
 
 @dataclass(frozen=True, slots=True)

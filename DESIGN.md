@@ -4,7 +4,7 @@ Status: built, in v0.6.3 and later: the lock and definition checks, identities a
 core, OCI, Incus, installer and OS images with their records and checks; publishing to a directory, a
 registry and a GitHub release; `verify`; and the nightly loop (`plan --against`, `--snapshot latest`, the
 GitHub Action, `prune`, inputs bundles and offline replay). Built, in 0.7.0 and later:
-record signing (8.3) and parallel builds. Planned: the published builder pinned in the `.pyz` (5.4),
+record signing (8.3) and parallel builds; in 0.8.0 and later: one snapshot per archive (7.5). Planned: the published builder pinned in the `.pyz` (5.4),
 `--builder host`, zstd, and the rest of the 1.0 list in [section 14](#14-what-is-built-and-what-is-planned).
 This document is the design the factory follows and is revised as it changes. Written 2026-11-21; every version
 this document names was read that day at the source listed in
@@ -843,8 +843,8 @@ snapshot.debian.org keeps separate timelines per archive (`debian`, `debian-secu
 them at `https://snapshot.debian.org/mr/timestamp/?archive=<name>`. A build pins one ID for each
 archive, and each ID is one the archive **itself lists**. That is enough to build from: a listed ID
 always serves itself, and the service writes a snapshot's listing row and its whole import in one
-database transaction (the `import_from_filesystem` function of the `snapshot` script in the
-service's own repository), so a listed snapshot is complete. A file that has not reached a mirror
+database transaction (the `import_from_filesystem` function of the `snapshot` script in
+https://salsa.debian.org/snapshot-team/snapshot, read on 2026-11-23), so a listed snapshot is complete. A file that has not reached a mirror
 yet is a 404 or a checksum mismatch, so the build stops instead of building something else. Nothing
 has to be listed after it, so a security fix can be built with as soon as its own archive lists it,
 and the two archives never wait for each other.
@@ -875,7 +875,8 @@ listing holds is confirmed with a narrow read, `/mr/timestamp/?archive=<name>&af
 (both bounds inclusive): it answers `{"result": {"<name>": ["<ID>"]}}` when the archive lists the ID
 and `{"result": {}}` when it does not. The URL is one no cache has seen, so the answer is current.
 An ID older than the newest listed one needs no read, because a cached listing is never ahead of the
-service. An ID that is still not listed is refused: `archive debian-security does not list <ID>`.
+service. An ID that is still not listed is refused: `<ID> is not listed by archive debian-security (its newest
+is <ID>)`.
 The narrow read is at the network edge (`listings.py`); `snapshots.py` stays pure.
 
 - `lock snapshot --latest` writes `debian_snapshots` with the newest ID each archive lists, and
@@ -1735,7 +1736,7 @@ Each runs on the exact artifact and emits one test result.
 | `sbom-complete` | all | the SBOM lists every installed package and locked input |
 | `ancestry` | children | the parent's filesystem is the base: for OCI, the parent's layers are the first layers by digest; elsewhere (Incus, OS root, installer kit), the parent's files are present unless the child's own records say it removed them (its provenance lists them, `removedFromParent`, written by the build from a comparison of the two roots), and the provenance names the parent |
 | `same-resolution` | core | a second resolution of the same lock gives the same package set |
-| `no-build-snapshot` | all | no build snapshot ID, of either archive, appears in the artifact's bytes (an ID the baseline shares cannot be told apart and only warns; the other is still searched), including the build-time `file://` source, which the `apt_sources` rendering replaces before the image is packed; skipped with a note when the baseline ID equals the build ID. A release test also builds one package set at two different build snapshots and compares the bytes |
+| `no-build-snapshot` | all | no build snapshot ID, of either archive, appears in the artifact's bytes (an ID the baseline shares cannot be told apart and only warns; the other is still searched), including the build-time `file://` source, which the `apt_sources` rendering replaces before the image is packed. A release test also builds one package set at two different build snapshots and compares the bytes |
 | `byte-equal` | all, optional | two builds from the same inputs, in one run (so of one definition commit, which an OCI manifest's annotations carry, 5.3), give the same digest; WARNED, never FAILED, when they differ. The check does not rebuild: it compares the artifact with the same image built again, an output directory given with `test --twin DIR` (the artifacts whose names agree up to the digest). Without a twin it is not run, and an image lists it in its `[checks]` to require one. Proof that a kind is byte-equal is the release tier's integration tests (section 12), which build twice from one plan |
 | `oci-run` | oci | runs under rootless Docker: declared user and entrypoint, `cmd` exits 0 |
 | `incus-boot` | incus | in an Incus host inside a VM: cloud-init finishes through NoCloud from both `cloud-init.user-data` and `user.user-data`, creates the user, runs commands, an IPv4 address is reported, all still true after a restart |
@@ -2076,7 +2077,7 @@ has to show.
     each at an ID its own archive lists, so a Debian security fix can be built with as soon as the
     security archive lists it. The reason: with one ID for both archives, an ID was usable only once
     both archives listed a later snapshot, and waiting for the security archive's next snapshot took a
-    median of 30 minutes and reached 42 hours in autumn 2026. A listed ID is safe because the service
+    median of 30 minutes and reached 42 hours (the public listing, 1 September to 23 November 2026). A listed ID is safe because the service
     writes a snapshot's listing row and its whole import in one database transaction (7.5), and a file
     not yet replicated is a 404 or a checksum mismatch, so the build stops instead of building
     something else. A bare ID for both archives keeps the older rule and is resolved to what each

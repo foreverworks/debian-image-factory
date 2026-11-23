@@ -482,6 +482,7 @@ Built, in v0.6.3 and later:
   with no relevant upload builds nothing.
 
 Built, in 0.7.0 and later: record signing and parallel builds (`build --jobs`).
+Built, in 0.8.0 and later: one Debian snapshot per archive, so a security fix is buildable as soon as its archive lists it.
 
 Planned: the `.pyz` pinning the published builder image, `--builder host`, zstd compression, and for 1.0 a
 full example repository, once a real deployment has run every kind through its own promotion. What is
