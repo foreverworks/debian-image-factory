@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 (not yet tagged)
+## 0.7.0 (2026-11-23)
 
 - Laying out the shared mirror publishes every file by an atomic rename, so parallel builds and test processes sharing one
   snapshot directory no longer fail with "two different InRelease files" when one reads a file another is writing.
