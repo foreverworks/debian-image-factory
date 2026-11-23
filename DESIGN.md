@@ -1,9 +1,13 @@
 # Debian Image Factory: design
 
-Status: milestones M1 to M6 are implemented (the contract, core, OCI, Incus, installer and OS images,
-and the nightly loop); version 1.0 (M7) is still to come. This document is the design they follow and
-is revised as they land. Written 2026-11-21; every version this document names was read that day at
-the source listed in
+Status: built, and in the latest release (v0.6.3): the lock and definition checks, identities and `plan`;
+core, OCI, Incus, installer and OS images with their records and checks; publishing to a directory, a
+registry and a GitHub release; `verify`; and the nightly loop (`plan --against`, `--snapshot latest`, the
+GitHub Action, `prune`, inputs bundles and offline replay). Built on the development branch for release
+0.7.0: record signing (8.3) and parallel builds. Planned: the published builder pinned in the `.pyz` (5.4),
+`--builder host`, zstd, and the rest of the 1.0 list in [section 14](#14-what-is-built-and-what-is-planned).
+This document is the design the factory follows and is revised as it changes. Written 2026-11-21; every version
+this document names was read that day at the source listed in
 [Versions](#versions-read-for-this-design).
 
 ## 1. The problem
@@ -140,7 +144,7 @@ own requirements.
   mmdebstrap copies from the build container, with the apt options only the build needed. The
   sources it read the mirror with are replaced by the image's own (`apt_sources`). The root is packed
   by mmdebstrap as a tar and compressed with `gzip -n`, so the same inputs give the same bytes; the
-  M2 integration test builds the example core twice and compares. Kernel packages are refused in core.
+  core integration test builds the example core twice and compares. Kernel packages are refused in core.
 - **Children** unpack their parent's exact filesystem, enter it in a chroot inside the builder
   container (proc, a minimal `/dev` and the mirror mounted in it), install their packages with the
   image's own apt from the same local mirror, run their modules and hooks, and clean up identity
@@ -267,8 +271,8 @@ subsection below is that design, and nothing in it is published yet.
   work.
 
 - **In CI and by default locally**, the builder is a container image the factory release pins by
-  digest. From the first milestone it is built by the factory's own release pipeline from a fixed
-  snapshot and published with its own records; the very first one is bootstrapped from Debian's
+  digest. The factory's own release pipeline builds it from a fixed
+  snapshot and signs it (5.4); the very first one was bootstrapped from Debian's
   official `debian:trixie` image pinned by digest. It runs with `--privileged`, which under rootless
   Docker grants nothing beyond the invoking user's own namespace, and mmdebstrap runs in root mode
   inside it. Under rootful Docker (GitHub-hosted runners among them) `--privileged` is real host
@@ -719,13 +723,12 @@ The plan computes each package set without building anything and without privile
 reports two transactions (the essential set, then the rest) that would have to be merged. The
 resolver runs the same two transactions itself instead.
 
-**The M1 spike.** `tests/integration/test_spike_plan.py` plans `examples/` at the example lock's
+**A real core build against the plan.** `tests/integration/test_spike_plan.py` plans `examples/` at the example lock's
 snapshot, builds core for real with mmdebstrap 1.5.7 in the builder at the same snapshot
 (`scripts/spike-core`), and compares the built root's dpkg status with the plan's set. At
 `20261121T004329Z`, with `ca-certificates`, `tzdata` and `locales`, both are the same 74 packages,
 versions and architectures. The kind defaults of `incus`, `installer` and `os` are resolved the
-same way but are not yet compared with a real build: that comparison is the `package-set` check,
-which arrives with each kind's build.
+same way and are compared with a real build by the `package-set` check, which runs on every kind's build.
 
 ### 7.3 Plan output
 
@@ -834,7 +837,7 @@ every archive in use lists a snapshot strictly later than it: the snapshot that 
 archive can then no longer change, assuming the service lists a snapshot only after its import ends
 and imports each archive in order.
 
-**The M1 spike** (`scripts/spike-listing`, run 2026-11-21) confirmed what can be seen from outside:
+**The listing spike** (`scripts/spike-listing`, run 2026-11-21) confirmed what can be seen from outside:
 both listings are strictly ascending; for the newest completed ID each suite's `InRelease` is
 served, its `Date` is not later than the snapshot it serves, and two reads give the same bytes; an
 unlisted ID between two listed ones serves the earlier one; and the newest listed snapshot of each
@@ -964,7 +967,7 @@ release builds it, the definition check refuses it rather than build gzip in its
 OS image's own initramfs keeps whatever its Debian packages configure, since the installed system
 regenerates it.
 
-*Why zstd waits (decided in M6).* The OS root tarball is the first candidate, and building it is the small
+*Why zstd waits.* The OS root tarball is the first candidate, and building it is the small
 part: `zstd -19 -T1 --no-check` of the uncompressed tar from the builder gives the same bytes for the same
 tar, because the output depends on the zstd version (pinned by the builder's package list) and the level and
 thread count (fixed). The rest is every reader, and none of it is free:
@@ -1335,21 +1338,19 @@ A TARGET of `plan --against`, `build --parents`, `test --parents`, `prune --agai
 
 `lock`, `plan` and `fetch` read snapshots from snapshot.debian.org, or through `--mirror URL`, any
 server that serves its paths (`/archive/...` and `/mr/timestamp/`); `--keyring` and `--cache` say
-where the archive keyring and the download cache are. M1 shipped `lock check`, `lock snapshot`,
-`lock baseline` and `plan`; M2 adds `fetch`, `build` for core, `test` with the core checks and
-`publish` to `dir://` targets; M3 adds `build` for the OCI kind with `--parents`, `plan --against
-oci://`, the OCI checks and `locked-inputs` (`test --definition` gives it the module tables),
-`publish` to `oci://` targets and `verify`; M4 adds `build` for the Incus kind (built on core or
-on an Incus parent from `dir://`), its checks (`incus-boot` and `two-clones` run where an Incus host
-answers, `scripts/incus-vm` gives one in a VM), and `publish` and `plan --against` for
-`github-release://` targets (the API is `GITHUB_API_URL`, the token `GITHUB_TOKEN` or else `GH_TOKEN`).
-M5 adds `build` for the installer and OS kinds,
-their boot checks (`test --vm-image` names the image QEMU runs in, `scripts/builder vm` builds it;
-`test --parent` names a parent artifact outside `out/` for `ancestry`), the `deb` and `file` modules
-and `lock checksums`: input-lock's `refresh` on a lock the definition agrees with, for the entries
+where the archive keyring and the download cache are. `lock check`, `lock snapshot`, `lock baseline` and `plan` need no builder. `fetch` lays out the partial mirror for
+the images that build. `build` builds core, OCI images (with `--parents`; `plan --against oci://` finds the
+published ones), Incus images (on core, or on an Incus parent from `dir://`), installer kits and OS roots. `test` runs each
+kind's checks: the OCI checks and `locked-inputs` (`test --definition` gives it the module tables); `incus-boot` and
+`two-clones` where an Incus host answers (`scripts/incus-vm` gives one in a VM); and the boot checks of the installer and
+OS kinds (`test --vm-image` names the image QEMU runs in, `scripts/builder vm` builds it; `test --parent` names a
+parent artifact outside `out/` for `ancestry`). `publish` writes to `dir://`, `oci://` and `github-release://` targets
+(the GitHub API is `GITHUB_API_URL`, the token `GITHUB_TOKEN` or else `GH_TOKEN`), and `verify` checks an artifact
+against its records. The `deb` and `file` modules come with `lock checksums`: input-lock's `refresh` on a lock the
+definition agrees with, for the entries
 `--entry` names or those whose version moved since the git ref `--base`. It writes nothing unless every
 entry verified (a `deb` entry through its vendor's signed `InRelease`), and checks the result against
-the definition again. M6 adds `prune`, `fetch --bundle` and `build --offline --bundle`, with the rest of the
+the definition again. `prune`, `fetch --bundle` and `build --offline --bundle` complete the
 nightly loop.
 
 `build` reads the plan, and also the lock and the definition (`--lock`, `--definition`, as `plan`
@@ -1361,7 +1362,7 @@ the builder; the default is the tag `scripts/builder build` gives. (Planned: a `
 is its default; 5.4.) A child whose parent this run does not build reads it from `out/` (by
 artifact name: the identity prefix and the digest the plan names), then from each `--parents TARGET`
 (`dir://` holding the core tarball or an `.oci` layout, or `oci://`, pulled by digest); a parent found
-nowhere fails the build naming the image, the digest and the places looked in. Images of kinds a release cannot build yet are listed as not built. `--builder host` arrives later;
+nowhere fails the build naming the image, the digest and the places looked in. Images of kinds a release cannot build yet are listed as not built. `--builder host` is planned;
 every build already runs with no network in the builder.
 
 `build` runs the images of the plan as the graph their `parent` links make: an image starts when its parent is
@@ -1825,7 +1826,7 @@ serves it, with a recorded `/mr/timestamp/` listing. It exercises resolution, id
 plan without the network: a new version of one package at the second timestamp changes exactly the
 identities of the images that install it, and nothing else.
 
-**M6's nightly claims, on the fixture archive, seconds** (`tests/test_nightly.py`). The Action's own
+**The nightly claims, on the fixture archive, seconds** (`tests/test_nightly.py`). The Action's own
 plan and summary steps (`action.yml`, run for real by `tests/support/action.py`) call `plan --snapshot
 latest --against dir://...` on a definition of every file kind (a core, an installer, an OS, an Incus
 base and its child), against the fixture archive served over HTTP and a target holding each image as a
@@ -1940,21 +1941,25 @@ builder only to run the factory.
   `resolve`, `plan`, `fetch`, `records`, `retention`, `publish`, `cli`), growing into a package
   (`build/`, `checks/`) when a module needs helpers of its own.
 
-## 14. Milestones
+## 14. What is built and what is planned
 
-Each milestone ends in a tagged release that anyone can pin.
+The features are listed in the order they build on each other; OCI, Incus, and installer and OS images each need
+only core, and not one another. The last column says what the tests show for a built feature and what a planned one
+has to show.
 
-| | Milestone | Starts when | Done when |
-|---|---|---|---|
-| M1 | **The contract**: repository skeleton (typed package, pre-commit, CI), input-lock pinned and bundled, definition parsing and checks, identity, `lock check` with snapshot re-resolution, `plan` with the reuse, wait and build states. A minimal pinned builder image (Debian 13 from a fixed snapshot with mmdebstrap, apt, dpkg and python3). The resolver spike: a real core build at the same snapshot, compared with the plan. | the lock format is frozen: input-lock's first release | a sample lock and definition covering every kind pass `lock check`; plan identities are stable across runs and machines; the spike's dpkg status equals the plan's set; the snapshot listing behaves as 7.5 assumes. Release v0.1.0. |
-| M2 | **Core**: fetch, partial mirror, offline core build, SBOM, provenance, `.intoto.jsonl`, core checks, `dir://` target | M1 | two builds from one lock resolve the same set; no machine identity; no build snapshot in the bytes; SBOM complete. v0.2.0. |
-| M3 | **OCI**: OCI kind with child layers, `oci://` publish with identity tags and referrers (tag schema included), `node-tarball` module, `oci-run`, `verify` | M2 | a Node runtime image's provenance names core's digest; its Node version equals the lock's; records attach on a registry without the referrers API. v0.3.0. |
-| M4 | **Incus**: Incus kind, NoCloud templates, `incus-boot` and `two-clones` in a VM, `github-release://` publish | M2 | the boot contract passes for the base and for a child. v0.4.0. |
-| M5 | **Installer and OS**: both kinds, `deb` and `file` modules, parameters, `apt_sources`, `installer-boot`, `os-boot` | M2 | both boot in QEMU; a flag off removes its module from both and changes both identities; moving the baseline rebuilds the OS and nothing else. v0.5.0. |
-| M6 | **Nightly**: `plan --against` on every target, `--snapshot latest`, the Action, `prune`, inputs bundles, offline replay | M3 to M5 | a night with no relevant upload builds nothing; one with a single upload rebuilds exactly its chain; a bundle rebuilds with snapshot.debian.org unreachable. v0.6.0. |
-| M7 | **1.0**: optional signing, docs for strangers, a full example repository | M6, and at least one real deployment has run every kind through its own promotion | the README's quick start works on a clean machine. v1.0.0. |
-
-M3, M4 and M5 are independent once M2 lands and can run side by side.
+| Feature | Status | What it shows |
+|---|---|---|
+| **The contract**: typed package, input-lock pinned and bundled, definition parsing and checks, identity, `lock check` with snapshot re-resolution, `plan` with the reuse, wait and build states, a minimal pinned builder image (Debian 13 from a fixed snapshot with mmdebstrap, apt, dpkg and python3) | built (v0.6.3) | a sample lock and definition covering every kind pass `lock check`; plan identities are stable across runs and machines; a real core build's dpkg status equals the plan's set; the snapshot listing behaves as 7.5 assumes |
+| **Core**: `fetch`, partial mirror, offline core build, SBOM, provenance, `.intoto.jsonl`, core checks, `dir://` target | built (v0.6.3) | two builds from one lock resolve the same set; no machine identity; no build snapshot in the bytes; SBOM complete |
+| **OCI**: OCI kind with child layers, `oci://` publish with identity tags and referrers (tag schema included), `node-tarball` module, `oci-run`, `verify` | built (v0.6.3) | a Node runtime image's provenance names core's digest; its Node version equals the lock's; records attach on a registry without the referrers API |
+| **Incus**: Incus kind, NoCloud templates, `incus-boot` and `two-clones` in a VM, `github-release://` publish | built (v0.6.3) | the boot contract passes for the base and for a child |
+| **Installer and OS**: both kinds, `deb` and `file` modules, parameters, `apt_sources`, `installer-boot`, `os-boot` | built (v0.6.3) | both boot in QEMU; a flag off removes its module from both and changes both identities; moving the baseline rebuilds the OS and nothing else |
+| **Nightly loop**: `plan --against` on every target, `--snapshot latest`, the Action, `prune`, inputs bundles, offline replay | built (v0.6.3) | a night with no relevant upload builds nothing; one with a single upload rebuilds exactly its chain; a bundle rebuilds with snapshot.debian.org unreachable |
+| **Optional signing** of records (8.3) | built on the development branch, for 0.7.0 | records signed keyless or with a key verify with `verify`; an unsigned record stays valid |
+| **Parallel builds** (`build --jobs`, 9.1) | built on the development branch, for 0.7.0 | the artifacts, digests and records equal a serial build's |
+| **The published builder pinned in the `.pyz`** (5.4) | planned | a stranger's build uses exactly the builder the release published |
+| **`--builder host`, zstd compression** (9.1, 8.1) | planned | no criteria written yet |
+| **1.0**: docs for strangers, a full example repository | planned; it needs at least one real deployment that has run every kind through its own promotion | the README's quick start works on a clean machine |
 
 ## 15. Decisions
 
@@ -1995,8 +2000,8 @@ M3, M4 and M5 are independent once M2 lands and can run side by side.
    pinned by sha256 in the lock and every signature is still checked.
 9. **Children build in a chroot from their parent's exact filesystem.** Shared ancestry is real and
    provable, and nothing needs a running instance or root on the host.
-10. **A pinned builder from the first milestone**, so identities computed in M1 already include the
-    tools that will write the bytes, and do not all change when the builder arrives later.
+10. **A pinned builder from the first release**, so identities already include the
+    tools that write the bytes, and do not all change when a published builder arrives later.
 11. **Only shapes with a consumer.** Core, OCI, Incus container, installer kit, OS root filesystem.
     Incus VMs, disk images, ISOs and arm64 are designed for and added when someone needs them.
 12. **Published artifacts default to gzip, or the format their ecosystem expects; zstd is an
@@ -2027,10 +2032,10 @@ M3, M4 and M5 are independent once M2 lands and can run side by side.
 21. **Per-push CI stays one fast job.** The floor is checked statically; the matrix and the slow
     builds run weekly and on release tags, where they gate the publish.
 
-## 16. Questions settled, and the one still open
+## 16. Questions settled, and the ones still open
 
-Each was raised as an open question with a recommendation; all but the last are now decided, and
-each says what would change had it gone the other way.
+Each entry gives the decision and what would change had it gone the other way; 6 and 8 are still open,
+with a recommendation each.
 
 1. **Builder tools come from the Debian snapshot** (decided 2026-11-21): mmdebstrap 1.5.7 and oras
    1.2.0 as Debian 13 ships them, not upstream's 1.7.0 and 1.4.0. The builder is one more image
@@ -2050,7 +2055,7 @@ each says what would change had it gone the other way.
    hundreds of megabytes per retained good build.
 5. **The repository is public** (decided). Every file passes a scan for private data before a push,
    and the examples use example.com names only.
-6. **Open: the baseline as a top-level lock field.** M1 keeps the baseline in the reserved entry
+6. **Open: the baseline as a top-level lock field.** The lock keeps the baseline in the reserved entry
    `debian-baseline` because input-lock refuses unknown top-level fields. Recommendation:
    keep the entry. It pins the archive state by checksum, needs no change to input-lock, and any
    other tool reading the lock sees an ordinary entry. If input-lock gains a `debian_baseline` field
