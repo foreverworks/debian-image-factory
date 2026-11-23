@@ -30,8 +30,9 @@ fourth script. Each one sees the Debian archive at a different moment. The resul
 ## 2. Goals
 
 1. **One archive state per generation.** Every image of a generation resolves its Debian packages
-   from one snapshot ID on snapshot.debian.org, covering main, updates and security.
-2. **One core, many shapes.** A minimal core filesystem is built once from that snapshot; the OCI,
+   from one snapshot of each archive on snapshot.debian.org: `debian` (main and updates) and
+   `debian-security`, each at its own ID (7.5).
+2. **One core, many shapes.** A minimal core filesystem is built once from those snapshots; the OCI,
    Incus, installer and OS artifacts are derived from it, each adding only what it needs.
 3. **Every external input is locked.** A lock file names every download by version and checksum.
    No build resolves a version or downloads anything the lock does not name.
@@ -71,9 +72,9 @@ fourth script. Each one sees the Debian archive at a different moment. The resul
 | Term | Meaning |
 |---|---|
 | snapshot ID | A snapshot.debian.org timestamp, `YYYYMMDDTHHMMSSZ`. snapshot.debian.org serves an ID as each archive's newest snapshot at or before that time; apt 3.0's `Snapshot:` option builds the URLs for it. |
-| build snapshot | The snapshot ID a generation's package sets are resolved from. It moves as often as the consumer likes (nightly, typically) and never enters an image's bytes or identity. |
-| baseline snapshot | A second snapshot ID, moved deliberately (at Debian point releases, typically), used only for apt sources written into images that ask for snapshot sources. |
-| generation | The images resolved at one build snapshot. An unchanged image carries over into the next generation as the same artifact. |
+| build snapshots | The snapshot IDs a generation's package sets are resolved from: one for the `debian` archive and one for `debian-security`, each an ID that archive itself lists. They move as often as the consumer likes (nightly, typically), each on its own clock, and never enter an image's bytes or identity. |
+| baseline snapshot | One more snapshot ID, for both archives together, moved deliberately (at Debian point releases, typically), used only for apt sources written into images that ask for snapshot sources. |
+| generation | The images resolved at one pair of build snapshots. An unchanged image carries over into the next generation as the same artifact. |
 | lock | `lock.json`: the snapshot IDs and every external input with its version and checksum. Machine-maintained. Its format and library are [input-lock](https://github.com/foreverworks/input-lock). |
 | build definition | `factory.toml`: which images exist, their kind, parent, packages, modules, hooks and outputs. Human-written. |
 | image | A node of the build tree, named in the definition (`core`, `oci-base`, `node-26`, ...). |
@@ -91,7 +92,7 @@ fourth script. Each one sees the Debian archive at a different moment. The resul
 ### 5.1 The tree
 
 ```text
-lock.json: build snapshot (main + updates + security), baseline snapshot, every external input
+lock.json: build snapshots (debian, debian-security), baseline snapshot, every external input
   |
   plan: resolve every image's package set, compute identities, look them up where they are published
   |
@@ -310,20 +311,23 @@ input-lock's own `problems()`:
   it, and only images the definition has (input-lock checks the names when given the image list).
   The two reserved entries below name none.
 - `module`, when not null, names a module the definition declares.
-- `debian_snapshot` is present, and the snapshot IDs are usable (7.5).
+- The build snapshots are present: `debian_snapshots`, one exact ID for each archive the factory reads
+  (`debian` and `debian-security`, no other), or the older `debian_snapshot`, one ID for both. The IDs
+  are usable when `lock check` and `plan` re-resolve them (7.5).
 - An entry's `signed_by` keyring is `used_by` every image the entry is, so each image's plan carries it
   (the keyring is a trust root `fetch` reads for that image).
 - input-lock 0.2.0 owns the rest of the trust fields' rules (`signed_by` names an entry of the lock, a
   keyring pinned by sha256 or sha512 and itself unsigned; `sums_url` needs `signed_by`; both are https).
-  The lock is `"schema": 2` as soon as an entry uses one, and the factory reads schema 2.
+  The lock is `"schema": 2` as soon as an entry uses one, and `"schema": 3` once it has `debian_snapshots`
+  (input-lock 0.3.0); the factory reads schemas 1 to 3.
 - The baseline snapshot is the reserved entry `debian-baseline`, required when any image's
-  `apt_sources` points at it. input-lock reads exactly three top-level fields (`schema`,
-  `debian_snapshot`, `inputs`), so a second snapshot cannot be a top-level field. As an entry it is
+  `apt_sources` points at it. input-lock reads exactly four top-level fields (`schema`,
+  `debian_snapshot`, `debian_snapshots`, `inputs`), so the baseline cannot be a top-level field. As an entry it is
   also a pin in its own right: `version` is the snapshot ID, `url` the debian archive's `InRelease`
   for the suite at that ID, and `sha256` that file's checksum, written by `lock baseline` after the
   signature is verified and checked again by `lock check`.
 
-The factory pins input-lock 0.2.0 by version and sha256 in its own repository's `lock.json` (the
+The factory pins input-lock 0.3.0, the release that reads `debian_snapshots`, by version and sha256 in its own repository's `lock.json` (the
 same format, so Renovate moves it), unpacks it for development with `scripts/vendor-input-lock`,
 and bundles it into the `.pyz`.
 
@@ -335,8 +339,11 @@ checksum commit as you would a new dependency.
 
 ```json
 {
-  "schema": 2,
-  "debian_snapshot": "20261121T004329Z",
+  "schema": 3,
+  "debian_snapshots": {
+    "debian": "20261123T084014Z",
+    "debian-security": "20261123T141315Z"
+  },
   "inputs": {
     "debian-baseline": {
       "description": "The baseline snapshot: apt sources written into images that ask for them point here.",
@@ -407,8 +414,9 @@ What each field means to the factory:
 
 | Field | Meaning |
 |---|---|
-| `schema` | The lock format version, owned by input-lock: 1, or 2 once an entry uses a trust field (below); `input-lock format` and the `lock` commands write the one that is needed. |
-| `debian_snapshot` | The build snapshot (vocabulary). Resolution input only. |
+| `schema` | The lock format version, owned by input-lock: 1, 2 once an entry uses a trust field (below), or 3 once the lock has `debian_snapshots`; `input-lock format` and the `lock` commands write the one that is needed. |
+| `debian_snapshots` | The build snapshots (vocabulary): the exact ID each archive lists, keyed `debian` and `debian-security`, and no other key. Resolution input only. `lock snapshot --latest` writes it. |
+| `debian_snapshot` | Instead of `debian_snapshots`, never with it: one bare ID for both archives, the form before schema 3. Still read: each archive then serves the snapshot it lists at or before that ID (7.5). `lock snapshot --latest` replaces it with `debian_snapshots`. |
 | `inputs.debian-baseline` | Reserved: the baseline snapshot (`version`) and its `InRelease` (`url`, `sha256`). Enters only the images whose `apt_sources` point at it. No `used_by`. |
 | `inputs.<name>` | Lowercase letters, digits and dashes. One entry per downloaded file. |
 | `version`, `digest` | The pin. Renovate or `lock` commands move them, never a build. |
@@ -631,7 +639,7 @@ Renovate), you can usually adopt it without changing your update flow:
 
 1. Run `debian-image-factory lock check` on it. Every problem is named with the entry and the
    field, so the first run is a to-do list rather than a wall of errors.
-2. Add `schema`, and the two snapshot fields if your builds did not use snapshot.debian.org yet.
+2. Add `schema`, and the snapshot fields if your builds did not use snapshot.debian.org yet (`lock snapshot --latest` writes `debian_snapshots`).
 3. Make every entry name a URL template and at least one checksum. For sha1-only entries,
    `lock checksums` adds the sha256.
 4. Point `used_by` at the image names of your `factory.toml`, and declare every `module` you use.
@@ -680,7 +688,7 @@ recipe digest = sha256(canonical_json({
   changes the identity only through what the definition says and the files it references (the
   `files` and `image` fields above). The commit itself is written into an OCI manifest's annotations
   (5.3), so it is a byte input and never an identity input.
-- **The build snapshot is not an input.** It decides which versions the resolver picks, and those
+- **The build snapshots are not an input.** It decides which versions the resolver picks, and those
   versions are in `packages`. It never reaches the bytes (5.3, 6.2), so it has no reason to be in
   the identity.
 - **File modes are what git keeps.** A file enters as its sha256 and `0755` or `0644` (executable
@@ -697,11 +705,11 @@ recipe digest = sha256(canonical_json({
 
 The plan computes each package set without building anything and without privileges:
 
-1. Download the build snapshot's `InRelease` and `Packages` indices for every suite (by hash, since
+1. Download the `InRelease` and `Packages` indices of every suite, each at its own archive's build snapshot (by hash, since
    Debian's archives set `Acquire-By-Hash: yes`), verify them with `debian-archive-keyring`
    (`--keyring`), and lay them out as a partial mirror that apt reads through `file:` sources,
    verifying the signature and hashes again.
-2. For each image, prepare a synthetic apt root: a scratch directory with sources at the snapshot,
+2. For each image, prepare a synthetic apt root: a scratch directory with sources at the snapshots,
    the verified indices, and a dpkg status file. For core the status is empty; for a child it is the
    parent's resolved set, written from the same `Packages` stanzas.
 3. Run `apt-get --simulate install` in that root with the image's request, Recommends off. Core is
@@ -736,8 +744,8 @@ A night when Debian published a new kernel and Renovate moved Node, abridged:
 
 ```json
 {
-  "schema": 1,
-  "snapshot": "20261121T004329Z",
+  "schema": 2,
+  "snapshots": {"debian": "20261123T084014Z", "debian-security": "20261123T141315Z"},
   "engine": 1,
   "images": {
     "core":       {"identity": "<core identity>", "state": "reuse", "artifact": "sha256:<core tarball>"},
@@ -829,33 +837,62 @@ boundary. The provenance names the image in
 file counts only when a statement's subject is the file's real sha256. `dir://`, `oci://` and
 `github-release://` lookups are live.
 
-### 7.5 Choosing the build snapshot ID
+### 7.5 Choosing the build snapshots
 
 snapshot.debian.org keeps separate timelines per archive (`debian`, `debian-security`) and lists
-them at `https://snapshot.debian.org/mr/timestamp/?archive=<name>`. An ID is **completed** when
-every archive in use lists a snapshot strictly later than it: the snapshot that ID serves in each
-archive can then no longer change, assuming the service lists a snapshot only after its import ends
-and imports each archive in order.
+them at `https://snapshot.debian.org/mr/timestamp/?archive=<name>`. A build pins one ID for each
+archive, and each ID is one the archive **itself lists**. That is enough to build from: a listed ID
+always serves itself, and the service writes a snapshot's listing row and its whole import in one
+database transaction (the `import_from_filesystem` function of the `snapshot` script in the
+service's own repository), so a listed snapshot is complete. A file that has not reached a mirror
+yet is a 404 or a checksum mismatch, so the build stops instead of building something else. Nothing
+has to be listed after it, so a security fix can be built with as soon as its own archive lists it,
+and the two archives never wait for each other.
+
+Everything after resolution works on `snapshots`, the exact listed ID of each archive.
+`plan.json`, the bundle manifest, the partial mirror's folder name and the provenance all carry the
+pair (7.7, 8.2).
+
+**The single-ID rule, for a bare ID.** A lock with `debian_snapshot`, `--snapshot <ID>` and
+`lock snapshot --id <ID>` give one ID for both archives. That ID need not be listed anywhere (it
+usually falls between two listed ones), so it keeps the stricter rule it always had: it is
+**completed** when every archive in use lists a snapshot strictly later than it, because what it
+serves in each archive can then no longer change. It is then resolved to the exact ID each archive
+serves at it (the newest listed at or before it), and the build uses those.
 
 **The listing spike** (`scripts/spike-listing`, run 2026-11-21) confirmed what can be seen from outside:
 both listings are strictly ascending; for the newest completed ID each suite's `InRelease` is
 served, its `Date` is not later than the snapshot it serves, and two reads give the same bytes; an
 unlisted ID between two listed ones serves the earlier one; and the newest listed snapshot of each
 archive, not yet completed, was already fully served (`InRelease` and the by-hash `Packages.xz` it
-lists, by size and sha256). It cannot show that a snapshot is never listed mid-import, which would
-take catching one; the "completed IDs only" rule is what protects against it, and the redirect for
-an ID is cacheable for a day, one more reason never to use an ID that is not completed. The
-security archive's newest snapshot often lags the main one by hours, so it usually decides the
-newest completed ID.
+lists, by size and sha256). The last observation is what the per-archive rule relies on, and the
+service's code explains it; a bare ID keeps the stricter rule because an ID that is not listed has
+no such guarantee, and the redirect for an unlisted ID is cacheable for a day.
 
-- `lock snapshot --latest` picks the newest timestamp listed in any archive in use that is earlier
-  than every archive's newest snapshot, which is the newest completed ID.
-- `lock check` re-resolves the lock's IDs every time it runs: it fails an ID that is not completed,
-  and reports, per archive, which snapshot the ID serves.
-- `plan --snapshot latest` uses the newest completed ID without editing the lock, for a nightly run
-  whose consumer writes the new ID into the lock only once its builds pass.
-- `lock baseline --id <ID>` moves the baseline. It is a deliberate step, typically at a Debian point
-  release, and rebuilds only the images whose apt sources point at the baseline.
+**The listing is cached.** The service caches `/mr/timestamp/?archive=<name>` for ten minutes. An ID
+that is named explicitly (the lock's, or `archive=ID`) and is newer than the newest the cached
+listing holds is confirmed with a narrow read, `/mr/timestamp/?archive=<name>&after=<ID>&before=<ID>`
+(both bounds inclusive): it answers `{"result": {"<name>": ["<ID>"]}}` when the archive lists the ID
+and `{"result": {}}` when it does not. The URL is one no cache has seen, so the answer is current.
+An ID older than the newest listed one needs no read, because a cached listing is never ahead of the
+service. An ID that is still not listed is refused: `archive debian-security does not list <ID>`.
+The narrow read is at the network edge (`listings.py`); `snapshots.py` stays pure.
+
+- `lock snapshot --latest` writes `debian_snapshots` with the newest ID each archive lists, and
+  removes `debian_snapshot`: the one-command migration of a lock written before schema 3.
+- `lock snapshot --id <ID>` takes a bare ID (resolved per archive as above) and writes the same.
+  `lock snapshot --id debian=<ID> [--id debian-security=<ID>]` moves only the archives named, each to
+  an ID it lists; on a lock with `debian_snapshot` the archive not named keeps what the old ID served.
+- `lock check` re-resolves the lock every time it runs, per archive: it says which snapshot each
+  archive is pinned to and whether it is completed (listed, or for a bare ID the stricter rule), and
+  fails an ID its archive does not list.
+- `plan --snapshot lock|latest|<ID>|debian=<ID>,debian-security=<ID>` chooses the snapshots without
+  editing the lock (default `lock`). `latest` is the newest ID each archive lists, for a nightly run
+  whose consumer writes the new IDs into the lock only once its builds pass. A missing or unknown
+  archive is a usage error.
+- `lock baseline --id <ID>` moves the baseline. It stays one ID for both archives under the stricter
+  rule, it is a deliberate step, typically at a Debian point release, and it rebuilds only the images
+  whose apt sources point at the baseline.
 
 ### 7.6 What does and does not rebuild
 
@@ -886,8 +923,9 @@ the rare case inputs cannot see (an archive key rotation, say).
 - **Fetch, then build offline.** `fetch` downloads every index, `.deb` and external file the plan
   names into a content-addressed cache (`~/.cache/debian-image-factory/sha256/...`), checking each
   against its signed index or lock checksum. It then lays out a partial Debian mirror (signed
-  `InRelease`, the indices, the pool files needed) at `<cache>/mirror/<snapshot>/<archive>/`,
-  pool files hard-linked from the cache. The builder mounts it read-only at `/mirror`, a path with
+  `InRelease`, the indices, the pool files needed) at `<cache>/mirror/<debian ID>_<debian-security ID>/<archive>/`,
+  pool files hard-linked from the cache (the two IDs are joined in the order `debian`,
+  `debian-security`). The builder mounts it read-only at `/mirror`, a path with
   no snapshot ID in it, and apt reads it with its `copy:` method (mmdebstrap refuses a `file:` mirror
   outside the chroot). apt verifies the archive signature, index hashes and file hashes as it
   always does.
@@ -911,7 +949,7 @@ the rare case inputs cannot see (an archive key rotation, say).
   for byte) and the image's slice of the cache under `cache/`: the signed `InRelease` and the indices of
   every suite, the pool files the image adds, its locked inputs (keyrings, vendor `.deb` files, tarballs) by
   sha256, and the signed checksum lists, signatures and indices that vouched for them with their notes (what
-  provenance names, 8.2). The manifest holds the schema, the image, its identity, the snapshot, the suite and
+  provenance names, 8.2). The manifest holds the schema (2: `snapshots`, the ID of each archive; a bundle of schema 1 is refused and says to fetch again), the image, its identity, the snapshots, the suite and
   the architecture, and every other member with its size and sha256; for an image that installs a vendor
   `.deb` it also holds `verified_at`, the time `fetch` verified the vendors' signed Release (the earliest of
   them, kept in each input's note beside the signed files). Members are sorted and every header has the same
@@ -923,7 +961,7 @@ the rare case inputs cannot see (an archive key rotation, say).
   unreachable. A replay is the normal build path reading a different directory, not a separate mode: the
   bundle is unpacked into a scratch cache under `out/` (every member checked against the manifest's size and
   sha256, a member the manifest does not list or a link refused), the manifest is checked against the plan it
-  carries (the image's identity, the snapshot, the suite) and the cache against what the build reads (every
+  carries (the image's identity, the snapshots, the suite) and the cache against what the build reads (every
   suite's `InRelease`, every locked input of the image), and the ordinary build then runs with that cache. A
   vendor repository's Release expires (`Valid-Until`), and a replay is for later: the build's re-verification
   of the signed lists (15.8) judges that Release at the manifest's `verified_at`, not at the present,
@@ -1076,7 +1114,7 @@ Provenance for a core build:
   "predicateType": "https://slsa.dev/provenance/v1",
   "predicate": {
     "buildDefinition": {
-      "buildType": "https://github.com/foreverworks/debian-image-factory/blob/v0.1.0/docs/build-type-v1.md",
+      "buildType": "https://github.com/foreverworks/debian-image-factory/blob/v<release>/docs/build-type-v2.md",
       "externalParameters": {
         "image": "core",
         "definition": {"uri": "git+https://github.com/example/images", "revision": "<definition commit>", "path": "factory.toml"},
@@ -1085,7 +1123,7 @@ Provenance for a core build:
       "internalParameters": {
         "identity": "<core identity>",
         "engine": 1,
-        "buildSnapshot": "20261121T004329Z",
+        "buildSnapshots": {"debian": "20261123T084014Z", "debian-security": "20261123T141315Z"},
         "architecture": "amd64",
         "reason": "package libssl3t64 3.5.1-1+deb13u1 -> 3.5.1-1+deb13u2"
       },
@@ -1093,8 +1131,8 @@ Provenance for a core build:
         {"uri": "git+https://github.com/example/images@<definition commit>", "digest": {"gitCommit": "<definition commit>"}},
         {"name": "lock.json", "digest": {"sha256": "<lock sha256>"}},
         {"name": "recipe of core", "digest": {"sha256": "<core recipe digest>"}},
-        {"uri": "https://snapshot.debian.org/archive/debian/20261121T004329Z/dists/trixie/InRelease", "digest": {"sha256": "<debian InRelease sha256>"}},
-        {"uri": "https://snapshot.debian.org/archive/debian-security/20261121T004329Z/dists/trixie-security/InRelease", "digest": {"sha256": "<security InRelease sha256>"}},
+        {"uri": "https://snapshot.debian.org/archive/debian/20261123T084014Z/dists/trixie/InRelease", "digest": {"sha256": "<debian InRelease sha256>"}},
+        {"uri": "https://snapshot.debian.org/archive/debian-security/20261123T141315Z/dists/trixie-security/InRelease", "digest": {"sha256": "<security InRelease sha256>"}},
         {"uri": "oci://ghcr.io/foreverworks/debian-image-factory-builder", "digest": {"sha256": "<builder digest>"}}
       ]
     },
@@ -1108,8 +1146,10 @@ Provenance for a core build:
 }
 ```
 
-The build snapshot is recorded here, in the record, because it explains the choice of versions; it
-is not in the artifact. A child adds `{"name": "parent: core", "digest": {"sha256": "<core tarball
+The build snapshots are recorded here, in the record, because they explain the choice of versions;
+they are not in the artifact. Each `InRelease` is named at its own archive's ID. Build type v1
+recorded one `buildSnapshot`, and records written under it stay valid: `verify` accepts both build
+types. A child adds `{"name": "parent: core", "digest": {"sha256": "<core tarball
 sha256>"}}` and its locked downloads (`{"uri": "<rendered url>", "digest": {"sha256": "..."}}`), so
 ancestry and every input are provable from the record alone. An OCI image further down the tree
 also adds `{"name": "ancestor: <image>", "digest": {"sha256": "..."}}` for every further ancestor up
@@ -1301,7 +1341,7 @@ platform, which the factory is not.
 
 `buildType` names a versioned document in this repository describing the build: which
 `externalParameters` exist (the image, the definition's repository, revision and path, the
-parameters), what `internalParameters` mean (identity, engine, build snapshot, architecture,
+parameters), what `internalParameters` mean (identity, engine, build snapshots, architecture,
 reason) and which `resolvedDependencies` every build lists. A verifier pins the build types it
 accepts.
 
@@ -1314,10 +1354,10 @@ dependency outside the standard library), published as a release asset with its 
 
 ```text
 debian-image-factory lock check [--offline]              the lock and the definition agree; snapshot IDs re-resolved
-debian-image-factory lock snapshot --latest | --id ID    move the build snapshot
+debian-image-factory lock snapshot --latest | --id ID|ARCHIVE=ID...   pin the build snapshots, one per archive
 debian-image-factory lock baseline --id ID               move the baseline snapshot (the debian-baseline entry)
 debian-image-factory lock checksums [--entry NAME]       fill checksums of entries whose version moved; verify vendor indices and signatures
-debian-image-factory plan [--against TARGET]... [--snapshot lock|latest|ID] [--param K=V]... [--params FILE]
+debian-image-factory plan [--against TARGET]... [--snapshot lock|latest|ID|ARCHIVE=ID,...] [--param K=V]... [--params FILE]
                           [--rebuild IMAGE --reason TEXT] [--previous PLAN] [--out FILE] > plan.json
 debian-image-factory fetch plan.json [--mirror URL] [--bundle [--bundle-dir DIR]]
 debian-image-factory build [plan.json] --out out/ [--image NAME]... [--parents TARGET]... [--builder-image REF]
@@ -1586,7 +1626,7 @@ tier):
 | `definition` | `factory.toml` | the build definition |
 | `lock` | `lock.json` | the lock, whose `debian-image-factory` entry names the release |
 | `params` | none | a JSON file of parameter values, `plan --params` |
-| `snapshot` | `lock` | `plan --snapshot`: `lock`, `latest` or an ID |
+| `snapshot` | `lock` | `plan --snapshot`: `lock`, `latest`, an ID or `debian=ID,debian-security=ID` |
 | `against` | none | targets, one per line: `plan --against` each, and where `publish` writes; `build` gets each `oci://` and `dir://` one as `--parents` and `test` each `oci://` one, so a parent that was reused is found where it is published (a `github-release://` target holds no parents) |
 | `steps` | `plan,fetch,build,test` | the steps to run; `plan` is required and `build` needs `fetch`, `test` needs `build` |
 | `publish` | `false` | `true` publishes what was built to the `against` targets (needs `build`) |
@@ -1658,7 +1698,7 @@ reported as not run, never as passed, and the image stays a candidate.
 5. **Run your own checks** (a boot in your environment, a full install of the OS image onto a test
    VM, your workloads) and attach each result with `attest`.
 6. **Approve your way.** Move your pins or tags once every required check is good, and write the new
-   build snapshot into the lock in the same change, so the lock never runs ahead of a verified
+   build snapshots into the lock in the same change, so the lock never runs ahead of a verified
    build. Move the baseline at point releases, through the gate your persistent systems use.
 7. **Prune** with your pins: by default the newest 5 good builds and 1 candidate per image stay in
    each target, failed builds are deleted once their checks end, and a pinned artifact is never
@@ -1695,7 +1735,7 @@ Each runs on the exact artifact and emits one test result.
 | `sbom-complete` | all | the SBOM lists every installed package and locked input |
 | `ancestry` | children | the parent's filesystem is the base: for OCI, the parent's layers are the first layers by digest; elsewhere (Incus, OS root, installer kit), the parent's files are present unless the child's own records say it removed them (its provenance lists them, `removedFromParent`, written by the build from a comparison of the two roots), and the provenance names the parent |
 | `same-resolution` | core | a second resolution of the same lock gives the same package set |
-| `no-build-snapshot` | all | the build snapshot ID appears nowhere in the artifact's bytes, including the build-time `file://` source, which the `apt_sources` rendering replaces before the image is packed; skipped with a note when the baseline ID equals the build ID. A release test also builds one package set at two different build snapshots and compares the bytes |
+| `no-build-snapshot` | all | no build snapshot ID, of either archive, appears in the artifact's bytes (an ID the baseline shares cannot be told apart and only warns; the other is still searched), including the build-time `file://` source, which the `apt_sources` rendering replaces before the image is packed; skipped with a note when the baseline ID equals the build ID. A release test also builds one package set at two different build snapshots and compares the bytes |
 | `byte-equal` | all, optional | two builds from the same inputs, in one run (so of one definition commit, which an OCI manifest's annotations carry, 5.3), give the same digest; WARNED, never FAILED, when they differ. The check does not rebuild: it compares the artifact with the same image built again, an output directory given with `test --twin DIR` (the artifacts whose names agree up to the digest). Without a twin it is not run, and an image lists it in its `[checks]` to require one. Proof that a kind is byte-equal is the release tier's integration tests (section 12), which build twice from one plan |
 | `oci-run` | oci | runs under rootless Docker: declared user and entrypoint, `cmd` exits 0 |
 | `incus-boot` | incus | in an Incus host inside a VM: cloud-init finishes through NoCloud from both `cloud-init.user-data` and `user.user-data`, creates the user, runs commands, an IPv4 address is reported, all still true after a restart |
@@ -1898,7 +1938,7 @@ commit with its version.
   integration tier, gating the publish.
 - **The nightly path for real** (`tests/integration/test_action.py`): the Action's shell steps on the
   nightly workflow's definition, with the `.pyz` built from the checkout, against snapshot.debian.org
-  and rootless Docker. The first night plans at the newest completed snapshot, fetches, builds the core
+  and rootless Docker. The first night plans at the newest snapshot each archive lists, fetches, builds the core
   and the Incus base in the builder the Action builds, tests, publishes to a `dir://` target and names
   both artifacts; the second night, a moment later, reads `changed=false` and runs nothing else.
 
@@ -1974,8 +2014,8 @@ has to show.
 3. **One home for every fact.** Versions live only in the lock, which image uses an input only in
    `used_by`, the factory's version only in the lock's reserved entry, published state only at the
    targets (looked up live by identity). Nothing is stored twice, so nothing goes stale.
-4. **Two snapshots with two jobs.** The build snapshot chooses versions and moves freely; it never
-   enters bytes or identities. The baseline snapshot is what images' apt sources may point at; it
+4. **Two kinds of snapshot with two jobs.** The build snapshots (one per archive) choose versions and
+   move freely; they never enter bytes or identities. The baseline snapshot is what images' apt sources may point at; it
    moves deliberately and enters only the images that use it. Every kind defaults to live apt
    sources, so a nightly snapshot never makes an image differ.
 5. **Identity over inputs, failing toward a rebuild.** Package set, every lock field except Renovate
@@ -2031,6 +2071,19 @@ has to show.
     no clock and no build snapshot reaches the bytes; real build times live in provenance.
 21. **Per-push CI stays one fast job.** The floor is checked statically; the matrix and the slow
     builds run weekly and on release tags, where they gate the publish.
+22. **Per-archive snapshots** (decided 2026-11-23). A build pins the `debian` and `debian-security`
+    archives separately (`debian_snapshots`, `plan.json` schema 2, `buildSnapshots` in build type v2),
+    each at an ID its own archive lists, so a Debian security fix can be built with as soon as the
+    security archive lists it. The reason: with one ID for both archives, an ID was usable only once
+    both archives listed a later snapshot, and waiting for the security archive's next snapshot took a
+    median of 30 minutes and reached 42 hours in autumn 2026. A listed ID is safe because the service
+    writes a snapshot's listing row and its whole import in one database transaction (7.5), and a file
+    not yet replicated is a 404 or a checksum mismatch, so the build stops instead of building
+    something else. A bare ID for both archives keeps the older rule and is resolved to what each
+    archive serves; the baseline stays one ID under that rule. Had it gone the other way, a nightly
+    build could lag a security upload by a day or more. The cost is a second ID to
+    carry in `plan.json`, the bundle manifest and the mirror's folder name (`<debian ID>_<debian-security
+    ID>`), and a schema 3 lock that 0.7.0 refuses with input-lock's own message to upgrade.
 
 ## 16. Questions settled, and the ones still open
 
@@ -2093,7 +2146,7 @@ All read on 2026-11-21.
 | squashfs-tools, util-linux, qemu, gnupg, dpkg, cloud-init in Debian 13 | 4.6.1, 2.41.5, 10.0.13, 2.4.7, 1.22.22, 25.1.4 | sources.debian.org |
 | cosign | 3.1.4 | GitHub releases |
 | actions/checkout, actions/setup-python, sigstore/cosign-installer | 7.0.1, 7.1.0, 4.1.3 (pinned by commit) | GitHub releases |
-| input-lock | 0.2.0, `.pyz` sha256 `d352b388...108b` | GitHub releases |
+| input-lock | 0.3.0, `.pyz` sha256 `6b64be5f...b15c` | GitHub releases |
 | Builder snapshot, base image | `20261121T004329Z`; `debian:trixie@sha256:9c6e3814...a8a6` | snapshot.debian.org listings; Docker Hub |
 | mypy, ruff, pre-commit | 2.4.1, 0.17.6, 4.7.0 | PyPI |
 | SLSA | spec 1.2, predicate `https://slsa.dev/provenance/v1` | slsa.dev |

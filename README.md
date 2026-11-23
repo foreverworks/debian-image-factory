@@ -1,6 +1,6 @@
 # Debian Image Factory
 
-**Every Debian image you ship, built from one archive snapshot, rebuilt only when something in it
+**Every Debian image you ship, built from pinned archive snapshots, rebuilt only when something in it
 actually changed, and carrying standard records of what is inside and how it was made.**
 
 > **Status: every kind of image builds, tests and publishes, and a nightly loop rebuilds only what
@@ -26,14 +26,15 @@ same recipe can differ for reasons nobody wrote down.
 
 ## What the factory does about it
 
-- **One snapshot for everything.** Every image in a generation resolves its packages from the same
-  [snapshot.debian.org](https://snapshot.debian.org) ID, covering main, updates and security. Your
-  container base, your Incus image, your installer and your OS image agree on every shared package,
+- **One archive state for everything.** Every image in a generation resolves its packages from the same
+  two [snapshot.debian.org](https://snapshot.debian.org) snapshots, one of the main archive (main and
+  updates) and one of the security archive, each pinned on its own, so a security fix can be built with
+  as soon as its own archive lists it. Your container base, your Incus image, your installer and your OS image agree on every shared package,
   by construction.
 - **One core, many shapes.** A minimal Debian core is built once. The OCI (container) image, the
   Incus image, the RAM-booted installer and the OS root filesystem are all derived from that exact
   core, each adding only what it needs.
-- **Every download locked.** One `lock.json` names the snapshot and every external file (a Node.js
+- **Every download locked.** One `lock.json` names the snapshots and every external file (a Node.js
   release, a vendor `.deb`, an SDK) with its version and checksum. Builds run with no network: they
   can only use what the lock names. Renovate can keep the lock current for you.
 - **Rebuild only when it matters.** Before building, the factory computes each image's *input
@@ -97,7 +98,9 @@ debian-image-factory lock check
 debian-image-factory plan > plan.json
 ```
 
-`lock check` reports that the lock and the definition agree and that each snapshot ID is complete:
+`lock check` reports that the lock and the definition agree and that each snapshot ID is complete. The release
+above has one `debian_snapshot` for both archives; a later release pins each archive on its own, and
+`lock snapshot --latest` migrates a lock with one command (the output then names each archive's snapshot):
 
 ```text
 lock.json and factory.toml agree: 6 images, 6 entries
@@ -114,7 +117,7 @@ with the 228 packages already downloaded; a first run also downloads them. The c
 ## How it works
 
 ```text
-lock.json (snapshot ID + every locked download)     factory.toml (your images)
+lock.json (snapshot IDs + every locked download)    factory.toml (your images)
                      \                                   /
                       plan: resolve package sets, compute identities, look them up where you publish
                                           |
@@ -142,12 +145,16 @@ You write two files. The lock holds versions; the definition holds names.
 `lock.json` (maintained by tools, reviewed by you). Every download has a checksum, and so does the
 key that vouches for it: the Node.js release keyring is an entry of its own, so a key change shows
 up as a diff you review. `signed_by` and `sums_url` tell `fetch` to check the checksum against
-Node.js's own signed `SHASUMS256.txt.asc` before anything is built (they make it a schema 2 lock).
+Node.js's own signed `SHASUMS256.txt.asc` before anything is built (they make it a schema 2 lock, and
+`debian_snapshots` makes it schema 3).
 
 ```json
 {
-  "schema": 2,
-  "debian_snapshot": "20261121T004329Z",
+  "schema": 3,
+  "debian_snapshots": {
+    "debian": "20261123T084014Z",
+    "debian-security": "20261123T141315Z"
+  },
   "inputs": {
     "node-26": {
       "module": "node",
@@ -170,7 +177,9 @@ Node.js's own signed `SHASUMS256.txt.asc` before anything is built (they make it
 ```
 
 The checksums are real (Node.js 26.13.1, and the keyring at that commit of nodejs/release-keys).
-The build snapshot moves as often as you like and never ends up inside an image. If your images'
+The build snapshots move as often as you like, each archive on its own clock, and never end up inside an
+image. `debian_snapshots` names the exact ID each archive lists (`debian-image-factory lock snapshot --latest`
+writes it; an older lock with one `debian_snapshot` still works). If your images'
 own apt sources should point at a snapshot too, that is a second, deliberate one, the baseline:
 `debian-image-factory lock baseline --id <ID>` adds it as one more entry. The lock format is
 shared with [input-lock](https://github.com/foreverworks/input-lock), a small library the factory
@@ -363,7 +372,7 @@ jobs:
         with:
           definition: images/factory.toml
           lock: images/lock.json
-          snapshot: latest                      # the newest completed snapshot, without editing the lock
+          snapshot: latest                      # the newest snapshot each archive lists, without editing the lock
           against: |                            # where identities are looked up, and where publish writes
             oci://ghcr.io/example/debian
           publish: true
@@ -418,7 +427,7 @@ repository's own definition; the inputs, the steps and what happens when nothing
   and more than one image format.
 - **mkosi, debos, distrobuilder** each build one image from a recipe, and some of them support many
   formats. The factory stands on the same Debian tooling (it uses mmdebstrap) and adds the layer
-  above: one snapshot across every shape, locked external inputs, identity-based skipping and
+  above: one pair of snapshots across every shape, locked external inputs, identity-based skipping and
   standard records on every artifact.
 
 ## Questions you will probably have

@@ -1,5 +1,9 @@
 # Build type v1
 
+> **Superseded by [build type v2](build-type-v2.md)**, which records one build snapshot for each archive
+> (`buildSnapshots`) instead of one (`buildSnapshot`). Releases up to and including 0.7.0 write this build type,
+> and records written under it stay valid: `verify` accepts both.
+
 Every artifact the factory builds comes with a provenance record, and the record's `buildType`
 field is the address of this page. The page says what the other fields of the record mean, so that
 someone who has never seen the factory can read a record, and so that a verifier can decide which

@@ -38,7 +38,7 @@ container runtime lays them on each other:
 - `package-set`, `sbom-complete` and `no-machine-identity` judge the merged view: a file a later layer
   removes is gone, and the dpkg status is the one from the last layer that holds it.
 - What a later layer hides still ships in the layer that holds it, so the scans for a private key
-  (`no-machine-identity`) and for the build snapshot ID (`no-build-snapshot`) read every layer's file
+  (`no-machine-identity`) and for the build snapshot IDs (`no-build-snapshot`) read every layer's file
   contents, hidden files included. `no-build-snapshot` also reads the image config and the manifest.
 
 Each layer is read once, as a stream, so a large image never sits in memory. The checks that run the image
@@ -200,7 +200,7 @@ run.
 Kinds: core.
 
 It proves that the resolution is repeatable: a second resolution of the same lock, against the same
-snapshot, gives the same package set. If it did not, the identity would name something that cannot
+snapshots, gives the same package set. If it did not, the identity would name something that cannot
 be rebuilt.
 
 PASSED when the two sets are equal. FAILED when they differ.
@@ -209,13 +209,16 @@ PASSED when the two sets are equal. FAILED when they differ.
 
 Kinds: all.
 
-It proves that the build snapshot's timestamp appears nowhere in the artifact's bytes, including the
+It proves that no build snapshot's timestamp appears anywhere in the artifact's bytes, including the
 build-time `file://` source, which the `apt_sources` rendering replaces before the image is packed.
-The snapshot belongs in the record, not in the bytes: otherwise two builds of one package set would
-differ only by when they ran. When the baseline snapshot's ID equals the build snapshot's, the
-check cannot tell the two apart and is skipped with a note.
+A build has two snapshots, one for the `debian` archive and one for `debian-security`, and both are
+searched (one search when they are the same ID). The snapshots belong in the record, not in the bytes:
+otherwise two builds of one package set would differ only by when they ran. When the baseline
+snapshot's ID equals a build snapshot's, the check cannot tell the two apart for that ID: it warns
+and says which archive's snapshot it is, and the other ID, when it differs, is still searched.
 
-PASSED when the ID is found nowhere. FAILED when it is found, naming the files.
+PASSED when no ID is found. FAILED when one is found, naming the files. WARNED when an ID is the
+baseline's, and PASSED for the other.
 
 ## byte-equal
 

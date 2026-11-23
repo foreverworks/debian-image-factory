@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+- The `debian` and `debian-security` archives are pinned separately, so a Debian security fix can be built with as
+  soon as its own archive lists it, instead of after a later snapshot of the security archive (a median of 30
+  minutes, and 42 hours at the worst this autumn). A snapshot ID that an archive itself lists always serves itself
+  and is complete, so each archive's ID only has to be listed by that archive.
+- The lock has `debian_snapshots`, an exact ID per archive, which needs `"schema": 3` and input-lock 0.3.0 (the
+  factory pins it now). `debian_snapshot`, one ID for both archives, is still read: each archive then serves the
+  snapshot it lists at or before that ID, under the stricter rule that every archive lists a later one.
+  **To migrate, run `lock snapshot --latest`**: it writes `debian_snapshots` and removes `debian_snapshot`.
+  Release 0.7.0 refuses a schema 3 lock, so move the factory pin in the lock first (the Action reads it).
+- `lock snapshot --id` takes a bare ID or `archive=ID` (repeat it to move several archives; an archive that is not
+  named keeps what the lock holds, or what the old ID served). `plan --snapshot` takes `lock`, `latest` (now the
+  newest ID each archive lists), a bare ID, or `debian=ID,debian-security=ID`; a missing or unknown archive is a
+  usage error. `lock check` says per archive which snapshot it is and whether it is completed. The baseline is
+  unchanged: one ID, under the stricter rule.
+- An ID that the cached listing does not show yet (snapshot.debian.org caches a listing for ten minutes) is
+  confirmed with a narrow read of just that ID before it is refused. An ID an archive does not list stops the
+  command and names the archive, and a package that cannot be resolved names both IDs.
+- `plan.json` is schema 2: `snapshots` (an ID per archive) replaces `snapshot`, and a schema 1 plan is refused with
+  a message to plan again. The bundle manifest is schema 2 (`snapshots`); a bundle made by 0.7.0 or earlier is
+  refused, so fetch again. The partial mirror is `<cache>/mirror/<debian ID>_<debian-security ID>/<archive>/`; what
+  the builder sees, the artifacts' bytes and every identity are unchanged, and the engine revision does not move.
+- Provenance is written under [build type v2](docs/build-type-v2.md): `internalParameters.buildSnapshots` replaces
+  `buildSnapshot`, and each `InRelease` address carries its own archive's ID. `verify` accepts v1 and v2 records.
+- `no-build-snapshot` looks for both build snapshot IDs. An ID equal to the baseline's still only warns, and the other
+  ID is still searched.
+- `scripts/spike-core` takes `--debian ID --debian-security ID` as well as `--snapshot ID`.
+
 ## 0.7.0 (2026-11-23)
 
 - Laying out the shared mirror publishes every file by an atomic rename, so parallel builds and test processes sharing one
