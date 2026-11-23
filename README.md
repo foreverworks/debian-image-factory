@@ -6,10 +6,9 @@ actually changed, and carrying standard records of what is inside and how it was
 > **Status: every kind of image builds, tests and publishes, and a nightly loop rebuilds only what
 > changed.** The factory checks your lock and definition, resolves every image's exact package set
 > from a snapshot, tells you what would be built and why, and builds core, OCI, Incus, installer and
-> OS images with their SBOM, provenance and checks. The latest release is v0.6.3 and the interface
-> may still change before 1.0. The development branch adds record signing and parallel builds, for
-> release 0.7.0; where this page describes those, it says so. The full design is in
-> [DESIGN.md](DESIGN.md).
+> OS images with their SBOM, provenance and checks. Release 0.6.3 is the newest this page's commands were
+> run on. Record signing and parallel builds are in 0.7.0 and later (0.6.3 and earlier have neither). The
+> interface may still change before 1.0. The full design is in [DESIGN.md](DESIGN.md).
 
 ## The problem
 
@@ -52,7 +51,7 @@ same recipe can differ for reasons nobody wrote down.
 
   OCI images carry them in the registry, linked to the image; files carry them in a
   `<digest>.intoto.jsonl` beside them. Any tool that speaks these standards can read them. They are
-  unsigned unless you switch signing on (`publish --sign keyless` or `--sign key:<path>`, from release 0.7.0; see
+  unsigned unless you switch signing on (`publish --sign keyless` or `--sign key:<path>`, from 0.7.0; see
   below).
 - **No root needed.** Rootless Docker, or a Debian machine with user namespaces, is enough to build
   everything. Only the boot tests want KVM.
@@ -70,6 +69,7 @@ well, keep doing that. The factory pays off when you have several shapes, or nee
 
 ## What you need first
 
+- **To get it**: `git`, and `gh` or a browser to download the release files.
 - **To plan** (`lock check`, `plan`): any Debian or Ubuntu machine with python3 3.13 or newer, `apt` and
   `gpgv`, and network access to snapshot.debian.org.
 - **To build and test**: Docker, rootless is enough, and nothing from the network while it builds. The boot
@@ -82,14 +82,16 @@ well, keep doing that. The factory pays off when you have several shapes, or nee
 
 ## Try it
 
-The latest release, v0.6.3, is one file. Download it with its checksum, check it, and put it on your PATH as
+The factory is one file. These commands pin v0.6.3, the release they were run on; later releases work the same
+unless their notes say otherwise. Download the file with its checksum, check it, and put it on your PATH as
 `debian-image-factory` (the commands below call it that; `python3 debian-image-factory-0.6.3.pyz` works too).
+`~/.local/bin` must be on your PATH.
 The release also carries a Sigstore bundle, `debian-image-factory-0.6.3.pyz.sigstore.json`.
 
 ```sh
 gh release download v0.6.3 -R foreverworks/debian-image-factory     # or take the three files from the release page
 sha256sum -c debian-image-factory-0.6.3.pyz.sha256                  # debian-image-factory-0.6.3.pyz: OK
-install -m 755 debian-image-factory-0.6.3.pyz ~/.local/bin/debian-image-factory
+install -Dm 755 debian-image-factory-0.6.3.pyz ~/.local/bin/debian-image-factory
 git clone --branch v0.6.3 https://github.com/foreverworks/debian-image-factory && cd debian-image-factory/examples
 debian-image-factory lock check
 debian-image-factory plan > plan.json
@@ -378,7 +380,7 @@ token to `plan` and `publish` and to no other step, and needs `contents: write` 
 put that token in a step's environment by itself, which is why the input exists.
 
 The inputs are `definition`, `lock`, `params`, `snapshot`, `against`, `steps` (default
-`plan,fetch,build,test`), `publish`, `sign` (`none`, `keyless` or `key:REF`; not `none` installs cosign 3.1.4, and `keyless` needs `id-token: write`), `mirror`, `jobs` (images built at a time, `build --jobs`; `sign` and `jobs` need factory 0.7.0, not yet released, or newer, and the Action stops early with a message when your lock pins an older release), `token` (default the workflow's token) and
+`plan,fetch,build,test`), `publish`, `sign` (`none`, `keyless` or `key:REF`; not `none` installs cosign 3.1.4, and `keyless` needs `id-token: write`), `mirror`, `jobs` (images built at a time, `build --jobs`; `sign` and `jobs` need factory 0.7.0 or newer, and the Action stops early with a message when your lock pins an older release), `token` (default the workflow's token) and
 `keep-work` (default `true`, so later steps can read the `plan` output; `false` removes the work directory,
 with the build output, when the run ends); the outputs are `changed`, `plan` (the path of
 `plan.json`) and `artifacts` (JSON of image to digest). The runner needs Docker to build, and `apt`
@@ -428,11 +430,10 @@ retained build can be rebuilt with snapshot.debian.org unreachable.
 
 **Do I need to trust the factory's builds?** You do not have to take its word. Every record names
 the lock digest, the snapshot indices, the recipe, the parent and the builder, so you can check an
-artifact against your own lock. Records are unsigned by default; from release 0.7.0, Sigstore keyless
+artifact against your own lock. Records are unsigned by default; from 0.7.0, Sigstore keyless
 signing in CI, or your own key, can be switched on without changing anything else (next question).
 
-**How do I sign records?** Signing is on the development branch and arrives with release 0.7.0; v0.6.3 accepts
-only `--sign none`. `publish --sign keyless` signs each record with Sigstore through the CI's OIDC
+**How do I sign records?** Signing needs 0.7.0 or newer; 0.6.3 and earlier accept only `--sign none`. `publish --sign keyless` signs each record with Sigstore through the CI's OIDC
 identity (the job needs `permissions: id-token: write`; the signature goes to the public Rekor log), and
 `--sign key:<path or KMS URI>` signs with a key you hold, which is never sent to a log. Both call cosign
 3.1.4, which must be on PATH (the Action installs it when `sign` is not `none`). The factory never holds a
@@ -458,7 +459,7 @@ it runs on the python3 Debian already ships. It is distributed as a single `.pyz
 
 ## Status
 
-Built and in the latest release, v0.6.3:
+Built, in v0.6.3 and later:
 
 - the lock and definition checks, identities, `lock check`, `lock snapshot`, `lock baseline`, `lock
   checksums` and `plan`, with the pinned builder image;
@@ -471,7 +472,7 @@ Built and in the latest release, v0.6.3:
   with its retention rule, inputs bundles and offline replay, and the optional `byte-equal` check. A night
   with no relevant upload builds nothing.
 
-Built on the development branch, for release 0.7.0: record signing and parallel builds (`build --jobs`).
+Built, in 0.7.0 and later: record signing and parallel builds (`build --jobs`).
 
 Planned: the `.pyz` pinning the published builder image, `--builder host`, zstd compression, and for 1.0 a
 full example repository, once a real deployment has run every kind through its own promotion. What is

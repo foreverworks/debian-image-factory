@@ -1,10 +1,10 @@
 # Debian Image Factory: design
 
-Status: built, and in the latest release (v0.6.3): the lock and definition checks, identities and `plan`;
+Status: built, in v0.6.3 and later: the lock and definition checks, identities and `plan`;
 core, OCI, Incus, installer and OS images with their records and checks; publishing to a directory, a
 registry and a GitHub release; `verify`; and the nightly loop (`plan --against`, `--snapshot latest`, the
-GitHub Action, `prune`, inputs bundles and offline replay). Built on the development branch for release
-0.7.0: record signing (8.3) and parallel builds. Planned: the published builder pinned in the `.pyz` (5.4),
+GitHub Action, `prune`, inputs bundles and offline replay). Built, in 0.7.0 and later:
+record signing (8.3) and parallel builds. Planned: the published builder pinned in the `.pyz` (5.4),
 `--builder host`, zstd, and the rest of the 1.0 list in [section 14](#14-what-is-built-and-what-is-planned).
 This document is the design the factory follows and is revised as it changes. Written 2026-11-21; every version
 this document names was read that day at the source listed in
@@ -272,7 +272,7 @@ subsection below is that design, and nothing in it is published yet.
 
 - **In CI and by default locally**, the builder is a container image the factory release pins by
   digest. The factory's own release pipeline builds it from a fixed
-  snapshot and signs it (5.4); the very first one was bootstrapped from Debian's
+  snapshot, publishes and signs it (5.4); the very first one was bootstrapped from Debian's
   official `debian:trixie` image pinned by digest. It runs with `--privileged`, which under rootless
   Docker grants nothing beyond the invoking user's own namespace, and mmdebstrap runs in root mode
   inside it. Under rootful Docker (GitHub-hosted runners among them) `--privileged` is real host
@@ -1239,7 +1239,7 @@ through the CI's OIDC identity (cosign 3.1.4); `--sign key:<path or KMS URI>` us
 consumer holds. The factory never holds a key, and nothing in a record changes shape when signing is
 switched on.
 
-*Built (0.7.0).* `publish` signs after the build and the tests, when it merges a record into a target; the
+*Built (0.7.0 and later).* `publish` signs after the build and the tests, when it merges a record into a target; the
 records in `out/` stay unsigned, so one build can be published signed to one target and unsigned to another.
 cosign is found on PATH and must be exactly 3.1.4 (`GitVersion` of `cosign version`); a missing or another
 cosign fails before anything is written, naming 3.1.4. `keyless` also fails before any write when the
@@ -1564,7 +1564,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - id: factory
-        uses: foreverworks/debian-image-factory@<commit> # v0.6.2
+        uses: foreverworks/debian-image-factory@<commit> # v0.6.3
         with:
           definition: images/factory.toml
           lock: images/lock.json
@@ -1949,14 +1949,14 @@ has to show.
 
 | Feature | Status | What it shows |
 |---|---|---|
-| **The contract**: typed package, input-lock pinned and bundled, definition parsing and checks, identity, `lock check` with snapshot re-resolution, `plan` with the reuse, wait and build states, a minimal pinned builder image (Debian 13 from a fixed snapshot with mmdebstrap, apt, dpkg and python3) | built (v0.6.3) | a sample lock and definition covering every kind pass `lock check`; plan identities are stable across runs and machines; a real core build's dpkg status equals the plan's set; the snapshot listing behaves as 7.5 assumes |
-| **Core**: `fetch`, partial mirror, offline core build, SBOM, provenance, `.intoto.jsonl`, core checks, `dir://` target | built (v0.6.3) | two builds from one lock resolve the same set; no machine identity; no build snapshot in the bytes; SBOM complete |
-| **OCI**: OCI kind with child layers, `oci://` publish with identity tags and referrers (tag schema included), `node-tarball` module, `oci-run`, `verify` | built (v0.6.3) | a Node runtime image's provenance names core's digest; its Node version equals the lock's; records attach on a registry without the referrers API |
-| **Incus**: Incus kind, NoCloud templates, `incus-boot` and `two-clones` in a VM, `github-release://` publish | built (v0.6.3) | the boot contract passes for the base and for a child |
-| **Installer and OS**: both kinds, `deb` and `file` modules, parameters, `apt_sources`, `installer-boot`, `os-boot` | built (v0.6.3) | both boot in QEMU; a flag off removes its module from both and changes both identities; moving the baseline rebuilds the OS and nothing else |
-| **Nightly loop**: `plan --against` on every target, `--snapshot latest`, the Action, `prune`, inputs bundles, offline replay | built (v0.6.3) | a night with no relevant upload builds nothing; one with a single upload rebuilds exactly its chain; a bundle rebuilds with snapshot.debian.org unreachable |
-| **Optional signing** of records (8.3) | built on the development branch, for 0.7.0 | records signed keyless or with a key verify with `verify`; an unsigned record stays valid |
-| **Parallel builds** (`build --jobs`, 9.1) | built on the development branch, for 0.7.0 | the artifacts, digests and records equal a serial build's |
+| **The contract**: typed package, input-lock pinned and bundled, definition parsing and checks, identity, `lock check` with snapshot re-resolution, `plan` with the reuse, wait and build states, a minimal pinned builder image (Debian 13 from a fixed snapshot with mmdebstrap, apt, dpkg and python3) | built, in v0.6.3 and later | a sample lock and definition covering every kind pass `lock check`; plan identities are stable across runs and machines; a real core build's dpkg status equals the plan's set; the snapshot listing behaves as 7.5 assumes |
+| **Core**: `fetch`, partial mirror, offline core build, SBOM, provenance, `.intoto.jsonl`, core checks, `dir://` target | built, in v0.6.3 and later | two builds from one lock resolve the same set; no machine identity; no build snapshot in the bytes; SBOM complete |
+| **OCI**: OCI kind with child layers, `oci://` publish with identity tags and referrers (tag schema included), `node-tarball` module, `oci-run`, `verify` | built, in v0.6.3 and later | a Node runtime image's provenance names core's digest; its Node version equals the lock's; records attach on a registry without the referrers API |
+| **Incus**: Incus kind, NoCloud templates, `incus-boot` and `two-clones` in a VM, `github-release://` publish | built, in v0.6.3 and later | the boot contract passes for the base and for a child |
+| **Installer and OS**: both kinds, `deb` and `file` modules, parameters, `apt_sources`, `installer-boot`, `os-boot` | built, in v0.6.3 and later | both boot in QEMU; a flag off removes its module from both and changes both identities; moving the baseline rebuilds the OS and nothing else |
+| **Nightly loop**: `plan --against` on every target, `--snapshot latest`, the Action, `prune`, inputs bundles, offline replay | built, in v0.6.3 and later | a night with no relevant upload builds nothing; one with a single upload rebuilds exactly its chain; a bundle rebuilds with snapshot.debian.org unreachable |
+| **Optional signing** of records (8.3) | built, in 0.7.0 and later | records signed keyless or with a key verify with `verify`; an unsigned record stays valid |
+| **Parallel builds** (`build --jobs`, 9.1) | built, in 0.7.0 and later | the artifacts, digests and records equal a serial build's |
 | **The published builder pinned in the `.pyz`** (5.4) | planned | a stranger's build uses exactly the builder the release published |
 | **`--builder host`, zstd compression** (9.1, 8.1) | planned | no criteria written yet |
 | **1.0**: docs for strangers, a full example repository | planned; it needs at least one real deployment that has run every kind through its own promotion | the README's quick start works on a clean machine |
