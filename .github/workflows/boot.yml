@@ -1,5 +1,5 @@
 # The tests that boot images, on demand: the boot checks' (a small OS root and installer kit built with
-# mmdebstrap) and M5's acceptance (the example's installer and OS, built with a signed vendor .deb, a
+# mmdebstrap) and the example's installer and OS (built with a signed vendor .deb, a
 # feature flag and a moved baseline), booted in QEMU (installer-boot, os-boot, two-clones). Run by hand
 # from the Actions tab; a release runs the same tests in its integration tier (integration.yml).
 #
@@ -19,7 +19,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-26.04
     timeout-minutes: 90
-    # the tier's two classes, the boot checks' and M5's acceptance, one on each runner (scripts/test boot --shard)
+    # the tier's two classes, the boot checks' and the example's installer and OS, one on each runner (scripts/test boot --shard)
     strategy:
       fail-fast: false
       matrix:

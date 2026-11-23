@@ -1,4 +1,4 @@
-"""The M1 spike (DESIGN 7.2): the plan's core package set equals a real mmdebstrap build's.
+"""The resolver spike (DESIGN 7.2): the plan's core package set equals a real mmdebstrap build's.
 
 It plans the example definition at the example lock's snapshot, builds core for real with
 mmdebstrap in the builder image at the same snapshot, and compares the plan's set with the built

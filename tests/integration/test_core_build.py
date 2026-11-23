@@ -1,7 +1,7 @@
-"""M2's acceptance, end to end on the example definition at the example lock's snapshot.
+"""Core end to end on the example definition at the example lock's snapshot.
 
 plan, fetch, build core twice (offline, in the builder), test, publish to a `dir://` target, and plan
-against it. It proves the milestone's four claims: two builds from one lock resolve the same set (and
+against it. It proves four claims: two builds from one lock resolve the same set (and
 here give the same bytes, which also guards the engine revision); the artifact carries no machine
 identity; the build snapshot is nowhere in its bytes, and the same package set built at a second build
 snapshot gives the same bytes (DESIGN 11); its SBOM lists every installed package. Needs

@@ -1,4 +1,4 @@
-"""M3's acceptance (DESIGN 14), end to end on the example definition with the real node module.
+"""The OCI kind end to end (DESIGN 7.4, 8.2, 14), on the example definition with the real node module.
 
 From the examples: plan, fetch, build core, oci-base and node-26 (Node.js from nodejs.org, checked against
 the signed SHASUMS256.txt), `test` the output with the definition's module tables, then publish: core to a

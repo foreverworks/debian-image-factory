@@ -366,7 +366,7 @@ class ParamRowsTest(IdentityCase):
         self.assertEqual(self.changed_by_params({"vendor_tools": True}), ["installer", "os", "os-child"])
 
     def test_the_flag_off_removes_its_module_from_the_installer_and_the_os(self) -> None:
-        # M5's acceptance (DESIGN 14): one flag, one module, both boot kinds
+        # One flag, one module, both boot kinds (DESIGN 6.4, 14)
         on = compute(
             as_lock(example_lock_data()), self.spec, packages_for(), files=self.facts, params={"vendor_tools": True}
         )

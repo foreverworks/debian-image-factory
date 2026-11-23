@@ -1,4 +1,4 @@
-"""M6's acceptance checks 1 and 2 (DESIGN 14), on the nightly path itself: the Action's own plan and summary steps
+"""The two nightly claims (DESIGN 12), on the nightly path itself: the Action's own plan and summary steps
 (action.yml, run for real by tests/support/action.py) call the command line, `plan --snapshot latest --against
 dir://...`, against the fixture archive served over HTTP, with a target that holds published artifacts and their
 passing check records.

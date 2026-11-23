@@ -10,7 +10,7 @@ records name it with both files' sha256; the metadata is the factory's; the chil
 parent and core; every file check passes on both images (`incus-boot` and `two-clones` are not run without
 an Incus host, and never passed); the child holds its parent's files, its package, its file tree and what
 its hook wrote. With DIF_INCUS_HOST=1 (on an Incus host: scripts/incus-vm gives one) `incus-boot` and
-`two-clones` must pass too, for the base and for the child: the boot contract of DESIGN 14's M4.
+`two-clones` must pass too, for the base and for the child: the Incus boot contract (DESIGN 11, 12).
 """
 
 import base64

@@ -4,7 +4,7 @@
 #   scripts/test static        ruff, ruff format, mypy, check-ignores, shellcheck (scripts, hooks, the Action's steps)
 #   scripts/test unit          the unit tests (seconds, no network, no root)
 #   scripts/test integration   the slow tests, DIF_INTEGRATION=1 (network, docker)
-#   scripts/test boot          only the tests that boot images: the boot checks' and M5's acceptance (QEMU;
+#   scripts/test boot          only the tests that boot images: the boot checks' and the installer and OS example's (QEMU;
 #                              KVM when /dev/kvm opens)
 #   scripts/test incus         builds core, incus-base and an Incus child, runs every check on them (the
 #                              Incus ones in scripts/incus-vm), and requires them all to pass
@@ -109,7 +109,7 @@ matrix() {
     done
 }
 
-# The Incus boot contract (DESIGN 14's M4): core, incus-base and an Incus child of it are built from a copy
+# The Incus boot contract (DESIGN 11, 12): core, incus-base and an Incus child of it are built from a copy
 # of the example definition with the default builder image (scripts/builder build), every check runs on
 # the host, then incus-boot and two-clones run again on an Incus host in scripts/incus-vm (the last
 # result of a check wins), and verify --require-checks must pass for all three. The build is in

@@ -1,4 +1,4 @@
-"""M5's acceptance (DESIGN 14), on the example definition with a real signed vendor repository.
+"""The installer and OS kinds booted (DESIGN 6.4, 11), on the example definition with a real signed vendor repository.
 
 The example's made-up vendor .deb is replaced by the GitHub CLI from its own apt repository: the lock pins
 the vendor's keyring by sha256 (a trust root), takes the version the vendor's index lists now, and `lock

@@ -644,7 +644,7 @@ class BuildOciTest(unittest.TestCase):
         seen_ = self.seen
         assert seen_ is not None
         self.assertIn("# stub installs ['node-26']", seen_.script)
-        # inputs are staged for a module although the image has no hooks (the M2 gap)
+        # inputs are staged for a module although the image has no hooks
         self.assertEqual(
             seen_.inputs,
             {

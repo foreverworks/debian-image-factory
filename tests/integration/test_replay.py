@@ -1,4 +1,4 @@
-"""M6's acceptance check 3, for real: a bundle rebuilds with snapshot.debian.org unreachable (DESIGN 7.7, 12).
+"""Offline replay, for real: a bundle rebuilds with snapshot.debian.org unreachable (DESIGN 7.7, 12).
 
 The example definition plus one more OCI image (`oci-tools`, which installs `jq`) is planned at the example lock's
 snapshot. Core, oci-base and oci-tools are the images that build; the others are marked `reuse`, so `fetch` reads
@@ -9,7 +9,7 @@ anything, not only the builder it starts. The container reaches the host's docke
 mounts the work paths at the same paths, so the builder's bind mounts resolve. A request to snapshot.debian.org
 from the same container is made first and must fail.
 
-Core is byte-equal across builds (M2), so the replayed core must have the first build's digest; an OCI image
+Core is byte-equal across builds, so the replayed core must have the first build's digest; an OCI image
 is compared by its manifest digest. oci-tools builds on oci-base on core, found in the replay's output
 directory: its bundle holds only what it adds (jq and what jq pulls), so a replay that finishes also proves a
 child reads nothing of its parent from the mirror. Needs docker, the builder image (`scripts/builder build`)
