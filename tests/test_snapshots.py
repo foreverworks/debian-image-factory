@@ -1,7 +1,9 @@
 import json
 import unittest
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 from debian_image_factory import listings, snapshots
 
@@ -262,18 +264,198 @@ class ProblemsAndResolveTests(unittest.TestCase):
             {"a": "20260102T000000Z", "b": "20260101T120000Z"},
         )
 
-    def test_resolve_lock_latest_and_explicit(self) -> None:
-        self.assertEqual(snapshots.resolve("lock", self.both, "20260102T000000Z"), "20260102T000000Z")
-        self.assertEqual(snapshots.resolve("latest", self.both, "20260101T000000Z"), "20260102T120000Z")
-        self.assertEqual(snapshots.resolve("20260102T060000Z", self.both, "20260101T000000Z"), "20260102T060000Z")
+    def test_resolve_a_bare_id_gives_what_each_archive_serves(self) -> None:
+        self.assertEqual(
+            snapshots.resolve("lock", self.both, "20260102T060000Z"), {"a": "20260102T000000Z", "b": "20260101T120000Z"}
+        )
+        self.assertEqual(
+            snapshots.resolve("20260102T060000Z", self.both, "x"), {"a": "20260102T000000Z", "b": "20260101T120000Z"}
+        )
+
+    def test_resolve_latest_is_the_newest_listed_id_of_each_archive(self) -> None:
+        self.assertEqual(
+            snapshots.resolve("latest", self.both, "20260101T000000Z"),
+            {"a": "20260103T000000Z", "b": "20260103T120000Z"},
+        )
+        with self.assertRaisesRegex(ValueError, "archive b lists no snapshots"):
+            snapshots.resolve("latest", {"a": A, "b": []}, "20260101T000000Z")
+        with self.assertRaisesRegex(ValueError, "no archive is in use"):
+            snapshots.resolve("latest", {}, "20260101T000000Z")
 
     def test_resolve_refuses_what_cannot_be_used(self) -> None:
         with self.assertRaisesRegex(ValueError, "lock's snapshot ID 20260103T000000Z cannot be used.*not completed"):
             snapshots.resolve("lock", self.both, "20260103T000000Z")
-        with self.assertRaisesRegex(ValueError, "snapshot ID tomorrow cannot be used.*not a snapshot ID"):
-            snapshots.resolve("tomorrow", self.both, "20260101T000000Z")
-        with self.assertRaisesRegex(ValueError, "no completed snapshot ID"):
-            snapshots.resolve("latest", {"a": ["20260101T000000Z"]}, "20260101T000000Z")
+        with self.assertRaisesRegex(ValueError, "the lock pins no snapshot"):
+            snapshots.resolve("lock", self.both, None)
+
+
+class ExactTests(unittest.TestCase):
+    """An exact ID per archive: usable when that archive's own listing holds it, whatever the other lists."""
+
+    def setUp(self) -> None:
+        self.both = {"a": A, "b": B}
+
+    def test_a_listed_id_is_usable_without_a_later_one(self) -> None:
+        newest = {"a": "20260103T000000Z", "b": "20260103T120000Z"}
+        self.assertEqual(snapshots.exact_problems(newest, self.both), {"a": [], "b": []})
+        self.assertEqual(snapshots.resolve(newest, self.both, None), newest)
+
+    def test_each_archive_may_be_at_a_different_time(self) -> None:
+        mixed = {"a": "20260101T000000Z", "b": "20260103T120000Z"}
+        self.assertEqual(snapshots.resolve(mixed, self.both, None), mixed)
+        self.assertEqual(snapshots.resolve("lock", self.both, mixed), mixed)
+
+    def test_an_id_the_archive_does_not_list_is_refused_never_replaced(self) -> None:
+        found = snapshots.exact_problems({"a": "20260102T060000Z", "b": "20260101T120000Z"}, self.both)
+        self.assertEqual(found["b"], [])
+        self.assertEqual(
+            found["a"],
+            ["20260102T060000Z is not listed by archive a (the nearest listed one before it is 20260102T000000Z)"],
+        )
+        with self.assertRaisesRegex(
+            ValueError, "the lock's snapshots cannot be used: a: 20260102T060000Z is not listed"
+        ):
+            snapshots.resolve("lock", self.both, {"a": "20260102T060000Z", "b": "20260101T120000Z"})
+
+    def test_an_id_listed_by_the_other_archive_only_is_not_enough(self) -> None:
+        found = snapshots.exact_problems({"a": "20260101T120000Z", "b": "20260101T120000Z"}, self.both)
+        self.assertIn("20260101T120000Z is not listed by archive a", found["a"][0])
+        self.assertEqual(found["b"], [])
+
+    def test_where_the_id_lies_is_said(self) -> None:
+        later = snapshots.exact_problems({"a": "20260104T000000Z", "b": B[0]}, self.both)["a"][0]
+        self.assertIn("its newest is 20260103T000000Z", later)
+        earlier = snapshots.exact_problems({"a": "20251231T000000Z", "b": B[0]}, self.both)["a"][0]
+        self.assertIn("its first is 20260101T000000Z", earlier)
+        empty = snapshots.exact_problems({"a": A[0], "b": B[0]}, {"a": [], "b": B})["a"][0]
+        self.assertIn("lists nothing at all", empty)
+
+    def test_missing_extra_and_malformed_archives_are_named(self) -> None:
+        found = snapshots.exact_problems({"a": "soon", "c": A[0]}, self.both)
+        self.assertIn("'soon' is not a snapshot ID", found["a"][0])
+        self.assertEqual(found["b"], ["no snapshot is pinned for archive b"])
+        self.assertIn("c is not an archive this build reads", found["c"][0])
+
+    def test_listed_is_exact_membership(self) -> None:
+        self.assertTrue(snapshots.listed(A[1], A))
+        self.assertFalse(snapshots.listed("20260102T000001Z", A))
+        self.assertFalse(snapshots.listed(A[0], []))
+
+
+class ChoiceTests(unittest.TestCase):
+    def test_the_words_a_bare_id_and_pairs(self) -> None:
+        self.assertEqual(snapshots.parse_choice("lock"), "lock")
+        self.assertEqual(snapshots.parse_choice("latest"), "latest")
+        self.assertEqual(snapshots.parse_choice("20260102T000000Z"), "20260102T000000Z")
+        self.assertEqual(
+            snapshots.parse_choice("debian-security=20260103T000000Z,debian=20260101T000000Z"),
+            {"debian": "20260101T000000Z", "debian-security": "20260103T000000Z"},
+        )
+
+    def test_a_missing_unknown_repeated_or_malformed_archive_is_a_usage_problem(self) -> None:
+        for text, message in (
+            ("debian=20260101T000000Z", "debian-security is missing"),
+            ("debian=20260101T000000Z,other=20260101T000000Z", "'other' is not an archive"),
+            ("debian=20260101T000000Z,debian=20260102T000000Z", "named twice"),
+            ("debian=20260101T000000Z,debian-security=soon", "'soon' is not a snapshot ID"),
+            ("debian-security", "is not lock, latest"),
+            ("", "is not lock, latest"),
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, message):
+                snapshots.parse_choice(text)
+
+    def test_ids_for_lock_snapshot_may_name_some_archives(self) -> None:
+        self.assertEqual(snapshots.parse_ids(["20260102T000000Z"]), "20260102T000000Z")
+        self.assertEqual(snapshots.parse_ids(["debian=20260102T000000Z"]), {"debian": "20260102T000000Z"})
+        self.assertEqual(
+            snapshots.parse_ids(["debian=20260101T000000Z", "debian-security=20260102T000000Z"]),
+            {"debian": "20260101T000000Z", "debian-security": "20260102T000000Z"},
+        )
+        with self.assertRaisesRegex(ValueError, "a bare snapshot ID covers both archives"):
+            snapshots.parse_ids(["20260102T000000Z", "debian=20260101T000000Z"])
+        with self.assertRaisesRegex(ValueError, "is not archive=ID"):
+            snapshots.parse_ids(["soon"])
+
+    def test_named_is_what_a_narrow_read_can_confirm(self) -> None:
+        self.assertEqual(snapshots.named("latest"), {})
+        self.assertEqual(snapshots.named("20260101T000000Z"), {})
+        self.assertEqual(snapshots.named({"a": "x"}), {"a": "x"})
+
+    def test_the_stem_joins_the_ids_in_archive_order(self) -> None:
+        self.assertEqual(
+            snapshots.stem({"debian-security": "20260103T000000Z", "debian": "20260101T000000Z"}),
+            "20260101T000000Z_20260103T000000Z",
+        )
+
+
+class NarrowReadTests(unittest.TestCase):
+    """The service caches a listing for ten minutes: an ID newer than its newest is asked for alone."""
+
+    LISTED: ClassVar[dict[str, tuple[str, ...]]] = {"debian": tuple(A), "debian-security": tuple(B)}
+
+    def answering(self, text: str) -> tuple[list[str], Callable[[str], bytes]]:
+        asked: list[str] = []
+
+        def read(url: str) -> bytes:
+            asked.append(url)
+            return text.encode()
+
+        return asked, read
+
+    def test_a_listed_answer_adds_the_id(self) -> None:
+        new = "20260104T000000Z"
+        asked, read = self.answering(json.dumps({"result": {"debian": [new]}}))
+        found = listings.confirm(self.LISTED, {"debian": new}, base="https://s.example/", read=read)
+        self.assertEqual(found["debian"], (*A, new))
+        self.assertEqual(found["debian-security"], tuple(B))
+        self.assertEqual(asked, [f"https://s.example/mr/timestamp/?archive=debian&after={new}&before={new}"])
+
+    def test_an_empty_answer_leaves_the_listing_and_the_id_stays_unlisted(self) -> None:
+        new = "20260104T000000Z"
+        _, read = self.answering('{"result": {}}')
+        found = listings.confirm(self.LISTED, {"debian": new}, read=read)
+        self.assertEqual(found, self.LISTED)
+        self.assertIn(
+            "is not listed by archive debian",
+            snapshots.exact_problems({"debian": new, "debian-security": B[0]}, found)["debian"][0],
+        )
+
+    def test_ids_that_the_listing_can_decide_need_no_read(self) -> None:
+        asked, read = self.answering("{}")
+        named = {
+            "debian": A[1],
+            "debian-security": "20260102T000000Z",
+        }  # listed, and not listed but older than the newest
+        self.assertEqual(listings.confirm(self.LISTED, named, read=read), self.LISTED)
+        self.assertEqual(asked, [])
+        self.assertEqual(listings.confirm(self.LISTED, {"debian": "soon"}, read=read), self.LISTED)
+        self.assertEqual(asked, [])
+
+    def test_an_archive_with_an_empty_listing_asks_too(self) -> None:
+        asked, read = self.answering(json.dumps({"result": {"debian": [A[0]]}}))
+        found = listings.confirm({"debian": ()}, {"debian": A[0]}, read=read)
+        self.assertEqual(found["debian"], (A[0],))
+        self.assertEqual(len(asked), 1)
+
+    def test_answers_of_the_wrong_shape_are_errors(self) -> None:
+        new = "20260104T000000Z"
+        for text, message in (
+            ("<html>", "not JSON"),
+            ("[]", "no 'result' object"),
+            (json.dumps({"result": {"debian-security": [new]}}), "names \\['debian-security'\\]"),
+            ('{"result": {"debian": ["2026"]}}', "not a snapshot ID"),
+        ):
+            with self.subTest(text=text):
+                _, read = self.answering(text)
+                with self.assertRaisesRegex(ValueError, message):
+                    listings.confirm(self.LISTED, {"debian": new}, read=read)
+
+    def test_a_failed_read_is_an_oserror(self) -> None:
+        def read(url: str) -> bytes:
+            raise OSError("connection refused")
+
+        with self.assertRaises(OSError):
+            listings.confirm(self.LISTED, {"debian": "20260104T000000Z"}, read=read)
 
 
 if __name__ == "__main__":

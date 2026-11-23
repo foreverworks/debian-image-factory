@@ -49,9 +49,10 @@ from . import (
     sign,
 )
 
-BUILD_TYPE: Final = re.compile(re.escape(records.REPOSITORY) + r"/blob/v[0-9][0-9A-Za-z.+-]*/docs/build-type-v1\.md")
-"""The `buildType` of any release of this factory: the document names its release, so a verifier of one
-release still reads what another built."""
+BUILD_TYPE: Final = re.compile(re.escape(records.REPOSITORY) + r"/blob/v[0-9][0-9A-Za-z.+-]*/docs/build-type-v[12]\.md")
+"""The `buildType` of any release of this factory, of either build type (v1 names one `buildSnapshot`, v2 a
+`buildSnapshots` per archive): the document names its release, so a verifier of one release still reads what
+another built."""
 
 
 @dataclass(frozen=True, slots=True)

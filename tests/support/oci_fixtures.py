@@ -127,7 +127,7 @@ def records_text(
         definition=SOURCE,
         identity=identity,
         engine=1,
-        build_snapshot="20261121T004329Z",
+        build_snapshots={"debian": "20261121T004329Z", "debian-security": "20261121T004329Z"},
         architecture="amd64",
         reason=None,
         lock=lock,

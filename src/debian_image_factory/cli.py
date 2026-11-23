@@ -11,7 +11,20 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from . import __version__, checks, commands, definition, fetch, prune, publish, published, resolve, sign, verify
+from . import (
+    __version__,
+    checks,
+    commands,
+    definition,
+    fetch,
+    prune,
+    publish,
+    published,
+    resolve,
+    sign,
+    snapshots,
+    verify,
+)
 from . import tools as builder
 from .build import run as build_run
 
@@ -40,7 +53,7 @@ def files_options(command: argparse.ArgumentParser, definition: bool = True) -> 
 def parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(
         prog="debian-image-factory",
-        description="Debian images from one archive snapshot, rebuilt only when their inputs change.",
+        description="Debian images from pinned archive snapshots, rebuilt only when their inputs change.",
     )
     top.add_argument("--version", action="version", version=f"debian-image-factory {__version__}")
     commands_ = top.add_subparsers(dest="command", metavar="<command>")
@@ -53,12 +66,24 @@ def parser() -> argparse.ArgumentParser:
     sources_options(check)
     check.add_argument("--offline", action="store_true", help="skip re-resolving the snapshot IDs")
 
-    snapshot = lock.add_parser("snapshot", help="move the build snapshot")
+    snapshot = lock.add_parser(
+        "snapshot",
+        help="pin the build snapshots, one per archive (writes debian_snapshots, which replaces debian_snapshot)",
+    )
     files_options(snapshot, definition=False)
     sources_options(snapshot)
     which = snapshot.add_mutually_exclusive_group(required=True)
-    which.add_argument("--latest", action="store_true", help="the newest completed snapshot ID")
-    which.add_argument("--id", metavar="ID", help="a given snapshot ID (it must be completed)")
+    which.add_argument("--latest", action="store_true", help="the newest snapshot each archive lists")
+    which.add_argument(
+        "--id",
+        action="append",
+        metavar="ID|ARCHIVE=ID",
+        help=(
+            "a bare ID, resolved to what each archive serves at it (every archive must list a later one), or "
+            "ARCHIVE=ID, which each archive must list itself; repeat it to move several archives, the ones "
+            "not named keep what the lock holds"
+        ),
+    )
 
     sums = lock.add_parser(
         "checksums", help="fill checksums of entries whose version moved; verify vendor indices and signatures"
@@ -76,7 +101,13 @@ def parser() -> argparse.ArgumentParser:
     files_options(plan)
     sources_options(plan)
     plan.add_argument(
-        "--snapshot", default="lock", metavar="lock|latest|ID", help="the build snapshot (default: the lock's)"
+        "--snapshot",
+        default="lock",
+        metavar="lock|latest|ID|ARCHIVE=ID,...",
+        help=(
+            "the build snapshots (default: the lock's): latest is the newest each archive lists, a bare ID is "
+            "resolved to what each archive serves at it, debian=ID,debian-security=ID names one for each"
+        ),
     )
     plan.add_argument("--param", action="append", default=[], metavar="NAME=VALUE", help="a parameter value (repeat)")
     plan.add_argument("--params", type=Path, metavar="FILE", help="parameter values as a JSON object")
@@ -354,7 +385,10 @@ def dispatch(arguments: argparse.Namespace) -> int:
                 arguments.lock, arguments.definition, sources_of(arguments), arguments.offline, sys.stdout
             )
         if arguments.lock_command == "snapshot":
-            choice = "latest" if arguments.latest else arguments.id
+            try:
+                choice = "latest" if arguments.latest else snapshots.parse_ids(arguments.id)
+            except ValueError as error:
+                raise commands.Usage(f"--id: {error}") from None
             return commands.lock_snapshot(arguments.lock, choice, sources_of(arguments), sys.stdout)
         if arguments.lock_command == "baseline":
             return commands.lock_baseline(
@@ -367,12 +401,16 @@ def dispatch(arguments: argparse.Namespace) -> int:
         if arguments.rebuild and not arguments.reason:
             raise commands.Usage('--rebuild needs --reason "<why>": the reason is recorded')
         reason = str(arguments.reason or "")
+        try:
+            snapshot_choice = snapshots.parse_choice(arguments.snapshot)
+        except ValueError as error:
+            raise commands.Usage(f"--snapshot: {error}") from None
         buffer = io.StringIO()
         status = commands.plan_command(
             arguments.lock,
             arguments.definition,
             sources_of(arguments),
-            snapshot_choice=arguments.snapshot,
+            snapshot_choice=snapshot_choice,
             param_pairs=arguments.param,
             params_file=arguments.params,
             against=arguments.against,

@@ -181,6 +181,23 @@ class LayoutTest(VerifyBase):
         self.write(built, lines)
         self.run_verify(str(built.layout))
 
+    def test_a_provenance_of_the_first_build_type_is_still_accepted(self) -> None:
+        # build type v1 recorded one `buildSnapshot`; records already published keep verifying
+        built = make_image(self.root / "out")
+        v1 = records.build_type("0.7.0").replace("build-type-v2.md", "build-type-v1.md")
+        lines = self.lines_of(built)
+        lines[0] = rewritten(lines[0], lambda s: build_definition(s).update(buildType=v1))
+        self.write(built, lines)
+        self.run_verify(str(built.layout))
+
+    def test_a_build_type_that_is_neither_v1_nor_v2_is_refused(self) -> None:
+        built = make_image(self.root / "out")
+        v3 = records.build_type("9.9.9").replace("build-type-v2.md", "build-type-v3.md")
+        lines = self.lines_of(built)
+        lines[0] = rewritten(lines[0], lambda s: build_definition(s).update(buildType=v3))
+        self.write(built, lines)
+        self.assertIn("is not a build type of this factory", self.problems(str(built.layout))[0])
+
     def test_a_provenance_that_names_another_identity_than_the_manifest_is_refused(self) -> None:
         built = make_image(self.root / "out", provenance_identity="d4" * 32)
         found = self.problems(str(built.layout))

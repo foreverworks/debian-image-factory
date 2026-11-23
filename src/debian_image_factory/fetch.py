@@ -49,6 +49,7 @@ from input_lock.signed import dearmor, listed, sums_name
 from . import archive, bundle, debian, records, resolve, vendordeb
 from .commands import Failed, Sources
 from .planfile import ImageEntry, Plan, read_plan
+from .snapshots import stem
 
 CHECKSUMS: Final = (("sha256", 64, hashlib.sha256), ("sha512", 128, hashlib.sha512), ("sha1", 40, hashlib.sha1))
 """Field name, hex length and constructor of the checksums a locked input may carry."""
@@ -105,9 +106,10 @@ class ImageFetch:
 
 @dataclass(frozen=True, slots=True)
 class FetchPlan:
-    """What `fetch` reads of a plan.json: the snapshot, where to look, and everything to fetch."""
+    """What `fetch` reads of a plan.json: the snapshots, where to look, and everything to fetch."""
 
-    snapshot: str
+    snapshots: Mapping[str, str]
+    """The exact ID of each archive the plan reads."""
     suite: str
     components: tuple[str, ...]
     architecture: str
@@ -239,7 +241,7 @@ def fetch_plan(plan: Plan) -> FetchPlan:
         apt.update(own_apt)
     debian_ = plan["debian"]
     return FetchPlan(
-        plan["snapshot"],
+        plan["snapshots"],
         debian_["suite"],
         debian_["components"],
         architecture,
@@ -652,9 +654,10 @@ def input_path(cache: Path, fields: Mapping[str, object]) -> Path:
 # ---- the partial mirror -----------------------------------------------------------------------------
 
 
-def mirror_dir(cache: Path, snapshot: str) -> Path:
-    """Where the partial mirror of a snapshot lives: `<cache>/mirror/<snapshot>`, read by the build as `file:`."""
-    return cache / "mirror" / snapshot
+def mirror_dir(cache: Path, snapshots: Mapping[str, str]) -> Path:
+    """Where the partial mirror of a plan's snapshots lives: `<cache>/mirror/<debian ID>_<debian-security ID>`
+    (`snapshots.stem`), read by the build as `file:`; each archive is a folder in it."""
+    return cache / "mirror" / stem(snapshots)
 
 
 def place(source: Path, target: Path) -> None:
@@ -707,7 +710,7 @@ def open_indices(plan: FetchPlan, sources: Sources) -> list[archive.SuiteIndex]:
     try:
         return [
             archive.fetch_suite(
-                resolve.snapshot_base(sources.service, one.archive, plan.snapshot),
+                resolve.snapshot_base(sources.service, one.archive, plan.snapshots[one.archive]),
                 one.dist,
                 plan.components,
                 plan.architecture,
@@ -737,7 +740,7 @@ def bundle_files(
     The signed indices of every suite, the pool files of the packages the image adds, and its locked inputs with
     the signed lists that vouched for them (`vouched_by`: what the build reads for provenance). Nothing else of
     the cache or the mirror, which may hold other plans' files."""
-    mirror = cache_relative(cache, mirror_dir(cache, plan.snapshot))
+    mirror = cache_relative(cache, mirror_dir(cache, plan.snapshots))
     relative: set[str] = set()
     for index in indices:
         dist = f"{mirror}/{archive.archive_name(index.base_url)}/dists/{index.dist}"
@@ -773,7 +776,7 @@ def write_bundles(
             verified_at=stamp(min(times)) if times else None,
             image=image.image,
             identity=image.identity,
-            snapshot=plan.snapshot,
+            snapshots=plan.snapshots,
             suite=plan.suite,
             architecture=plan.architecture,
             members=members,
@@ -843,7 +846,7 @@ def fetch_command(
                 problems.append(str(error))
     if problems:
         raise Failed("\n".join(problems))
-    mirror = mirror_dir(sources.cache, plan.snapshot)
+    mirror = mirror_dir(sources.cache, plan.snapshots)
     try:
         archive.lay_out_mirror(indices, mirror)
         lay_out_pool(mirror, sources.cache, found)
@@ -851,7 +854,8 @@ def fetch_command(
         raise Failed(f"cannot lay out the mirror {mirror}: {error}") from None
     if plan.skipped:
         print(f"images: {len(plan.images)} build, {len(plan.skipped)} need nothing (reuse or wait)", file=out)
-    print(f"suites: {len(indices)} verified at snapshot {plan.snapshot}", file=out)
+    at = ", ".join(f"{archive_} {snapshot_id}" for archive_, snapshot_id in plan.snapshots.items())
+    print(f"suites: {len(indices)} verified at snapshots {at}", file=out)
     print(f"packages: {fetched} fetched, {reused} already cached ({len(found)} in all)", file=out)
     print(f"inputs: {inputs_fetched} fetched, {inputs_reused} already cached ({len(plan.inputs)} in all)", file=out)
     if plan.vouched or plan.apt:

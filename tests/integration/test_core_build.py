@@ -152,7 +152,7 @@ class CoreBuildTest(unittest.TestCase):
     def test_one_package_set_at_two_build_snapshots_gives_the_same_bytes(self) -> None:
         images, second_images = self.plan["images"], self.second_plan["images"]
         assert isinstance(images, dict) and isinstance(second_images, dict)
-        self.assertNotEqual(self.plan["snapshot"], self.second_plan["snapshot"])
+        self.assertNotEqual(self.plan["snapshots"], self.second_plan["snapshots"])
         self.assertEqual(
             sorted(second_images["core"]["packages"]),
             sorted(images["core"]["packages"]),

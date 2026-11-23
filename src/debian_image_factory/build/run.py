@@ -512,7 +512,8 @@ def in_releases(mirror: Path, plan: planfile.Plan) -> list[records.Remote]:
         path = mirror / one.archive / "dists" / one.dist / "InRelease"
         if not path.is_file():
             raise commands.Failed(f"{path} is missing: run fetch on this plan first")
-        url = f"{resolve.SNAPSHOT_SERVICE}/archive/{one.archive}/{plan['snapshot']}/dists/{one.dist}/InRelease"
+        snapshot_id = plan["snapshots"][one.archive]
+        url = f"{resolve.SNAPSHOT_SERVICE}/archive/{one.archive}/{snapshot_id}/dists/{one.dist}/InRelease"
         found.append(records.Remote(url, sha256_file(path)))
     return found
 
@@ -549,7 +550,7 @@ def image_records(
         definition=source,
         identity=entry["identity"],
         engine=ENGINE,
-        build_snapshot=plan["snapshot"],
+        build_snapshots=plan["snapshots"],
         architecture=plan["debian"]["architecture"],
         reason=reason_text(entry.get("because")),
         lock=lock,
@@ -1220,7 +1221,7 @@ def build_plan(
     for image in chosen:
         verify_identity(lock, loaded, plan, image, params)
         fetch.reverify_vouched(image, plan["images"][image], plan["debian"]["architecture"], sources.cache, verified_at)
-    mirror = fetch.mirror_dir(sources.cache, plan["snapshot"])
+    mirror = fetch.mirror_dir(sources.cache, plan["snapshots"])
     releases = in_releases(mirror, plan)
     builder_ = open_builder(builder_image)
     source = definition_source(definition_path)

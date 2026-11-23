@@ -14,8 +14,9 @@ from typing import Final, NotRequired, TypedDict
 from input_lock import TRUST, JsonValue, Package, Value
 
 from .definition import Param
+from .snapshots import ARCHIVES
 
-SCHEMA: Final = 1
+SCHEMA: Final = 2
 SNAPSHOT_ID: Final = re.compile(r"[0-9]{8}T[0-9]{6}Z")
 NAME: Final = re.compile(r"[a-z0-9][a-z0-9.+-]*")
 """What a suite, component or architecture looks like: they enter URLs and paths, so nothing else passes."""
@@ -70,7 +71,8 @@ class Plan(TypedDict):
     schema: int
     factory: str
     engine: int
-    snapshot: str
+    snapshots: dict[str, str]
+    """Archive name -> the exact ID that archive lists, one for each of `snapshots.ARCHIVES`."""
     baseline: str | None
     debian: Debian
     params: dict[str, Param]
@@ -238,9 +240,24 @@ def _json(value: object, where: str) -> JsonValue:
     return {key: _json(item, f"{where}.{key}") for key, item in _object(value, where).items()}
 
 
+def _snapshots(value: object) -> dict[str, str]:
+    """`snapshots`: exactly one snapshot ID for each archive a build reads."""
+    found = _object(value, "snapshots")
+    if set(found) != set(ARCHIVES):
+        raise ValueError(
+            f"snapshots must name exactly {', '.join(ARCHIVES)}, not {', '.join(sorted(found)) or 'nothing'}"
+        )
+    return {archive: _text(found[archive], f"snapshots.{archive}", SNAPSHOT_ID) for archive in ARCHIVES}
+
+
 def parse_plan(data: object) -> Plan:
     """The plan in `data` (parsed JSON). ValueError names the first field that is missing or of the wrong shape."""
     plan = _object(data, "the plan")
+    if plan.get("schema") == 1:
+        raise ValueError(
+            f"this plan is schema 1, which names one snapshot for both archives: schema {SCHEMA} names one per "
+            "archive (`snapshots`), so make the plan again with `plan`"
+        )
     if plan.get("schema") != SCHEMA or isinstance(plan.get("schema"), bool):
         raise ValueError(f"schema must be {SCHEMA}, this plan has {plan.get('schema')!r}")
     debian = _object(_member(plan, "debian", ""), "debian")
@@ -255,7 +272,7 @@ def parse_plan(data: object) -> Plan:
         "schema": SCHEMA,
         "factory": _text(_member(plan, "factory", ""), "factory"),
         "engine": _integer(_member(plan, "engine", ""), "engine"),
-        "snapshot": _text(_member(plan, "snapshot", ""), "snapshot", SNAPSHOT_ID),
+        "snapshots": _snapshots(_member(plan, "snapshots", "")),
         "baseline": _optional_text(_member(plan, "baseline", ""), "baseline"),
         "debian": {
             "suite": _text(_member(debian, "suite", "debian"), "debian.suite", NAME),

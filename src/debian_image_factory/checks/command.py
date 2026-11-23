@@ -69,6 +69,7 @@ from .model import (
     result,
     split,
 )
+from .scanning import Needle
 
 CHUNK = 1024 * 1024
 
@@ -322,8 +323,7 @@ def run_core_checks(
     """The named checks on one core artifact, in the order given. One pass reads the tarball."""
     entry = plan["images"][found.image]
     wanted = frozenset(machine_identity.WANTED | {packages.STATUS_PATH})
-    looking = NO_BUILD_SNAPSHOT in names and not snapshot.cannot_tell(plan["snapshot"], plan["baseline"])
-    needle = plan["snapshot"] if looking else None
+    needle = needles_for(names, plan)
     keys = NO_MACHINE_IDENTITY in names
     scanned = tarball.scan_tarball(found.path, wanted, needle, keys) if set(names) - {TWO_CLONES} else tarball.EMPTY
     status = scanned.contents.get(packages.STATUS_PATH)
@@ -340,11 +340,11 @@ def run_core_checks(
                 )
             )
         elif name == NO_BUILD_SNAPSHOT:
-            outcomes.append(snapshot.no_build_snapshot(plan["snapshot"], plan["baseline"], scanned.needle_hits))
+            outcomes.append(snapshot.no_build_snapshot(plan["snapshots"], plan["baseline"], scanned.needle_hits))
         elif name == SAME_RESOLUTION:
             outcomes.append(
                 resolution.same_resolution(
-                    snapshot=plan["snapshot"],
+                    snapshots=plan["snapshots"],
                     suite=plan["debian"]["suite"],
                     components=plan["debian"]["components"],
                     arch=plan["debian"]["architecture"],
@@ -413,13 +413,19 @@ def find_parent(
     )
 
 
-def blob_hits(needle: str, layout: ocilayout.Layout) -> list[tarball.Hit]:
-    """Where the snapshot ID is in the image's config or manifest bytes."""
-    data = needle.encode()
+def needles_for(names: Sequence[str], plan: Plan) -> tuple[str, ...]:
+    """The build snapshot IDs to search for: none unless `no-build-snapshot` is asked for, and not an ID the
+    baseline shares (`snapshot.searched`). Both archives at one ID make one needle."""
+    return snapshot.searched(plan["snapshots"], plan["baseline"]) if NO_BUILD_SNAPSHOT in names else ()
+
+
+def blob_hits(needles: Sequence[str], layout: ocilayout.Layout) -> list[tarball.Hit]:
+    """Where a build snapshot ID is in the image's config or manifest bytes."""
+    data = [needle.encode() for needle in needles]
     return [
         tarball.Hit("content", where)
         for where, blob in (("the image config", layout.config_bytes), ("the image manifest", layout.manifest_bytes))
-        if data in blob
+        if any(one in blob for one in data)
     ]
 
 
@@ -438,8 +444,7 @@ def run_oci_checks(
     loaded into docker once, for the checks that run it, and removed afterwards by its ID.
     """
     entry = plan["images"][found.image]
-    looking = NO_BUILD_SNAPSHOT in names and not snapshot.cannot_tell(plan["snapshot"], plan["baseline"])
-    needle = plan["snapshot"] if looking else None
+    needle = needles_for(names, plan)
     inside = {PACKAGE_SET, NO_MACHINE_IDENTITY, SBOM_COMPLETE, NO_BUILD_SNAPSHOT, LOCKED_INPUTS}
     wanted = frozenset(machine_identity.WANTED | {packages.STATUS_PATH})
     scanned = (
@@ -467,7 +472,7 @@ def run_oci_checks(
             elif name == NO_BUILD_SNAPSHOT:
                 hits = [*scanned.needle_hits, *(blob_hits(needle, layout) if needle else [])]
                 outcomes.append(
-                    snapshot.no_build_snapshot(plan["snapshot"], plan["baseline"], hits[: tarball.HITS_LIMIT])
+                    snapshot.no_build_snapshot(plan["snapshots"], plan["baseline"], hits[: tarball.HITS_LIMIT])
                 )
             elif name == ANCESTRY:
                 outcomes.append(
@@ -552,8 +557,7 @@ def run_incus_checks(
     checks that launch it, and deleted afterwards."""
     entry = plan["images"][found.image]
     rootfs = found.path.with_name(incus.rootfs_of(found.path.name) or "")
-    looking = NO_BUILD_SNAPSHOT in names and not snapshot.cannot_tell(plan["snapshot"], plan["baseline"])
-    needle = plan["snapshot"] if looking else None
+    needle = needles_for(names, plan)
     inside = {PACKAGE_SET, NO_MACHINE_IDENTITY, SBOM_COMPLETE, NO_BUILD_SNAPSHOT, ANCESTRY}
     wanted = frozenset(machine_identity.WANTED | {packages.STATUS_PATH})
     keys = NO_MACHINE_IDENTITY in names
@@ -586,7 +590,7 @@ def run_incus_checks(
                 meta = tarball.scan_tarball(found.path, frozenset(), needle, False) if needle else tarball.EMPTY
                 hits = [*scanned.needle_hits, *(tarball.Hit(h.where, f"metadata {h.path}") for h in meta.needle_hits)]
                 outcomes.append(
-                    snapshot.no_build_snapshot(plan["snapshot"], plan["baseline"], hits[: tarball.HITS_LIMIT])
+                    snapshot.no_build_snapshot(plan["snapshots"], plan["baseline"], hits[: tarball.HITS_LIMIT])
                 )
             elif name == ANCESTRY:
                 parent = file_parent(found, plan, others)
@@ -621,7 +625,7 @@ def run_incus_checks(
 
 
 def scan_root(
-    path: Path, kind: str, wanted: frozenset[str], needle: str | None, keys: bool, keep: tarball.Keep
+    path: Path, kind: str, wanted: frozenset[str], needle: Needle, keys: bool, keep: tarball.Keep
 ) -> tarball.Scan:
     """One pass over the root filesystem an artifact holds: an installer kit's initrd, or a tarball's members."""
     if kind == "installer":
@@ -799,8 +803,7 @@ def run_boot_kind_checks(
     """The named checks on an OS root tarball or an installer kit, in the order given. One pass reads the
     root (the kit's initrd); the boots run once for every check that boots."""
     entry = plan["images"][found.image]
-    looking = NO_BUILD_SNAPSHOT in names and not snapshot.cannot_tell(plan["snapshot"], plan["baseline"])
-    needle = plan["snapshot"] if looking else None
+    needle = needles_for(names, plan)
     inside = {PACKAGE_SET, NO_MACHINE_IDENTITY, SBOM_COMPLETE, NO_BUILD_SNAPSHOT, LOCKED_INPUTS, ANCESTRY, OS_BOOT}
     wanted = frozenset(machine_identity.WANTED | {packages.STATUS_PATH})
     the_kit = kit.read_kit(found.path) if found.kind == "installer" else None
@@ -820,7 +823,7 @@ def run_boot_kind_checks(
         elif name == SBOM_COMPLETE:
             outcomes.append(kit_sbom_complete(found, status, records_text, entry, the_kit))
         elif name == NO_BUILD_SNAPSHOT:
-            outcomes.append(snapshot.no_build_snapshot(plan["snapshot"], plan["baseline"], scanned.needle_hits))
+            outcomes.append(snapshot.no_build_snapshot(plan["snapshots"], plan["baseline"], scanned.needle_hits))
         elif name == ANCESTRY:
             parent_root = root_parent(found, plan, others, effects.parents)
             digest, members = ("", ()) if isinstance(parent_root, str) else parent_root

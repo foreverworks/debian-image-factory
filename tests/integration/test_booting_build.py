@@ -213,13 +213,15 @@ class BootingBuildTest(BootingBase):
         self.assertIn("deb.debian.org", paragraphs[0])
         self.assertNotIn("Snapshot:", paragraphs[1], "security stays live")
         self.assertNotIn("etc/apt/sources.list", tar_members(self.os_tarball()))
-        snapshot = str(self.plan["snapshot"]).encode()
-        for path in (self.os_tarball(), self.os_tarball("out2", "os-tools")):
-            with gzip.open(path) as handle:
-                tail = b""
-                while block := handle.read(1 << 22):
-                    self.assertNotIn(snapshot, tail + block, f"{path.name} holds the build snapshot ID")
-                    tail = block[-len(snapshot) :]
+        snapshots = self.plan["snapshots"]
+        assert isinstance(snapshots, dict)
+        for snapshot in {str(one).encode() for one in snapshots.values()}:
+            for path in (self.os_tarball(), self.os_tarball("out2", "os-tools")):
+                with gzip.open(path) as handle:
+                    tail = b""
+                    while block := handle.read(1 << 22):
+                        self.assertNotIn(snapshot, tail + block, f"{path.name} holds a build snapshot ID")
+                        tail = block[-len(snapshot) :]
 
     # ---- the installer kit ------------------------------------------------------------------------
 

@@ -15,7 +15,7 @@ inputs:
     description: A JSON file of parameter values, passed to plan as --params. Empty for none.
     default: ""
   snapshot:
-    description: The build snapshot for plan, passed as --snapshot. lock (the lock's own), latest (the newest completed ID) or an ID.
+    description: The build snapshots for plan, passed as --snapshot. lock (the lock's own), latest (the newest ID each archive lists), an ID (what each archive serves at it) or debian=ID,debian-security=ID.
     default: lock
   against:
     description: Targets, one per line (oci://, github-release://, dir://). plan looks every identity up there, and publish writes to them.

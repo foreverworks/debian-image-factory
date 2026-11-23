@@ -4,7 +4,7 @@ A match may straddle two chunks, so each chunk is searched together with the tai
 """
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -136,13 +136,27 @@ def token_hits(buffer: bytes, found: dict[str, TokenHit]) -> None:
                 break
 
 
-def scan(chunks: Iterable[bytes], needle: bytes | None, keys: bool) -> Hits:
-    """Whether the bytes hold `needle`, and whether they hold a private key block or a credential token
+type Needle = str | Sequence[str] | None
+"""What to look for: one text, several (any of them counts) or nothing."""
+
+
+def needles_of(needle: Needle) -> tuple[str, ...]:
+    """The non-empty texts of a `Needle`, as a tuple."""
+    if needle is None:
+        return ()
+    return tuple(one for one in ((needle,) if isinstance(needle, str) else needle) if one)
+
+
+def scan(chunks: Iterable[bytes], needle: bytes | Sequence[bytes] | None, keys: bool) -> Hits:
+    """Whether the bytes hold `needle` (or any of several), and whether they hold a private key block or a
+    credential token
     (when `keys`).
 
     Stops reading once the needle was found (or none was asked for) and no key search was asked for. Tokens
     are not searched in an executable (`ELF_MAGIC`).
     """
+    needles = (needle,) if isinstance(needle, bytes) else tuple(needle or ())
+    needles = tuple(one for one in needles if one)
     found_needle, found_key = False, False
     found_tokens: dict[str, TokenHit] = {}
     tail = b"\n"  # the start of the file counts as the start of a line
@@ -151,14 +165,14 @@ def scan(chunks: Iterable[bytes], needle: bytes | None, keys: bool) -> Hits:
         if index == 0 and chunk.startswith(ELF_MAGIC):
             tokens = False
         buffer = tail + chunk
-        if needle and not found_needle and needle in buffer:
+        if needles and not found_needle and any(one in buffer for one in needles):
             found_needle = True
         if keys and not found_key and KEY_MARKER in buffer:
             # a match that starts in the tail was complete in the buffer before: it was judged there
             found_key = any(match.start() > 0 for match in KEY_BLOCK.finditer(buffer))
         if tokens:
             token_hits(buffer, found_tokens)
-        if not keys and (found_needle or not needle):
+        if not keys and (found_needle or not needles):
             break
         tail = buffer[-OVERLAP:]
     return Hits(found_needle, found_key, tuple(found_tokens[t.name] for t in TOKENS if t.name in found_tokens))

@@ -98,10 +98,10 @@ def entry(
 def plan_json(images: Mapping[str, dict[str, object]], *, snapshot: str = SNAPSHOT) -> str:
     return json.dumps(
         {
-            "schema": 1,
+            "schema": 2,
             "factory": "test",
             "engine": 1,
-            "snapshot": snapshot,
+            "snapshots": {"debian": snapshot, "debian-security": snapshot},
             "baseline": "20261001T000000Z",
             "debian": {"suite": SUITE, "components": ["main"], "architecture": ARCH},
             "params": {},

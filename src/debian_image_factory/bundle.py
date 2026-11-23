@@ -3,7 +3,8 @@
 A bundle is a plain tar of three kinds of member: `manifest.json` first, then `plan.json` (the plan the bundle
 was made from, byte for byte) and the files of a download cache under `cache/` (the partial mirror and the
 locked inputs, laid out exactly as `fetch` lays them out, so unpacking one is making a cache). The manifest
-names the image, its identity and the snapshot, and lists every other member with its size and sha256.
+names the image, its identity and the snapshots (one ID per archive), and lists every other member with its
+size and sha256.
 
 Two fetches of one plan write byte-identical bundles: members are sorted, and every header carries the same
 time, owner and mode. `unpack` is the reverse and trusts nothing: the manifest must be the first member, every
@@ -26,8 +27,9 @@ from typing import Final, NotRequired, TypedDict
 from input_lock.identity import HEX64
 
 from .commands import Failed
+from .snapshots import ARCHIVES, is_snapshot_id
 
-SCHEMA: Final = 1
+SCHEMA: Final = 2
 EXTENSION: Final = "inputs.tar"
 MANIFEST: Final = "manifest.json"
 PLAN: Final = "plan.json"
@@ -48,7 +50,8 @@ class Manifest(TypedDict):
     schema: int
     image: str
     identity: str
-    snapshot: str
+    snapshots: dict[str, str]
+    """Archive name -> the exact ID that archive lists, as in the plan."""
     suite: str
     architecture: str
     files: list[ManifestFile]
@@ -105,7 +108,7 @@ def manifest_bytes(
     *,
     image: str,
     identity: str,
-    snapshot: str,
+    snapshots: Mapping[str, str],
     suite: str,
     architecture: str,
     members: Sequence[Member],
@@ -119,7 +122,7 @@ def manifest_bytes(
         "schema": SCHEMA,
         "image": image,
         "identity": identity,
-        "snapshot": snapshot,
+        "snapshots": dict(snapshots),
         "suite": suite,
         "architecture": architecture,
         "files": files,
@@ -178,9 +181,25 @@ def _text(value: object, where: str) -> str:
     return value
 
 
+def _snapshots(value: object) -> dict[str, str]:
+    found = _object(value, "the manifest's snapshots")
+    if set(found) != set(ARCHIVES):
+        raise ValueError(f"the manifest's snapshots must name exactly {', '.join(ARCHIVES)}")
+    ids = {archive: _text(found[archive], f"the manifest's snapshots.{archive}") for archive in ARCHIVES}
+    for archive, snapshot_id in ids.items():
+        if not is_snapshot_id(snapshot_id):
+            raise ValueError(f"the manifest's snapshots.{archive} is not a snapshot ID")
+    return ids
+
+
 def parse_manifest(data: object) -> Manifest:
     """The manifest in `data` (what `json.loads` returned), every field checked; ValueError names the first bad one."""
     document = _object(data, "the manifest")
+    if document.get("schema") == 1:
+        raise ValueError(
+            f"the manifest's schema is 1, which names one snapshot for both archives: this release reads schema "
+            f"{SCHEMA}, which names one per archive, so fetch again with this release"
+        )
     if document.get("schema") != SCHEMA:
         raise ValueError(f"the manifest's schema must be {SCHEMA}")
     listed = document.get("files")
@@ -211,7 +230,7 @@ def parse_manifest(data: object) -> Manifest:
         "schema": SCHEMA,
         "image": _text(document.get("image"), "the manifest's image"),
         "identity": identity,
-        "snapshot": _text(document.get("snapshot"), "the manifest's snapshot"),
+        "snapshots": _snapshots(document.get("snapshots")),
         "suite": _text(document.get("suite"), "the manifest's suite"),
         "architecture": _text(document.get("architecture"), "the manifest's architecture"),
         "files": files,

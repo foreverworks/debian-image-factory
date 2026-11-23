@@ -5,12 +5,13 @@ left in the cache.
 """
 
 import tempfile
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 
 from input_lock import Package
 
 from .. import archive, resolve
+from ..snapshots import stem
 from .model import SAME_RESOLUTION, CheckOutcome, NotRun, Result, result, split
 from .packages import differences, installed
 
@@ -42,8 +43,8 @@ def compare(second: Collection[Package], planned: Collection[Package], status: b
     )
 
 
-def mirror_reader(service: str, mirror_dir: Path, snapshot: str) -> Callable[[str], bytes]:
-    """A `read` for `resolve.open_archive`: `<service>/archive/<archive>/<snapshot>/<path>` is the file
+def mirror_reader(service: str, mirror_dir: Path, snapshots: Mapping[str, str]) -> Callable[[str], bytes]:
+    """A `read` for `resolve.open_archive`: `<service>/archive/<archive>/<that archive's snapshot>/<path>` is the file
     `<mirror_dir>/<archive>/<path>`. Anything else, or a file the mirror lacks, is an OSError, which is how
     `archive.fetch_suite` learns a by-hash path is not there."""
     prefix = f"{service.rstrip('/')}/archive/"
@@ -53,8 +54,8 @@ def mirror_reader(service: str, mirror_dir: Path, snapshot: str) -> Callable[[st
             raise OSError(f"{url} is not under {prefix}")
         archive_name, _, rest = url.removeprefix(prefix).partition("/")
         stamp, _, path = rest.partition("/")
-        if stamp != snapshot or not path:
-            raise OSError(f"{url} is not in snapshot {snapshot}")
+        if stamp != snapshots.get(archive_name) or not path:
+            raise OSError(f"{url} is not in the snapshots {resolve.read_at(snapshots)}")
         return (mirror_dir / archive_name / path).read_bytes()
 
     return read
@@ -62,7 +63,7 @@ def mirror_reader(service: str, mirror_dir: Path, snapshot: str) -> Callable[[st
 
 def second_resolution(
     *,
-    snapshot: str,
+    snapshots: Mapping[str, str],
     suite: str,
     components: Sequence[str],
     arch: str,
@@ -71,15 +72,16 @@ def second_resolution(
     cache: Path,
     service: str,
 ) -> tuple[Package, ...] | NotRun | str:
-    """The package set of resolving core again from `<cache>/mirror/<snapshot>`. A NotRun when the mirror or
+    """The package set of resolving core again from `<cache>/mirror/<debian ID>_<debian-security ID>`. A NotRun when
+    the mirror or
     a tool is missing; a string when apt ran and could not resolve (the second resolution failed)."""
-    mirror = cache / "mirror" / snapshot
+    mirror = cache / "mirror" / stem(snapshots)
     if not mirror.is_dir():
         return NotRun(SAME_RESOLUTION, f"no fetched mirror at {mirror}: run fetch first")
     with tempfile.TemporaryDirectory(prefix="debian-image-factory-resolve-") as scratch:
         try:
             opened = resolve.open_archive(
-                snapshot,
+                snapshots,
                 suite,
                 components,
                 arch,
@@ -87,7 +89,7 @@ def second_resolution(
                 cache=cache,
                 workdir=Path(scratch),
                 service=service,
-                read=mirror_reader(service, mirror, snapshot),
+                read=mirror_reader(service, mirror, snapshots),
             )
             return resolve.resolve_core(opened, request)
         except (OSError, archive.ArchiveError) as error:
@@ -98,7 +100,7 @@ def second_resolution(
 
 def same_resolution(
     *,
-    snapshot: str,
+    snapshots: Mapping[str, str],
     suite: str,
     components: Sequence[str],
     arch: str,
@@ -110,7 +112,7 @@ def same_resolution(
     service: str,
 ) -> CheckOutcome:
     second = second_resolution(
-        snapshot=snapshot,
+        snapshots=snapshots,
         suite=suite,
         components=components,
         arch=arch,

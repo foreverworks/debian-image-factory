@@ -14,7 +14,7 @@ import os
 import re
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
@@ -46,6 +46,8 @@ class OpenArchive:
     """Every package the indices offer, by (name, version, architecture)."""
     essential: tuple[str, ...]
     """The suite's own `Essential: yes` packages (not those of -updates or -security)."""
+    snapshots: Mapping[str, str] = field(default_factory=dict)
+    """The ID each archive was read at, to name in an error."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +101,7 @@ def run_apt(root: Path, *args: str, status: Path | None = None) -> str:
 
 
 def open_archive(
-    snapshot_id: str,
+    snapshot_ids: Mapping[str, str],
     suite: str,
     components: Sequence[str],
     arch: str,
@@ -110,10 +112,17 @@ def open_archive(
     service: str = SNAPSHOT_SERVICE,
     read: Callable[[str], bytes] = remote.read_url,
 ) -> OpenArchive:
-    """Fetch and verify the snapshot's indices, lay them out under `workdir`, and run apt-get update."""
+    """Fetch and verify the snapshots' indices, lay them out under `workdir`, and run apt-get update. Each suite is
+    read at the ID of its own archive: `snapshot_ids` has one for every archive."""
     indices = [
         archive.fetch_suite(
-            snapshot_base(service, one.archive, snapshot_id), one.dist, components, arch, keyring, cache, read
+            snapshot_base(service, one.archive, snapshot_ids[one.archive]),
+            one.dist,
+            components,
+            arch,
+            keyring,
+            cache,
+            read,
         )
         for one in suites(suite)
     ]
@@ -140,7 +149,12 @@ def open_archive(
                 stanzas.setdefault(key, stanza)
             if index.dist == suite:
                 essential.extend(debian.essential(found, arch))
-    return OpenArchive(root, keyring, arch, stanzas, tuple(sorted(set(essential))))
+    return OpenArchive(root, keyring, arch, stanzas, tuple(sorted(set(essential))), dict(snapshot_ids))
+
+
+def read_at(snapshot_ids: Mapping[str, str]) -> str:
+    """The snapshots an error was found at, for its message: `debian 2026... and debian-security 2026...`."""
+    return " and ".join(f"{archive} {snapshot_id}" for archive, snapshot_id in snapshot_ids.items())
 
 
 def parse_simulation(output: str) -> list[Inst]:
@@ -166,7 +180,10 @@ def status_text(
     for package in sorted(installed):
         stanza = open_archive_.stanzas.get(package) or (vendor or {}).get(package)
         if stanza is None:
-            raise ResolveError(f"{package[0]} {package[1]} ({package[2]}) is not in this snapshot's indices")
+            raise ResolveError(
+                f"{package[0]} {package[1]} ({package[2]}) is not in the snapshots' indices "
+                f"({read_at(open_archive_.snapshots)})"
+            )
         fields = [(key, value) for key, value in stanza.items() if key not in STATUS_DROP]
         fields.insert(1, ("Status", "install ok installed"))
         paragraphs.append("".join(f"{key}: {value}\n" for key, value in fields))
@@ -219,7 +236,10 @@ def simulate(
     apt_root = open_archive_.root if root is None else root
     status = open_archive_.root / f"status-{label}"
     status.write_text(status_text(open_archive_, installed, vendor))
-    output = run_apt(apt_root, "--simulate", "install", "--", *sorted(set(request)), status=status)
+    try:
+        output = run_apt(apt_root, "--simulate", "install", "--", *sorted(set(request)), status=status)
+    except ResolveError as error:
+        raise ResolveError(f"{label}: {error}\nthe indices are those of {read_at(open_archive_.snapshots)}") from None
     result = {name: (name, version, arch) for name, version, arch in installed}
     for inst in parse_simulation(output):
         if inst.old is not None and not allow_upgrade:

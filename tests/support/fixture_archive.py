@@ -24,7 +24,8 @@ ARCHIVES: Final = {"debian": "trixie", "debian-security": "trixie-security"}
 FIRST_ID: Final = "20261101T000000Z"
 SECOND_ID: Final = "20261108T000000Z"
 LATER_ID: Final = "20261115T000000Z"
-"""Listed, and so completed, but with no files: only the listing mentions it."""
+"""The newest listed ID of both archives: it serves what SECOND_ID serves, and no ID is listed after it, so the
+older rule (a later snapshot in every archive) does not complete it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,8 @@ SUITE_PACKAGES: Final = {
     (SECOND_ID, "debian"): PACKAGES,
     (FIRST_ID, "debian-security"): (),
     (SECOND_ID, "debian-security"): (LIB_A_SECURITY,),
+    (LATER_ID, "debian"): PACKAGES,
+    (LATER_ID, "debian-security"): (LIB_A_SECURITY,),
 }
 
 

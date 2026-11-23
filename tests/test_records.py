@@ -92,6 +92,9 @@ def core_packages(count: int = 120) -> list[Package]:
     return found
 
 
+BUILD_SNAPSHOTS = {"debian": "20261121T004329Z", "debian-security": "20261123T141315Z"}
+
+
 def provenance_of(**changes: object) -> Statement:
     arguments: dict[str, object] = {
         "subjects": [subject(NAME, DIGEST)],
@@ -100,7 +103,7 @@ def provenance_of(**changes: object) -> Statement:
         "definition": SOURCE,
         "identity": IDENTITY,
         "engine": 1,
-        "build_snapshot": "20261121T004329Z",
+        "build_snapshots": BUILD_SNAPSHOTS,
         "architecture": "amd64",
         "reason": "package libssl3t64 3.5.1-1+deb13u1 -> 3.5.1-1+deb13u2",
         "lock": example_lock(),
@@ -379,7 +382,7 @@ class RunDetailsTest(unittest.TestCase):
     def test_the_documents_are_named_for_the_release(self) -> None:
         self.assertEqual(
             BUILD_TYPE,
-            f"https://github.com/foreverworks/debian-image-factory/blob/v{__version__}/docs/build-type-v1.md",
+            f"https://github.com/foreverworks/debian-image-factory/blob/v{__version__}/docs/build-type-v2.md",
         )
         self.assertEqual(
             CHECKS_DOC, f"https://github.com/foreverworks/debian-image-factory/blob/v{__version__}/docs/checks.md"
@@ -433,7 +436,7 @@ class ProvenanceTest(unittest.TestCase):
             {
                 "identity": IDENTITY,
                 "engine": 1,
-                "buildSnapshot": "20261121T004329Z",
+                "buildSnapshots": BUILD_SNAPSHOTS,
                 "architecture": "amd64",
                 "reason": "package libssl3t64 3.5.1-1+deb13u1 -> 3.5.1-1+deb13u2",
             },

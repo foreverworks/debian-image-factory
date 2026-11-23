@@ -38,7 +38,7 @@ from .definition import Definition, DefinitionError, Param
 from .files import read_files
 from .identity import FileFact
 
-ARCHIVES: Final = ("debian", "debian-security")
+ARCHIVES: Final = snapshots.ARCHIVES
 
 
 def default_cache() -> Path:
@@ -130,11 +130,24 @@ def checked_lock(loaded: Loaded) -> Lock:
     return lockrules.check(loaded.data, loaded.definition)
 
 
-def read_listings(sources: Sources) -> dict[str, tuple[str, ...]]:
+def read_listings(sources: Sources, named: Mapping[str, str] | None = None) -> dict[str, tuple[str, ...]]:
+    """Each archive's listing. An ID in `named` that is newer than the listing's newest, which the service
+    caches for ten minutes, is confirmed with a narrow read of that ID alone and added when it is listed."""
     try:
-        return listings.fetch_listings(ARCHIVES, base=sources.service, read=sources.read)
+        found = listings.fetch_listings(ARCHIVES, base=sources.service, read=sources.read)
+        return listings.confirm(found, named or {}, base=sources.service, read=sources.read)
     except (OSError, ValueError) as error:
         raise Failed(f"cannot read the snapshot listings from {sources.service}: {error}") from None
+
+
+def resolve_snapshots(choice: snapshots.Pin, lock_pin: snapshots.Pin | None, sources: Sources) -> dict[str, str]:
+    """The exact ID of each archive that `choice` (`plan --snapshot`) names. Raises Failed naming the problems."""
+    pin = lock_pin if choice == "lock" else choice
+    found = read_listings(sources, snapshots.named(pin) if pin is not None else None)
+    try:
+        return snapshots.resolve(choice, found, lock_pin)
+    except ValueError as error:
+        raise Failed(str(error)) from None
 
 
 def service_url(sources: Sources, url: str) -> str:
@@ -159,6 +172,15 @@ def baseline_in_release(sources: Sources, suite: str, snapshot_id: str) -> bytes
 # ---- lock check, lock snapshot, lock baseline -------------------------------------------------
 
 
+def bare_report(label: str, snapshot_id: str, found: snapshots.Listings, out: TextIO) -> list[str]:
+    """Say whether a bare ID (one for both archives) is completed and what each archive serves at it; the
+    problems found, each led by `label`."""
+    issues = snapshots.problems(snapshot_id, found)
+    serving = ", ".join(f"{name} serves {served}" for name, served in snapshots.serving(snapshot_id, found).items())
+    print(f"{label}: {'completed' if not issues else 'NOT usable'}; {serving}", file=out)
+    return [f"{label}: {issue}" for issue in issues]
+
+
 def lock_check(lock_path: Path, definition_path: Path, sources: Sources, offline: bool, out: TextIO) -> int:
     """The lock and the definition agree; unless offline, the snapshot IDs are re-resolved (DESIGN 7.5)."""
     loaded = load(lock_path, definition_path)
@@ -170,19 +192,19 @@ def lock_check(lock_path: Path, definition_path: Path, sources: Sources, offline
     if offline:
         print("snapshot IDs not re-resolved (--offline)", file=out)
         return 0
-    found_listings = read_listings(sources)
+    pin = lockrules.snapshot_pin(lock)
+    found_listings = read_listings(sources, snapshots.named(pin) if pin is not None else None)
     problems: list[str] = []
-    ids = {"debian_snapshot": lock.get("debian_snapshot", "")}
+    if isinstance(pin, str):
+        problems.extend(bare_report(f"debian_snapshot {pin}", pin, found_listings, out))
+    elif pin is not None:
+        for name, issues in snapshots.exact_problems(pin, found_listings).items():
+            label = f"debian_snapshots.{name} {pin.get(name, '-')}"
+            problems.extend(f"{label}: {issue}" for issue in issues)
+            print(f"{label}: {f'completed (listed by {name})' if not issues else 'NOT usable'}", file=out)
     baseline = lockrules.baseline(lock)
     if baseline is not None:
-        ids[f"inputs.{lockrules.BASELINE_ENTRY}"] = baseline
-    for label, snapshot_id in ids.items():
-        issues = snapshots.problems(snapshot_id, found_listings)
-        problems.extend(f"{label} {snapshot_id}: {issue}" for issue in issues)
-        serving = ", ".join(
-            f"{name} serves {served}" for name, served in snapshots.serving(snapshot_id, found_listings).items()
-        )
-        print(f"{label} {snapshot_id}: {'completed' if not issues else 'NOT usable'}; {serving}", file=out)
+        problems.extend(bare_report(f"inputs.{lockrules.BASELINE_ENTRY} {baseline}", baseline, found_listings, out))
     if baseline is not None and not problems:
         data = baseline_in_release(sources, loaded.definition.debian.suite, baseline)
         expected = lock["inputs"][lockrules.BASELINE_ENTRY].get("sha256")
@@ -190,6 +212,8 @@ def lock_check(lock_path: Path, definition_path: Path, sources: Sources, offline
             problems.append(
                 f"inputs.{lockrules.BASELINE_ENTRY}: the InRelease served at {baseline} does not match its sha256"
             )
+    if isinstance(pin, str):
+        print("(`lock snapshot --latest` pins each archive on its own: debian_snapshots)", file=out)
     if problems:
         raise Failed("\n".join(problems))
     return 0
@@ -199,21 +223,44 @@ def write_lock(lock_path: Path, data: object) -> None:
     lock_path.write_text(input_lock.dump(data))
 
 
-def lock_snapshot(lock_path: Path, choice: str, sources: Sources, out: TextIO) -> int:
-    """Move the build snapshot to the newest completed ID (`latest`) or to a given one."""
+def lock_snapshot(lock_path: Path, choice: snapshots.Pin, sources: Sources, out: TextIO) -> int:
+    """Pin the build snapshots: `latest` is the newest listed ID of each archive, a bare ID is resolved to what
+    each archive serves at it, and `archive=ID` moves only the archives named. The result is always
+    `debian_snapshots`, with `debian_snapshot` removed: the one command that migrates a lock."""
     try:
         data = input_lock.parse(read_text(lock_path))
     except input_lock.LockError as error:
         raise Failed(f"{lock_path}: {error}") from None
-    found_listings = read_listings(sources)
+    lock_pin = lockrules.snapshot_pin(data)
+    named = snapshots.named(choice)
+    partial = bool(named) and set(named) != set(ARCHIVES)
+    kept_ids = lock_pin if partial and isinstance(lock_pin, Mapping) else {}
+    found = read_listings(sources, {**kept_ids, **named})
     try:
-        chosen = snapshots.resolve(choice, found_listings, choice)
+        if not partial:
+            chosen = snapshots.resolve(choice, found, lock_pin)
+        else:
+            # some archives named: the others keep what the lock pins, a bare ID resolved to what each serves
+            if lock_pin is None:
+                raise ValueError(f"the lock pins no snapshot to keep: name every archive ({', '.join(ARCHIVES)})")
+            kept = snapshots.resolve("lock", found, lock_pin)
+            chosen = snapshots.resolve({**kept, **named}, found, None)
     except ValueError as error:
         raise Failed(str(error)) from None
-    before = data.get("debian_snapshot")
-    updated: dict[str, object] = {**data, "debian_snapshot": chosen}
-    write_lock(lock_path, updated)
-    print(f"debian_snapshot: {before} -> {chosen}" if before != chosen else f"debian_snapshot stays {chosen}", file=out)
+    old_bare = data.get("debian_snapshot")
+    before = dict(data.get("debian_snapshots", {})) or dict.fromkeys(ARCHIVES, old_bare)
+    kept_fields = {key: value for key, value in data.items() if key not in ("debian_snapshot", "debian_snapshots")}
+    write_lock(lock_path, {**kept_fields, "debian_snapshots": chosen})
+    if old_bare is not None:
+        print(f"debian_snapshot {old_bare} -> debian_snapshots (one ID for each archive)", file=out)
+    for name, snapshot_id in chosen.items():
+        was = before.get(name)
+        print(
+            f"debian_snapshots.{name}: {was} -> {snapshot_id}"
+            if was != snapshot_id
+            else f"debian_snapshots.{name} stays {snapshot_id}",
+            file=out,
+        )
     return 0
 
 
@@ -341,7 +388,12 @@ def verified_debs(
 
 
 def resolve_all(
-    lock: Lock, loaded: Loaded, params: Mapping[str, Param], snapshot_id: str, sources: Sources, workdir: Path
+    lock: Lock,
+    loaded: Loaded,
+    params: Mapping[str, Param],
+    snapshot_ids: snapshots.Snapshots,
+    sources: Sources,
+    workdir: Path,
 ) -> dict[str, tuple[Package, ...]]:
     """Every image's package set, top down. A vendor .deb is resolved with the image that installs it, from a
     stanza verified through its repository's signature, in the same transaction as the image's packages."""
@@ -349,7 +401,7 @@ def resolve_all(
     arch = spec.debian.architectures[0]
     try:
         opened = resolve.open_archive(
-            snapshot_id,
+            snapshot_ids,
             spec.debian.suite,
             spec.debian.components,
             arch,
@@ -448,7 +500,7 @@ def plan_command(
     definition_path: Path,
     sources: Sources,
     *,
-    snapshot_choice: str,
+    snapshot_choice: snapshots.Pin,
     param_pairs: Sequence[str],
     params_file: Path | None,
     against: Sequence[str],
@@ -469,10 +521,7 @@ def plan_command(
     unsupported = unsupported_modules(lock, loaded, params)
     if unsupported:
         raise Failed("\n".join(unsupported))
-    try:
-        snapshot_id = snapshots.resolve(snapshot_choice, read_listings(sources), lock.get("debian_snapshot", ""))
-    except ValueError as error:
-        raise Failed(str(error)) from None
+    snapshot_ids = resolve_snapshots(snapshot_choice, lockrules.snapshot_pin(lock), sources)
     previous: object = None
     if previous_path is not None:
         try:
@@ -480,12 +529,12 @@ def plan_command(
         except ValueError as error:
             raise Usage(f"--previous {previous_path}: {error}") from None
     with tempfile.TemporaryDirectory(prefix="debian-image-factory-plan-") as scratch:
-        resolved = resolve_all(lock, loaded, params, snapshot_id, sources, Path(scratch))
+        resolved = resolve_all(lock, loaded, params, snapshot_ids, sources, Path(scratch))
     inputs = compute_inputs(lock, loaded, resolved, params)
     decisions, rejected = lookups(parsed_targets, loaded, inputs)
     document = plan.build_plan(
         loaded.definition,
-        snapshot=snapshot_id,
+        snapshots=snapshot_ids,
         baseline=lockrules.baseline(lock),
         params=params,
         inputs=inputs,

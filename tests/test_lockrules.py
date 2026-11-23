@@ -1,5 +1,6 @@
 import copy
 import unittest
+from collections.abc import Mapping
 
 import input_lock
 from input_lock import JsonValue
@@ -103,12 +104,51 @@ class EntryRulesTest(unittest.TestCase):
 
 
 class SnapshotRulesTest(unittest.TestCase):
-    def test_debian_snapshot_is_required(self) -> None:
+    def per_archive(self, snapshots: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        data = example_lock_data()
+        del data["debian_snapshot"]
+        data["debian_snapshots"] = dict(snapshots)
+        data["schema"] = 3
+        return data
+
+    def test_a_snapshot_is_required_and_the_message_says_what_writes_it(self) -> None:
         data = example_lock_data()
         del data["debian_snapshot"]
         found = problems_of(data)
         self.assertEqual(len(found), 1)
-        self.assertIn("debian_snapshot is required", found[0])
+        self.assertIn("debian_snapshots is required: the build snapshots, one per archive", found[0])
+        self.assertIn("`lock snapshot --latest` writes it", found[0])
+
+    def test_one_id_per_archive_is_a_lock(self) -> None:
+        data = self.per_archive({"debian": "20261121T004329Z", "debian-security": "20261123T141315Z"})
+        self.assertEqual(problems_of(data), [])
+        lock = lockrules.check(data, example_definition())
+        self.assertEqual(
+            lockrules.snapshot_pin(lock), {"debian": "20261121T004329Z", "debian-security": "20261123T141315Z"}
+        )
+
+    def test_the_pin_of_a_lock_is_its_bare_id_or_its_archives(self) -> None:
+        legacy = lockrules.check(example_lock_data(), example_definition())
+        self.assertEqual(lockrules.snapshot_pin(legacy), "20261121T004329Z")
+
+    def test_the_archives_must_be_exactly_the_ones_a_build_reads(self) -> None:
+        for snapshots in (
+            {"debian": "20261121T004329Z"},
+            {"debian-security": "20261121T004329Z"},
+            {"debian": "20261121T004329Z", "debian-security": "20261121T004329Z", "debian-ports": "20261121T004329Z"},
+        ):
+            with self.subTest(snapshots=snapshots):
+                found = problems_of(self.per_archive(snapshots))
+                self.assertEqual(len(found), 1)
+                self.assertIn("debian_snapshots must name exactly debian, debian-security", found[0])
+
+    def test_an_id_must_be_a_real_snapshot_id_and_both_fields_together_are_refused(self) -> None:
+        found = problems_of(self.per_archive({"debian": "yesterday", "debian-security": "20261121T004329Z"}))
+        self.assertIn("is not a snapshot.debian.org ID", " ".join(found))
+        both = example_lock_data()
+        both["debian_snapshots"] = {"debian": "20261121T004329Z", "debian-security": "20261121T004329Z"}
+        both["schema"] = 3
+        self.assertIn("keep one of them", " ".join(problems_of(both)))
 
     def test_debian_snapshot_must_be_an_id(self) -> None:
         data = example_lock_data()

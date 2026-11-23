@@ -19,7 +19,7 @@ class ScanTest(unittest.TestCase):
         self,
         entries: Mapping[str, Entry],
         wanted: frozenset[str] = frozenset(),
-        needle: str | None = None,
+        needle: str | tuple[str, ...] | None = None,
         keys: bool = False,
     ) -> tarball.Scan:
         with tempfile.TemporaryDirectory() as tmp:
@@ -47,6 +47,27 @@ class ScanTest(unittest.TestCase):
                 Member("/etc/b", "hardlink", "./etc/a"),
             ),
         )
+
+    def test_several_needles_are_each_searched_in_paths_targets_and_content(self) -> None:
+        other = "20261123T141315Z"
+        found = self.scan(
+            {
+                f"./a/{NEEDLE}": b"x",
+                "./b": Link(f"/x/{other}"),
+                "./c": f"see {other} here".encode(),
+                "./d": b"nothing",
+            },
+            needle=(NEEDLE, other),
+        )
+        self.assertEqual(
+            [(hit.where, hit.path) for hit in found.needle_hits],
+            [("path", f"/a/{NEEDLE}"), ("link target", "/b"), ("content", "/c")],
+        )
+
+    def test_one_of_two_needles_absent_finds_the_other_only(self) -> None:
+        found = self.scan({"./c": f"see {NEEDLE} here".encode()}, needle=("20261123T141315Z", NEEDLE))
+        self.assertEqual([hit.path for hit in found.needle_hits], ["/c"])
+        self.assertEqual(self.scan({"./c": b"none"}, needle=(NEEDLE, "20261123T141315Z")).needle_hits, ())
 
     def test_wanted_contents_are_kept_whole_and_others_are_not(self) -> None:
         found = self.scan(

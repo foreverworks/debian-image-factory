@@ -12,6 +12,7 @@ from typing import Final, Literal
 from .. import squashfs
 from ..squashfs import SquashfsError
 from . import scanning, tarball
+from .scanning import Needle
 from .tarball import Hit, Member, Scan
 
 __all__ = ["SquashfsError", "scan_squashfs"]
@@ -38,7 +39,7 @@ def limited(chunks: Iterator[bytes], limit: int) -> bytes:
     return bytes(out)
 
 
-def scan_squashfs(path: Path, wanted: frozenset[str], needle: str | None, keys: bool) -> Scan:
+def scan_squashfs(path: Path, wanted: frozenset[str], needle: Needle, keys: bool) -> Scan:
     """One pass over a squashfs image, the way scan_tarball reads a tarball.
 
     `wanted` are the absolute paths whose content is kept; `needle` is searched in every path, symlink
@@ -49,7 +50,8 @@ def scan_squashfs(path: Path, wanted: frozenset[str], needle: str | None, keys: 
     contents: dict[str, bytes] = {}
     key_files: list[str] = []
     hits: list[Hit] = []
-    needle_bytes = needle.encode() if needle else None
+    needles = scanning.needles_of(needle)
+    needle_bytes = tuple(one.encode() for one in needles)
 
     def hit(where: Literal["path", "link target", "content"], where_path: str) -> None:
         if len(hits) < tarball.HITS_LIMIT:
@@ -61,9 +63,9 @@ def scan_squashfs(path: Path, wanted: frozenset[str], needle: str | None, keys: 
             kind = KINDS[entry.kind]
             member = Member(entry.path, kind, entry.target if kind == "symlink" else "")
             members.append(member)
-            if needle and needle in member.path:
+            if any(one in member.path for one in needles):
                 hit("path", member.path)
-            if needle and needle in member.target:
+            if any(one in member.target for one in needles):
                 hit("link target", member.path)
             if member.kind != "file":
                 continue
@@ -75,7 +77,7 @@ def scan_squashfs(path: Path, wanted: frozenset[str], needle: str | None, keys: 
                 stream = squashfs.read_data(image, entry)
             doc = member.path.startswith(tarball.DOC_TREES) and member.path.endswith(tarball.COMPRESSED_DOCS)
             search_keys = keys and not doc
-            if needle_bytes is None and not search_keys:
+            if not needle_bytes and not search_keys:
                 continue
             found = scanning.scan(stream, needle_bytes, search_keys)
             if found.needle:

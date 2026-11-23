@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Final
 
 from . import newc, scanning, tarball
+from .scanning import Needle
 from .tarball import Hit, Keep, Scan, keep_none
 
 KIT_JSON: Final = "kit.json"
@@ -118,7 +119,7 @@ def read_kit(path: Path) -> Kit:
     return kit_problems(Facts(tuple(members), manifest, files))
 
 
-def scan_kit(path: Path, wanted: frozenset[str], needle: str | None, keys: bool, keep: Keep = keep_none) -> Scan:
+def scan_kit(path: Path, wanted: frozenset[str], needle: Needle, keys: bool, keep: Keep = keep_none) -> Scan:
     """The initrd's root, as `tarball.scan_entries` sees it, plus where the needle is in kit.json or the
     kernel (named `kit.json` and `vmlinuz`, outside the root). Raises tarfile.TarError, newc.NewcError,
     EOFError or OSError (gzip.BadGzipFile among them) when the kit or its initrd cannot be read."""
@@ -130,14 +131,15 @@ def scan_kit(path: Path, wanted: frozenset[str], needle: str | None, keys: bool,
         raise EOFError(f"the initrd is not a readable gzip stream: {error}") from None
 
 
-def scanned_kit(path: Path, wanted: frozenset[str], needle: str | None, keys: bool, keep: Keep) -> Scan:
+def scanned_kit(path: Path, wanted: frozenset[str], needle: Needle, keys: bool, keep: Keep) -> Scan:
     extra: list[Hit] = []
+    needles = tuple(one.encode() for one in scanning.needles_of(needle))
     with tarfile.open(path, mode="r:") as archive:
         for name in (KIT_JSON, VMLINUZ):
-            handle = archive.extractfile(name) if needle else None
+            handle = archive.extractfile(name) if needles else None
             if handle is not None:
                 with handle:
-                    if scanning.scan(tarball.chunks_of(handle), needle.encode() if needle else None, False).needle:
+                    if scanning.scan(tarball.chunks_of(handle), needles, False).needle:
                         extra.append(Hit("content", name))
         source = archive.extractfile(INITRD)
         if source is None:

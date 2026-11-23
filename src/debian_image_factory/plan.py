@@ -19,7 +19,7 @@ from .oci import digest_text
 from .published import Decision
 from .vendordeb import MODULE as VENDOR_DEB
 
-SCHEMA: Final = 1
+SCHEMA: Final = 2
 
 
 def request(definition: Definition, image: str, modules: Sequence[str]) -> list[str]:
@@ -187,7 +187,7 @@ def state_of(
 def build_plan(
     definition: Definition,
     *,
-    snapshot: str,
+    snapshots: Mapping[str, str],
     baseline: str | None,
     params: Mapping[str, Param],
     inputs: Mapping[str, ImageInputs],
@@ -224,7 +224,7 @@ def build_plan(
         "schema": SCHEMA,
         "factory": __version__,
         "engine": ENGINE,
-        "snapshot": snapshot,
+        "snapshots": dict(snapshots),
         "baseline": baseline,
         "debian": {
             "suite": definition.debian.suite,

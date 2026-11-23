@@ -21,7 +21,7 @@ from input_lock import JsonValue
 from input_lock import fetch as input_lock_fetch
 from input_lock.records import TestOutcome
 
-from debian_image_factory import cli, commands, definition, publish
+from debian_image_factory import cli, commands, definition, listings, publish
 from tests.support import fake_github, fake_registry, fixture_archive
 from tests.support.definitions import jsonable
 from tests.support.fake_github import Fake as GithubFake
@@ -29,6 +29,9 @@ from tests.support.fake_registry import Fake
 from tests.support.fixture_archive import FIRST_ID, LATER_ID, SECOND_ID, Fixture
 from tests.support.oci_fixtures import make_core_file, make_image
 
+BOTH_FIRST = {"debian": FIRST_ID, "debian-security": FIRST_ID}
+BOTH_SECOND = {"debian": SECOND_ID, "debian-security": SECOND_ID}
+BOTH_LATER = {"debian": LATER_ID, "debian-security": LATER_ID}
 FACTORY = """\
 schema = 1
 
@@ -92,10 +95,40 @@ INSTALLS_LIB_A = ["app-a", "app-c"]
 """app-a installs tool-a, which needs lib-a; app-c is its child. Core and app-b do not have it."""
 
 
+class ListingServer(http.server.ThreadingHTTPServer):
+    """The fixture's HTTP server. While `cached_until` is set, a plain listing stops at that ID, as the service's
+    cached copy (ten minutes old) does; a narrow read always sees every listed ID."""
+
+    cached_until: str | None = None
+
+
 class Mirror(http.server.SimpleHTTPRequestHandler):
     """The fixture root as snapshot.debian.org serves it: `/mr/timestamp/?archive=NAME` answers from the
     recorded listings, and the fixture's one main suite also answers as `trixie-updates` (the fixture
     archive has none, and the resolver always reads one)."""
+
+    def do_GET(self) -> None:
+        """A listing is answered like the service does: with `after` and `before` it holds only the IDs between
+        them (inclusive), and while the server's `listing_cached_until` is set, a plain listing stops there, as a
+        cached copy ten minutes old would."""
+        parts = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(parts.query)
+        cached = self.server.cached_until if isinstance(self.server, ListingServer) else None
+        if parts.path.rstrip("/") == "/mr/timestamp" and ("after" in query or cached is not None):
+            archive = query.get("archive", [""])[0]
+            listing = json.loads((Path(self.directory) / "mr" / "timestamp" / f"{archive}.json").read_text())
+            ids: list[str] = listing["result"][archive]
+            if "after" in query:
+                ids = [one for one in ids if query["after"][0] <= one <= query["before"][0]]
+            elif cached is not None:
+                ids = [one for one in ids if one <= cached]
+            body = json.dumps({"_comment": "", "result": {archive: ids} if ids else {}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
 
     def translate_path(self, path: str) -> str:
         parts = urllib.parse.urlsplit(path)
@@ -134,7 +167,7 @@ def packages_of(plan: dict[str, dict[str, JsonValue]], name: str) -> list[tuple[
 
 class CliCase(unittest.TestCase):
     fixture: Fixture
-    server: http.server.ThreadingHTTPServer
+    server: ListingServer
     mirror: str
     _tmp: tempfile.TemporaryDirectory[str]
     tmp: Path
@@ -149,7 +182,7 @@ class CliCase(unittest.TestCase):
         def handler(*args: object, **kwargs: object) -> Mirror:
             return Mirror(*args, directory=root, **kwargs)  # type: ignore[arg-type]  # http.server's own call shape
 
-        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        cls.server = ListingServer(("127.0.0.1", 0), handler)
         cls.mirror = f"http://127.0.0.1:{cls.server.server_address[1]}"
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
@@ -185,8 +218,20 @@ class CliCase(unittest.TestCase):
         self.write_lock(root, snapshot, entries)
         return root
 
-    def write_lock(self, root: Path, snapshot: str, inputs: dict[str, object]) -> None:
-        (root / "lock.json").write_text(input_lock.dump({"debian_snapshot": snapshot, "inputs": inputs}))
+    def write_lock(self, root: Path, snapshot: str | dict[str, str], inputs: dict[str, object]) -> None:
+        """A lock holding `snapshot`: one bare ID (debian_snapshot) or an ID per archive (debian_snapshots)."""
+        pin = {"debian_snapshot": snapshot} if isinstance(snapshot, str) else {"debian_snapshots": snapshot}
+        (root / "lock.json").write_text(input_lock.dump({**pin, "inputs": inputs}))
+
+    def workspace_at(self, snapshots: dict[str, str]) -> Path:
+        """A workspace whose lock pins an exact ID per archive."""
+        root = self.workspace()
+        self.write_lock(root, snapshots, {})
+        return root
+
+    def lock_data(self, root: Path) -> dict[str, object]:
+        data: dict[str, object] = json.loads((root / "lock.json").read_text())
+        return data
 
     def sources(self, mirror: str | None = None) -> list[str]:
         return [
@@ -245,8 +290,8 @@ class PlanTest(CliCase):
     def test_both_plans_succeed(self) -> None:
         self.assertEqual((self.first.code, self.first.err), (0, ""))
         self.assertEqual((self.second.code, self.second.err), (0, ""))
-        self.assertEqual(jsonable(json.loads(self.first.out))["snapshot"], FIRST_ID)
-        self.assertEqual(jsonable(json.loads(self.second.out))["snapshot"], SECOND_ID)
+        self.assertEqual(jsonable(json.loads(self.first.out))["snapshots"], BOTH_FIRST)
+        self.assertEqual(jsonable(json.loads(self.second.out))["snapshots"], BOTH_SECOND)
 
     def test_every_image_is_resolved_from_the_fixture(self) -> None:
         found = sorted(name for name, _ in packages_of(self.first.plan(), "core"))
@@ -323,8 +368,8 @@ class PlanTest(CliCase):
     def test_the_lock_s_own_snapshot_is_the_default(self) -> None:
         self.assertEqual(self.run_plan().out, self.first.out)
 
-    def test_latest_is_the_newest_completed_id(self) -> None:
-        self.assertEqual(jsonable(json.loads(self.run_plan("--snapshot", "latest").out))["snapshot"], SECOND_ID)
+    def test_latest_is_the_newest_id_each_archive_lists(self) -> None:
+        self.assertEqual(jsonable(json.loads(self.run_plan("--snapshot", "latest").out))["snapshots"], BOTH_LATER)
 
     def test_against_an_empty_directory_builds(self) -> None:
         empty = Path(tempfile.mkdtemp(dir=self.tmp))
@@ -413,6 +458,83 @@ class PlanTest(CliCase):
         self.assertEqual(run.plan()["app-b"]["because"], [{"rebuild": "key rotation"}])
 
 
+class PerArchivePlanTest(CliCase):
+    """The two archives are pinned apart: each suite is read at its own archive's ID."""
+
+    def plan_at(self, debian: str, security: str) -> Run:
+        return self.plan(self.workspace_at({"debian": debian, "debian-security": security}))
+
+    def lib_a(self, run: Run) -> list[str]:
+        self.assertEqual((run.code, run.err), (0, ""))
+        return [version for name, version in packages_of(run.plan(), "app-a") if name == "lib-a"]
+
+    def test_a_per_archive_lock_plans_each_suite_at_its_own_id(self) -> None:
+        run = self.plan_at(FIRST_ID, SECOND_ID)
+        self.assertEqual(jsonable(json.loads(run.out))["snapshots"], {"debian": FIRST_ID, "debian-security": SECOND_ID})
+        # debian at its first snapshot has lib-a 1.0; only the security archive's second snapshot has 1.1
+        self.assertEqual(self.lib_a(run), ["1.1"])
+
+    def test_the_security_archive_newer_than_debian_works_and_the_reverse_does_not_leak(self) -> None:
+        self.assertEqual(self.lib_a(self.plan_at(FIRST_ID, SECOND_ID)), ["1.1"])
+        self.assertEqual(self.lib_a(self.plan_at(SECOND_ID, FIRST_ID)), ["1.0"])
+
+    def test_the_identity_follows_the_packages_not_the_pair_of_ids(self) -> None:
+        one, two = self.plan_at(FIRST_ID, SECOND_ID).plan(), self.plan_at(SECOND_ID, SECOND_ID).plan()
+        for name in one:
+            self.assertEqual(one[name]["identity"], two[name]["identity"], name)
+
+    def test_snapshot_option_names_one_id_per_archive(self) -> None:
+        root = self.workspace()
+        run = self.plan(root, "--snapshot", f"debian-security={SECOND_ID},debian={FIRST_ID}")
+        self.assertEqual(self.lib_a(run), ["1.1"])
+        self.assertEqual(jsonable(json.loads(run.out))["snapshots"], {"debian": FIRST_ID, "debian-security": SECOND_ID})
+
+    def test_a_missing_or_unknown_archive_is_a_usage_error(self) -> None:
+        root = self.workspace()
+        for text, message in (
+            (f"debian={FIRST_ID}", "name every archive, archive=ID for debian-security is missing"),
+            (f"debian={FIRST_ID},debian-ports={FIRST_ID}", "'debian-ports' is not an archive"),
+            (f"debian={FIRST_ID},debian-security=soon", "is not a snapshot ID"),
+            (f"debian={FIRST_ID},debian={SECOND_ID}", "archive debian is named twice"),
+        ):
+            with self.subTest(text=text):
+                run = self.plan(root, "--snapshot", text)
+                self.assertEqual(run.code, 2)
+                self.assertIn(message, run.err)
+
+    def test_an_id_an_archive_does_not_list_is_refused_not_replaced_by_an_earlier_one(self) -> None:
+        root = self.workspace()
+        between = "20261105T120000Z"
+        run = self.plan(root, "--snapshot", f"debian={FIRST_ID},debian-security={between}")
+        self.assertEqual(run.code, 1)
+        self.assertIn(f"{between} is not listed by archive debian-security", run.err)
+
+    def test_a_legacy_lock_still_plans_and_resolves_to_the_ids_each_archive_serves(self) -> None:
+        root = self.workspace("20261105T120000Z")  # between FIRST_ID and SECOND_ID, both archives serve FIRST_ID
+        run = self.plan(root)
+        self.assertEqual(jsonable(json.loads(run.out))["snapshots"], BOTH_FIRST)
+        self.assertEqual(self.lib_a(run), ["1.0"])
+
+    def test_a_bare_id_on_the_command_line_is_resolved_the_same_way(self) -> None:
+        run = self.plan(self.workspace(), "--snapshot", "20261112T000000Z")
+        self.assertEqual(jsonable(json.loads(run.out))["snapshots"], BOTH_SECOND)
+
+    def test_the_partial_mirror_is_laid_out_under_both_ids_and_nothing_else_moves(self) -> None:
+        root = self.workspace_at({"debian": FIRST_ID, "debian-security": SECOND_ID})
+        cache = self.tmp / "cache-per-archive"
+        plan_path = root / "plan.json"
+        out = self.run_cli(root, "plan", "--out", str(plan_path))
+        self.assertEqual(out.code, 0, out.err)
+        fetched = self.run_cli(
+            root, "fetch", str(plan_path), *self.sources()[:4], "--cache", str(cache), files=False, sources=False
+        )
+        self.assertEqual(fetched.code, 0, fetched.err)
+        self.assertIn(f"verified at snapshots debian {FIRST_ID}, debian-security {SECOND_ID}", fetched.out)
+        mirror = cache / "mirror" / f"{FIRST_ID}_{SECOND_ID}"
+        self.assertTrue((mirror / "debian" / "dists" / "trixie" / "InRelease").is_file())
+        self.assertTrue((mirror / "debian-security" / "dists" / "trixie-security" / "InRelease").is_file())
+
+
 class ExitCodeTest(CliCase):
     def test_a_snapshot_that_is_not_completed_is_exit_1(self) -> None:
         root = self.workspace()
@@ -427,10 +549,17 @@ class ExitCodeTest(CliCase):
         self.assertEqual(run.code, 1)
         self.assertIn("the lock's snapshot ID", run.err)
 
-    def test_a_snapshot_that_is_not_an_id_is_exit_1(self) -> None:
-        run = self.plan(self.workspace(), "--snapshot", "yesterday")
+    def test_a_lock_pinning_an_id_its_archive_does_not_list_is_exit_1_naming_the_archive(self) -> None:
+        run = self.plan(self.workspace_at({"debian": FIRST_ID, "debian-security": "20261105T120000Z"}))
         self.assertEqual(run.code, 1)
-        self.assertIn("is not a snapshot ID", run.err)
+        self.assertIn("debian-security: 20261105T120000Z is not listed by archive debian-security", run.err)
+        self.assertIn(f"the nearest listed one before it is {FIRST_ID}", run.err)
+        self.assertEqual(run.out, "")
+
+    def test_a_snapshot_that_is_not_an_id_is_a_usage_error(self) -> None:
+        run = self.plan(self.workspace(), "--snapshot", "yesterday")
+        self.assertEqual(run.code, 2)
+        self.assertIn("--snapshot: 'yesterday' is not lock, latest, a snapshot ID or archive=ID pairs", run.err)
 
     def test_an_invalid_definition_is_exit_1_naming_the_file(self) -> None:
         root = self.workspace(factory=FACTORY + '[images.second]\nkind = "core"\n')
@@ -668,6 +797,7 @@ class LockTest(CliCase):
             f"inputs.debian-baseline {FIRST_ID}: completed; "
             f"debian serves {FIRST_ID}, debian-security serves {FIRST_ID}",
         )
+        self.assertIn("lock snapshot --latest", lines[3])
 
     def test_lock_check_reports_what_a_later_id_serves(self) -> None:
         root = self.baselined()
@@ -694,6 +824,66 @@ class LockTest(CliCase):
         self.assertEqual(run.code, 1)
         self.assertIn(f"debian_snapshot {LATER_ID}: NOT usable", run.out)
         self.assertIn(f"debian_snapshot {LATER_ID}: {LATER_ID} is not completed", run.err)
+
+    def test_lock_check_of_a_per_archive_lock_says_per_archive_which_snapshot_and_whether_completed(self) -> None:
+        root = self.baselined()
+        self.write_lock(
+            root,
+            {"debian": FIRST_ID, "debian-security": LATER_ID},
+            json.loads((root / "lock.json").read_text())["inputs"],
+        )
+        run = self.run_cli(root, "lock", "check")
+        self.assertEqual((run.code, run.err), (0, ""))
+        lines = run.out.splitlines()
+        self.assertEqual(lines[1], f"debian_snapshots.debian {FIRST_ID}: completed (listed by debian)")
+        self.assertEqual(
+            lines[2], f"debian_snapshots.debian-security {LATER_ID}: completed (listed by debian-security)"
+        )
+        self.assertTrue(lines[3].startswith(f"inputs.debian-baseline {FIRST_ID}: completed;"))
+        self.assertEqual(len(lines), 4, "no hint to migrate: the lock already is")
+
+    def test_lock_check_fails_the_archive_that_does_not_list_its_pinned_id(self) -> None:
+        root = self.baselined()
+        between = "20261105T120000Z"
+        self.write_lock(
+            root,
+            {"debian": SECOND_ID, "debian-security": between},
+            json.loads((root / "lock.json").read_text())["inputs"],
+        )
+        run = self.run_cli(root, "lock", "check")
+        self.assertEqual(run.code, 1)
+        self.assertIn(f"debian_snapshots.debian {SECOND_ID}: completed", run.out)
+        self.assertIn(f"debian_snapshots.debian-security {between}: NOT usable", run.out)
+        self.assertEqual(
+            run.err.strip(),
+            f"debian_snapshots.debian-security {between}: {between} is not listed by archive debian-security "
+            f"(the nearest listed one before it is {FIRST_ID})",
+        )
+
+    def test_a_lock_with_snapshots_for_other_archives_is_refused_with_the_archives_a_build_reads(self) -> None:
+        root = self.workspace()
+        (root / "lock.json").write_text(
+            input_lock.dump({"debian_snapshots": {"debian": FIRST_ID, "debian-ports": FIRST_ID}, "inputs": {}})
+        )
+        run = self.run_cli(root, "lock", "check", "--offline", sources=False)
+        self.assertEqual(run.code, 1)
+        self.assertIn("debian_snapshots must name exactly debian, debian-security", run.err)
+
+    def test_a_lock_with_neither_field_is_refused_and_says_what_writes_it(self) -> None:
+        root = self.workspace()
+        (root / "lock.json").write_text(input_lock.dump({"inputs": {}}))
+        run = self.run_cli(root, "lock", "check", "--offline", sources=False)
+        self.assertEqual(run.code, 1)
+        self.assertIn("debian_snapshots is required", run.err)
+        self.assertIn("`lock snapshot --latest` writes it", run.err)
+
+    def test_a_lock_with_both_fields_is_refused(self) -> None:
+        root = self.workspace()
+        (root / "lock.json").write_text(
+            json.dumps({"debian_snapshot": FIRST_ID, "debian_snapshots": BOTH_FIRST, "schema": 3, "inputs": {}})
+        )
+        run = self.run_cli(root, "lock", "check", "--offline", sources=False)
+        self.assertEqual(run.code, 1)
 
     def test_lock_check_without_its_baseline_fails_the_rules(self) -> None:
         root = self.baselined()
@@ -793,18 +983,39 @@ class LockTest(CliCase):
         self.assertIn(f"baseline {LATER_ID} cannot be used", run.err)
         self.assertEqual((root / "lock.json").read_text(), before)
 
-    def test_lock_snapshot_latest_writes_the_newest_completed_id(self) -> None:
+    def test_lock_snapshot_latest_migrates_a_lock_to_one_id_per_archive(self) -> None:
         root = self.workspace()
         run = self.run_cli(root, "lock", "snapshot", "--latest")
         self.assertEqual((run.code, run.err), (0, ""))
-        self.assertEqual(run.out, f"debian_snapshot: {FIRST_ID} -> {SECOND_ID}\n")
-        self.assertEqual(json.loads((root / "lock.json").read_text())["debian_snapshot"], SECOND_ID)
+        self.assertEqual(
+            run.out,
+            f"debian_snapshot {FIRST_ID} -> debian_snapshots (one ID for each archive)\n"
+            f"debian_snapshots.debian: {FIRST_ID} -> {LATER_ID}\n"
+            f"debian_snapshots.debian-security: {FIRST_ID} -> {LATER_ID}\n",
+        )
+        data = self.lock_data(root)
+        self.assertEqual((data["schema"], data["debian_snapshots"]), (3, BOTH_LATER))
+        self.assertNotIn("debian_snapshot", data)
+        self.assertEqual(self.run_cli(root, "lock", "check").code, 0)
+        self.assertEqual(self.plan(root).code, 0)
 
     def test_lock_snapshot_latest_twice_stays(self) -> None:
         root = self.workspace()
         self.run_cli(root, "lock", "snapshot", "--latest")
         run = self.run_cli(root, "lock", "snapshot", "--latest")
-        self.assertEqual(run.out, f"debian_snapshot stays {SECOND_ID}\n")
+        self.assertEqual(
+            run.out,
+            f"debian_snapshots.debian stays {LATER_ID}\ndebian_snapshots.debian-security stays {LATER_ID}\n",
+        )
+
+    def test_lock_snapshot_latest_gives_each_archive_its_own_newest(self) -> None:
+        self.server.cached_until = SECOND_ID
+        try:
+            root = self.workspace()
+            self.assertEqual(self.run_cli(root, "lock", "snapshot", "--latest").code, 0)
+        finally:
+            self.server.cached_until = None
+        self.assertEqual(self.lock_data(root)["debian_snapshots"], BOTH_SECOND)
 
     def test_lock_snapshot_keeps_the_rest_of_the_lock(self) -> None:
         root = self.workspace(inputs={"example-tool": VENDOR_ENTRY})
@@ -820,14 +1031,96 @@ class LockTest(CliCase):
         self.assertIn("is not completed", run.err)
         self.assertEqual((root / "lock.json").read_text(), before)
 
-    def test_lock_snapshot_takes_a_given_completed_id(self) -> None:
+    def test_lock_snapshot_takes_a_bare_id_and_resolves_it_per_archive(self) -> None:
         root = self.workspace()
-        run = self.run_cli(root, "lock", "snapshot", "--id", SECOND_ID)
-        self.assertEqual(run.code, 0)
-        self.assertEqual(json.loads((root / "lock.json").read_text())["debian_snapshot"], SECOND_ID)
+        run = self.run_cli(root, "lock", "snapshot", "--id", "20261105T120000Z")  # between FIRST and SECOND
+        self.assertEqual((run.code, run.err), (0, ""))
+        data = self.lock_data(root)
+        self.assertEqual(data["debian_snapshots"], BOTH_FIRST)
+        self.assertNotIn("debian_snapshot", data)
+        self.assertEqual(self.run_cli(root, "lock", "snapshot", "--id", SECOND_ID).code, 0)
+        self.assertEqual(self.lock_data(root)["debian_snapshots"], BOTH_SECOND)
+
+    def test_lock_snapshot_id_for_one_archive_keeps_what_the_old_id_served_for_the_other(self) -> None:
+        root = self.workspace()  # debian_snapshot FIRST_ID
+        run = self.run_cli(root, "lock", "snapshot", "--id", f"debian-security={SECOND_ID}")
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.lock_data(root)["debian_snapshots"], {"debian": FIRST_ID, "debian-security": SECOND_ID})
+        self.assertNotIn("debian_snapshot", self.lock_data(root))
+        self.assertIn(f"debian_snapshots.debian stays {FIRST_ID}", run.out)
+        self.assertIn(f"debian_snapshots.debian-security: {FIRST_ID} -> {SECOND_ID}", run.out)
+
+    def test_lock_snapshot_id_repeated_moves_only_the_archives_named(self) -> None:
+        root = self.workspace_at({"debian": FIRST_ID, "debian-security": FIRST_ID})
+        run = self.run_cli(
+            root, "lock", "snapshot", "--id", f"debian={SECOND_ID}", "--id", f"debian-security={LATER_ID}"
+        )
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.lock_data(root)["debian_snapshots"], {"debian": SECOND_ID, "debian-security": LATER_ID})
+        self.assertEqual(self.run_cli(root, "lock", "snapshot", "--id", f"debian={FIRST_ID}").code, 0)
+        self.assertEqual(self.lock_data(root)["debian_snapshots"], {"debian": FIRST_ID, "debian-security": LATER_ID})
+
+    def test_lock_snapshot_refuses_an_archive_id_that_archive_does_not_list(self) -> None:
+        root = self.workspace()
+        before = (root / "lock.json").read_text()
+        run = self.run_cli(root, "lock", "snapshot", "--id", "debian=20261105T120000Z")
+        self.assertEqual(run.code, 1)
+        self.assertIn("debian: 20261105T120000Z is not listed by archive debian", run.err)
+        self.assertEqual((root / "lock.json").read_text(), before)
+
+    def test_lock_snapshot_id_mixing_a_bare_id_and_archives_is_a_usage_error(self) -> None:
+        root = self.workspace()
+        run = self.run_cli(root, "lock", "snapshot", "--id", FIRST_ID, "--id", f"debian={SECOND_ID}")
+        self.assertEqual(run.code, 2)
+        self.assertIn("a bare snapshot ID covers both archives", run.err)
+        run = self.run_cli(root, "lock", "snapshot", "--id", f"other={SECOND_ID}")
+        self.assertEqual(run.code, 2)
+        self.assertIn("'other' is not an archive", run.err)
+
+    def test_an_id_newer_than_the_cached_listing_is_confirmed_by_a_narrow_read(self) -> None:
+        self.server.cached_until = SECOND_ID
+        try:
+            root = self.workspace()
+            run = self.run_cli(root, "lock", "snapshot", "--id", f"debian-security={LATER_ID}")
+            self.assertEqual((run.code, run.err), (0, ""))
+            self.assertEqual(
+                self.lock_data(root)["debian_snapshots"], {"debian": FIRST_ID, "debian-security": LATER_ID}
+            )
+            # the lock now names an ID the cached listing lacks, and check and plan confirm it the same way
+            check = self.run_cli(root, "lock", "check")
+            self.assertEqual((check.code, check.err), (0, ""))
+            self.assertIn(
+                f"debian_snapshots.debian-security {LATER_ID}: completed (listed by debian-security)", check.out
+            )
+            self.assertEqual(self.plan(root).code, 0)
+            # an ID that is neither listed nor in the cached listing is refused after the narrow read
+            run = self.run_cli(root, "lock", "snapshot", "--id", "debian=20261116T000000Z")
+            self.assertEqual(run.code, 1)
+            self.assertIn(
+                f"debian: 20261116T000000Z is not listed by archive debian (its newest is {SECOND_ID})", run.err
+            )
+        finally:
+            self.server.cached_until = None
+
+    def test_the_narrow_read_asks_for_exactly_the_one_id(self) -> None:
+        asked: list[str] = []
+
+        def read(url: str) -> bytes:
+            asked.append(url)
+            return json.dumps({"result": {"debian": [LATER_ID]}}).encode()
+
+        found = listings.confirm(
+            {"debian": (FIRST_ID, SECOND_ID), "debian-security": (FIRST_ID,)},
+            {"debian": LATER_ID, "debian-security": FIRST_ID},
+            base="https://s.example",
+            read=read,
+        )
+        self.assertEqual(asked, [f"https://s.example/mr/timestamp/?archive=debian&after={LATER_ID}&before={LATER_ID}"])
+        self.assertEqual(found["debian"], (FIRST_ID, SECOND_ID, LATER_ID))
+        self.assertEqual(found["debian-security"], (FIRST_ID,), "an ID already in the listing needs no read")
 
     def test_lock_snapshot_refuses_what_is_not_an_id(self) -> None:
-        self.assertEqual(self.run_cli(self.workspace(), "lock", "snapshot", "--id", "soon").code, 1)
+        self.assertEqual(self.run_cli(self.workspace(), "lock", "snapshot", "--id", "soon").code, 2)
 
     def test_lock_snapshot_needs_latest_or_an_id(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:

@@ -184,10 +184,10 @@ class BuildBootingTest(unittest.TestCase):
             for name in names
         }
         plan: planfile.Plan = {
-            "schema": 1,
+            "schema": 2,
             "factory": "0",
             "engine": 1,
-            "snapshot": SNAPSHOT,
+            "snapshots": {"debian": SNAPSHOT, "debian-security": SNAPSHOT},
             "baseline": BASELINE,
             "debian": {"suite": SUITE, "components": ("main",), "architecture": ARCH},
             "params": {},

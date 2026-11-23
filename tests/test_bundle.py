@@ -14,8 +14,11 @@ from pathlib import Path
 
 from debian_image_factory import archive, bundle, cli, commands, fetch, planfile, replay
 from debian_image_factory.build import run
+from debian_image_factory.snapshots import ARCHIVES
 from tests.support.fixture_archive import FIRST_ID
 from tests.test_fetch import TOOL_BYTES, TOOL_URL, FetchCase, recording, tool_fields
+
+FIRST_IDS = dict.fromkeys(ARCHIVES, FIRST_ID)
 
 IDENTITY = "ab" * 32
 
@@ -93,7 +96,7 @@ class WriteTest(unittest.TestCase):
             bundle.hashed("cache/a", root / "a"),
         ]
         manifest = bundle.manifest_bytes(
-            image="core", identity=IDENTITY, snapshot=FIRST_ID, suite="trixie", architecture="amd64", members=items
+            image="core", identity=IDENTITY, snapshots=FIRST_IDS, suite="trixie", architecture="amd64", members=items
         )
         target = root / name
         bundle.write(target, manifest, list(reversed(items)))
@@ -132,6 +135,42 @@ class WriteTest(unittest.TestCase):
             self.assertEqual(sorted(path.name for path in root.iterdir()), ["a"])
 
 
+class ManifestSnapshotsTest(unittest.TestCase):
+    def manifest(self, **change: object) -> dict[str, object]:
+        document: dict[str, object] = {
+            "schema": 2,
+            "image": "core",
+            "identity": IDENTITY,
+            "snapshots": dict(FIRST_IDS),
+            "suite": "trixie",
+            "architecture": "amd64",
+            "files": [{"path": "plan.json", "sha256": "0" * 64, "size": 0}],
+        }
+        return {**document, **change}
+
+    def test_a_manifest_names_one_snapshot_per_archive(self) -> None:
+        parsed = bundle.parse_manifest(
+            self.manifest(snapshots={"debian": FIRST_ID, "debian-security": "20261108T000000Z"})
+        )
+        self.assertEqual(parsed["snapshots"], {"debian": FIRST_ID, "debian-security": "20261108T000000Z"})
+
+    def test_a_schema_1_bundle_is_refused_and_says_to_fetch_again(self) -> None:
+        old = self.manifest(schema=1, snapshot=FIRST_ID)
+        del old["snapshots"]
+        with self.assertRaisesRegex(ValueError, "schema is 1, which names one snapshot for both archives.*fetch again"):
+            bundle.parse_manifest(old)
+
+    def test_snapshots_must_be_exactly_the_archives_with_real_ids(self) -> None:
+        for bad, pattern in (
+            ({"debian": FIRST_ID}, "must name exactly debian, debian-security"),
+            ({**FIRST_IDS, "other": FIRST_ID}, "must name exactly"),
+            ({**FIRST_IDS, "debian": "../x"}, "snapshots.debian is not a snapshot ID"),
+            (FIRST_ID, "snapshots must be an object"),
+        ):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, pattern):
+                bundle.parse_manifest(self.manifest(snapshots=bad))
+
+
 class FetchBundleTest(BundleCase):
     def test_one_bundle_per_image_that_builds_and_none_for_the_rest(self) -> None:
         directory = self.bundles(self.only_core_and_app_a())
@@ -149,7 +188,7 @@ class FetchBundleTest(BundleCase):
         path = directory / bundle.bundle_name("app-a", "trixie", "amd64", plan["images"]["app-a"]["identity"])
         found = members(path)
         manifest = bundle.parse_manifest(json.loads(found["manifest.json"]))
-        self.assertEqual((manifest["image"], manifest["snapshot"]), ("app-a", FIRST_ID))
+        self.assertEqual((manifest["image"], manifest["snapshots"]), ("app-a", FIRST_IDS))
         self.assertEqual(manifest["identity"], plan["images"]["app-a"]["identity"])
         self.assertEqual(found["plan.json"], plan_path.read_bytes())
         self.assertNotIn("verified_at", manifest, "no vendor .deb: no Release to judge")
@@ -157,7 +196,7 @@ class FetchBundleTest(BundleCase):
             {one["path"]: one["sha256"] for one in manifest["files"]},
             {name: sha256(data) for name, data in found.items() if name != "manifest.json"},
         )
-        stem = f"cache/mirror/{FIRST_ID}"
+        stem = f"cache/mirror/{FIRST_ID}_{FIRST_ID}"
         for dist, archive_ in (
             ("trixie", "debian"),
             ("trixie-updates", "debian"),
@@ -224,7 +263,7 @@ class PackedCase(BundleCase):
 class UnpackTest(PackedCase):
     def test_a_bundle_unpacks_to_a_cache_the_build_reads(self) -> None:
         unpacked = bundle.unpack(self.bundle_path, self.scratch())
-        mirror = fetch.mirror_dir(unpacked.cache, FIRST_ID)
+        mirror = fetch.mirror_dir(unpacked.cache, FIRST_IDS)
         self.assertTrue((mirror / "debian" / "dists" / "trixie" / "InRelease").is_file())
         self.assertTrue((mirror / "debian" / "pool" / "main" / "t" / "tool-a" / "tool-a_1.0_amd64.deb").is_file())
 
@@ -282,10 +321,10 @@ class UnpackTest(PackedCase):
         with tarfile.open(target, "w") as archive_:
             manifest = json.dumps(
                 {
-                    "schema": 1,
+                    "schema": 2,
                     "image": "core",
                     "identity": IDENTITY,
-                    "snapshot": FIRST_ID,
+                    "snapshots": FIRST_IDS,
                     "suite": "trixie",
                     "architecture": "amd64",
                     "files": [{"path": "plan.json", "sha256": "0" * 64, "size": 0}],

@@ -182,7 +182,11 @@ def fetch_suite(
     cache `<cache>/sha256/<aa>/<hex>` and are reused when present and matching.
     """
     base_url = base_url.rstrip("/")
-    in_release = read(f"{base_url}/dists/{dist}/InRelease")
+    url = f"{base_url}/dists/{dist}/InRelease"
+    try:
+        in_release = read(url)
+    except OSError as error:
+        raise ArchiveError(f"{url}: cannot be read: {error}") from None
     release_text = verify_in_release(in_release, keyring, f"{base_url}/dists/{dist}")
     try:
         listed = debian.release_files(release_text)

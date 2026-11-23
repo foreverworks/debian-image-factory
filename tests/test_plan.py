@@ -68,7 +68,7 @@ def make(
     spec = spec or example_definition()
     return plan.build_plan(
         spec,
-        snapshot=SNAPSHOT,
+        snapshots={"debian": SNAPSHOT, "debian-security": SNAPSHOT},
         baseline=BASELINE,
         params=spec.params,
         inputs=inputs,
@@ -246,9 +246,9 @@ class DocumentTest(unittest.TestCase):
 
     def test_the_header(self) -> None:
         document = make(self.inputs, reuse_all(self.spec))
-        self.assertEqual(document["schema"], 1)
+        self.assertEqual(document["schema"], 2)
         self.assertEqual(document["engine"], ENGINE)
-        self.assertEqual(document["snapshot"], SNAPSHOT)
+        self.assertEqual(document["snapshots"], {"debian": SNAPSHOT, "debian-security": SNAPSHOT})
         self.assertEqual(document["baseline"], BASELINE)
         self.assertEqual(document["debian"], {"suite": "trixie", "components": ["main"], "architecture": "amd64"})
         self.assertEqual(document["params"], {"vendor_tools": False})

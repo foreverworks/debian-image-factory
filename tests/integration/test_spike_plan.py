@@ -1,7 +1,7 @@
 """The resolver spike (DESIGN 7.2): the plan's core package set equals a real mmdebstrap build's.
 
-It plans the example definition at the example lock's snapshot, builds core for real with
-mmdebstrap in the builder image at the same snapshot, and compares the plan's set with the built
+It plans the example definition at the example lock's snapshots, builds core for real with
+mmdebstrap in the builder image at the same two snapshots (one per archive), and compares the plan's set with the built
 root's dpkg status. It also plans inside the builder image and requires the same plan bytes, so
 identities do not depend on the machine. Needs docker and network access to snapshot.debian.org.
 """
@@ -23,12 +23,6 @@ EXAMPLES = ROOT / "examples"
 
 def run(*argv: str) -> str:
     return subprocess.run(argv, check=True, capture_output=True, text=True).stdout.strip()
-
-
-def example_snapshot() -> str:
-    data: object = json.loads((EXAMPLES / "lock.json").read_text())
-    assert isinstance(data, dict) and isinstance(data["debian_snapshot"], str)
-    return data["debian_snapshot"]
 
 
 @unittest.skipUnless(os.environ.get("DIF_INTEGRATION") == "1", "set DIF_INTEGRATION=1 to run integration tests")
@@ -55,11 +49,14 @@ class SpikeTest(unittest.TestCase):
         plan: object = json.loads(self.plan_text)
         assert isinstance(plan, dict)
         core = plan["images"]["core"]
+        snapshots = plan["snapshots"]
+        assert isinstance(snapshots, dict)
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "core.json"
             run(
                 str(ROOT / "scripts" / "spike-core"),
-                *("--snapshot", example_snapshot(), "--out", str(out), "--tag", self.tag),
+                *("--debian", snapshots["debian"], "--debian-security", snapshots["debian-security"]),
+                *("--out", str(out), "--tag", self.tag),
                 *core["request"],
             )
             built: object = json.loads(out.read_text())

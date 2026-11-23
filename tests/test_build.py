@@ -168,10 +168,10 @@ class VerifyPlanTest(unittest.TestCase):
             for name in names
         }
         self.plan: planfile.Plan = {
-            "schema": 1,
+            "schema": 2,
             "factory": "0",
             "engine": 1,
-            "snapshot": SNAPSHOT,
+            "snapshots": {"debian": SNAPSHOT, "debian-security": SNAPSHOT},
             "baseline": None,
             "debian": {"suite": "trixie", "components": ("main",), "architecture": "amd64"},
             "params": {},
@@ -183,6 +183,27 @@ class VerifyPlanTest(unittest.TestCase):
 
     def test_a_plan_made_from_the_lock_passes(self) -> None:
         self.verify()
+
+    def test_each_suites_in_release_is_named_at_its_own_archives_snapshot(self) -> None:
+        self.plan["snapshots"] = {"debian": "20261121T004329Z", "debian-security": "20261123T141315Z"}
+        with tempfile.TemporaryDirectory() as scratch:
+            mirror = Path(scratch)
+            for archive, dist in (
+                ("debian", "trixie"),
+                ("debian", "trixie-updates"),
+                ("debian-security", "trixie-security"),
+            ):
+                (mirror / archive / "dists" / dist).mkdir(parents=True)
+                (mirror / archive / "dists" / dist / "InRelease").write_bytes(dist.encode())
+            found = run.in_releases(mirror, self.plan)
+        self.assertEqual(
+            [one.uri for one in found],
+            [
+                "https://snapshot.debian.org/archive/debian/20261121T004329Z/dists/trixie/InRelease",
+                "https://snapshot.debian.org/archive/debian/20261121T004329Z/dists/trixie-updates/InRelease",
+                "https://snapshot.debian.org/archive/debian-security/20261123T141315Z/dists/trixie-security/InRelease",
+            ],
+        )
 
     def test_an_edited_request_or_sources_is_refused_though_the_identity_is_unchanged(self) -> None:
         core_entry = self.plan["images"]["core"]

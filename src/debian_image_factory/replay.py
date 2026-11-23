@@ -44,7 +44,7 @@ def check(unpacked: bundle.Unpacked, plan: planfile.Plan, source: Path) -> None:
         name
         for name, ours, theirs in (
             ("identity", manifest["identity"], entry["identity"]),
-            ("snapshot", manifest["snapshot"], plan["snapshot"]),
+            ("snapshots", manifest["snapshots"], plan["snapshots"]),
             ("suite", manifest["suite"], debian_["suite"]),
             ("architecture", manifest["architecture"], debian_["architecture"]),
         )
@@ -54,7 +54,7 @@ def check(unpacked: bundle.Unpacked, plan: planfile.Plan, source: Path) -> None:
         raise Failed(f"{source}: the manifest and the plan it carries disagree on {', '.join(differs)}")
     present = {one["path"] for one in manifest["files"]}
     wanted: list[str] = []
-    stem = fetch.mirror_dir(Path(bundle.CACHE), plan["snapshot"]).as_posix()
+    stem = fetch.mirror_dir(Path(bundle.CACHE), plan["snapshots"]).as_posix()
     for suite in debian.suites(debian_["suite"]):
         wanted.append(f"{stem}/{suite.archive}/dists/{suite.dist}/InRelease")
     for name, fields in sorted(entry["inputs"].items()):

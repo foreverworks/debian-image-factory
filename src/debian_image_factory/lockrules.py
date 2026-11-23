@@ -16,7 +16,8 @@ only what needs the definition:
   `registryUrl` and `signed_by` (`vendordeb.entry_problems`): every vendor .deb is signature-checked;
 - an image that uses a `builtin:file` module has exactly one of its entries to place, keyrings aside, and an
   unpacked one is a tarball (`filemodule.placed_problems`);
-- `debian_snapshot` is present;
+- the build snapshots are present: `debian_snapshot` (one ID for both archives) or `debian_snapshots` (the exact
+  ID of each archive the factory reads, `snapshots.ARCHIVES`, and no other);
 - the baseline snapshot, when an image's `apt_sources` points at it, is the reserved entry
   `debian-baseline`: its `version` is the snapshot ID and it pins the debian archive's `InRelease`
   for the suite at that ID by sha256 (input-lock 0.1 has no top-level field for a second snapshot).
@@ -31,7 +32,7 @@ import input_lock
 from input_lock import SNAPSHOT_ID, Entry, JsonValue, Lock
 from input_lock import entry_problems as entry_format_problems
 
-from . import filemodule, nodejs, vendordeb
+from . import filemodule, nodejs, snapshots, vendordeb
 from .definition import Definition, Param
 
 FACTORY_ENTRY: Final = "debian-image-factory"
@@ -188,13 +189,30 @@ def module_problems(inputs: Mapping[str, Entry], definition: Definition) -> list
     return found
 
 
+def snapshot_problems(data: Mapping[str, JsonValue]) -> list[str]:
+    """The lock pins the build snapshots: `debian_snapshot` or `debian_snapshots` (input-lock rejects both, and
+    a malformed ID or archive name), and the latter names exactly the archives the factory reads."""
+    pinned = data.get("debian_snapshots")
+    if "debian_snapshot" not in data and pinned is None:
+        return [
+            "debian_snapshots is required: the build snapshots, one per archive "
+            f"({', '.join(snapshots.ARCHIVES)}); `lock snapshot --latest` writes it"
+        ]
+    if isinstance(pinned, dict) and set(pinned) != set(snapshots.ARCHIVES):
+        wrong = sorted(set(pinned) ^ set(snapshots.ARCHIVES))
+        return [
+            f"debian_snapshots must name exactly {', '.join(snapshots.ARCHIVES)}, the archives a build reads "
+            f"(not matching: {', '.join(wrong)})"
+        ]
+    return []
+
+
 def problems(data: JsonValue, definition: Definition) -> list[str]:
     """Every way `data` is not a lock this definition can build from; [] when it is one."""
     found = input_lock.problems(data, images=definition.images)
     if not isinstance(data, dict):
         return found
-    if "debian_snapshot" not in data:
-        found.append("debian_snapshot is required: the build snapshot (`lock snapshot --latest` writes it)")
+    found.extend(snapshot_problems(data))
     inputs = data.get("inputs")
     if isinstance(inputs, dict):
         well_formed: dict[str, Entry] = {}
@@ -221,6 +239,15 @@ def check(data: JsonValue, definition: Definition) -> Lock:
     if found:
         raise input_lock.LockError("\n".join(found))
     return input_lock.parse(input_lock.dump(data), images=definition.images)
+
+
+def snapshot_pin(lock: Lock) -> snapshots.Pin | None:
+    """What the lock pins: `debian_snapshots` (an exact ID per archive), `debian_snapshot` (one bare ID for both)
+    or None."""
+    pinned = lock.get("debian_snapshots")
+    if pinned is not None:
+        return dict(pinned)
+    return lock.get("debian_snapshot")
 
 
 def baseline(lock: Lock) -> str | None:

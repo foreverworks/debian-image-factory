@@ -22,9 +22,10 @@ from typing import Final
 from input_lock.records import TestOutcome
 
 from debian_image_factory import published
+from debian_image_factory.snapshots import ARCHIVES
 from tests import test_cli
 from tests.support import action, incusimage
-from tests.support.fixture_archive import FIRST_ID, SECOND_ID
+from tests.support.fixture_archive import FIRST_ID, LATER_ID
 from tests.support.oci_fixtures import records_text, result_line
 
 EXTENSIONS: Final = {"core": "tar.gz", "os": "tar.gz", "installer": "tar"}
@@ -160,7 +161,7 @@ class NightTest(test_cli.CliCase):
         states = {name: entry["state"] for name, entry in self.images.items()}
         self.assertEqual(states, dict.fromkeys(first, "reuse"))
         # a later snapshot, and the same identities: the build snapshot enters no identity
-        self.assertEqual(self.document["snapshot"], SECOND_ID)
+        self.assertEqual(self.document["snapshots"], dict.fromkeys(ARCHIVES, LATER_ID))
         self.assertEqual(
             {n: e["identity"] for n, e in self.images.items()}, {n: e["identity"] for n, e in first.items()}
         )

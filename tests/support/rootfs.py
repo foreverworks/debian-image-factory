@@ -105,7 +105,7 @@ def plan_text(
         "checks": list(checks),
     }
     plan = {
-        "snapshot": snapshot,
+        "snapshots": {"debian": snapshot, "debian-security": snapshot},
         "baseline": baseline,
         "debian": {"suite": SUITE, "components": ["main"], "architecture": ARCH},
         "images": {"core": core, **(extra_images or {})},

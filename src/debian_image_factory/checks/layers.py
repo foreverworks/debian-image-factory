@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Final
 
 from . import tarball
+from .scanning import Needle
 from .tarball import Hit, Member
 
 WHITEOUT: Final = ".wh."
@@ -113,9 +114,7 @@ def merge(scans: Iterable[tarball.Scan]) -> tarball.Scan:
     )
 
 
-def scan_layers(
-    paths: Sequence[Path], wanted: frozenset[str], needle: str | None, keys: bool
-) -> Iterator[tarball.Scan]:
+def scan_layers(paths: Sequence[Path], wanted: frozenset[str], needle: Needle, keys: bool) -> Iterator[tarball.Scan]:
     """The layers' scans, base first, one pass each and none held after it is yielded.
 
     Raises tarfile.TarError, EOFError or OSError when a layer cannot be read, at the point it is reached."""
@@ -123,6 +122,6 @@ def scan_layers(
         yield tarball.scan_tarball(path, wanted, needle, keys)
 
 
-def scan_image(paths: Sequence[Path], wanted: frozenset[str], needle: str | None, keys: bool) -> tarball.Scan:
+def scan_image(paths: Sequence[Path], wanted: frozenset[str], needle: Needle, keys: bool) -> tarball.Scan:
     """The merged view of the layer files `paths` (base first) with what `tarball.scan_tarball` finds in each."""
     return merge(scan_layers(paths, wanted, needle, keys))

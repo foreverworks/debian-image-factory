@@ -1,4 +1,4 @@
-"""debian-image-factory: Debian images from one archive snapshot, rebuilt only when their inputs change.
+"""debian-image-factory: Debian images from pinned archive snapshots, rebuilt only when their inputs change.
 
 DESIGN.md is the reference. The pure core (definition, lockrules, snapshots, identity, plan) never
 touches files, the network or subprocesses; the edges (resolve, archive, cli) do.

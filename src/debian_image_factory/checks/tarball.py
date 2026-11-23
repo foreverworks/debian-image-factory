@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import IO, Final, Literal
 
 from . import scanning
+from .scanning import Needle
 
 CHUNK: Final = 64 * 1024
 MAX_WANTED: Final = 32 * 1024 * 1024
@@ -88,7 +89,7 @@ def keep_none(path: str) -> bool:
 def scan_entries(
     items: Iterable[tuple[str, Member, Iterable[bytes] | None]],
     wanted: frozenset[str],
-    needle: str | None,
+    needle: Needle,
     keys: bool,
     keep: Keep = keep_none,
 ) -> Scan:
@@ -102,7 +103,8 @@ def scan_entries(
     contents: dict[str, bytes] = {}
     key_files: list[str] = []
     hits: list[Hit] = []
-    needle_bytes = needle.encode() if needle else None
+    needles = scanning.needles_of(needle)
+    needle_bytes = tuple(one.encode() for one in needles)
 
     def hit(where: Literal["path", "link target", "content"], where_path: str) -> None:
         if len(hits) < HITS_LIMIT:
@@ -110,9 +112,9 @@ def scan_entries(
 
     for name, member, data in items:
         members.append(member)
-        if needle and needle in name:
+        if any(one in name for one in needles):
             hit("path", member.path)
-        if needle and needle in member.target:
+        if any(one in member.target for one in needles):
             hit("link target", member.path)
         if data is None:
             continue
@@ -123,7 +125,7 @@ def scan_entries(
                 contents[member.path] = whole
             stream = [whole]
         search_keys = keys and not (member.path.startswith(DOC_TREES) and member.path.endswith(COMPRESSED_DOCS))
-        if needle_bytes is None and not search_keys:
+        if not needle_bytes and not search_keys:
             continue
         found = scanning.scan(stream, needle_bytes, search_keys)
         if found.needle:
@@ -156,7 +158,7 @@ def tar_items(archive: tarfile.TarFile) -> Iterator[tuple[str, Member, Iterable[
             yield info.name, member, chunks_of(handle)
 
 
-def scan_tarball(path: Path, wanted: frozenset[str], needle: str | None, keys: bool, keep: Keep = keep_none) -> Scan:
+def scan_tarball(path: Path, wanted: frozenset[str], needle: Needle, keys: bool, keep: Keep = keep_none) -> Scan:
     """One pass over a gzip (or plain) tarball (`scan_entries` says what is looked for). Raises
     tarfile.TarError, EOFError or OSError when the file cannot be read as a tarball."""
     with tarfile.open(path, mode="r|*") as archive:

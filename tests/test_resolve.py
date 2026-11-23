@@ -6,9 +6,10 @@ from pathlib import Path
 
 from input_lock import Package
 
-from debian_image_factory import remote, resolve
+from debian_image_factory import archive, remote, resolve
+from debian_image_factory.snapshots import ARCHIVES
 from tests.support import fixture_archive
-from tests.support.fixture_archive import Fixture
+from tests.support.fixture_archive import FIRST_ID, Fixture
 
 ESSENTIAL = ["base-files", "fixture-essential"]
 
@@ -50,7 +51,7 @@ class ResolveTest(unittest.TestCase):
     @classmethod
     def open(cls, tmp: Path, which: int) -> resolve.OpenArchive:
         return resolve.open_archive(
-            cls.fixture.snapshot_ids[which],
+            dict.fromkeys(ARCHIVES, cls.fixture.snapshot_ids[which]),
             "trixie",
             ["main"],
             "amd64",
@@ -88,9 +89,14 @@ class OpenArchiveTest(ResolveTest):
         self.assertTrue(all(line.startswith("deb [signed-by=") and "file:" in line for line in sources))
 
     def test_an_unknown_snapshot_cannot_be_opened(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="dif-resolve-") as scratch, self.assertRaises(OSError):
+        with (
+            tempfile.TemporaryDirectory(prefix="dif-resolve-") as scratch,
+            self.assertRaisesRegex(
+                archive.ArchiveError, r"archive/debian/20200101T000000Z/dists/trixie/InRelease: cannot be read"
+            ),
+        ):
             resolve.open_archive(
-                "20200101T000000Z",
+                dict.fromkeys(ARCHIVES, "20200101T000000Z"),
                 "trixie",
                 ["main"],
                 "amd64",
@@ -185,7 +191,34 @@ class ChildTest(ResolveTest):
     def test_a_parent_package_missing_from_the_snapshot_is_named(self) -> None:
         with self.assertRaises(resolve.ResolveError) as caught:
             resolve.resolve_child(self.first, [("ghost", "9", "amd64")], [], "kit")
-        self.assertIn("ghost 9 (amd64) is not in this snapshot's indices", str(caught.exception))
+        self.assertIn("ghost 9 (amd64) is not in the snapshots' indices", str(caught.exception))
+        self.assertIn(f"debian {FIRST_ID} and debian-security {FIRST_ID}", str(caught.exception))
+
+    def test_each_suite_is_read_at_its_own_archives_id(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dif-resolve-") as scratch:
+            opened = resolve.open_archive(
+                {"debian": fixture_archive.FIRST_ID, "debian-security": fixture_archive.SECOND_ID},
+                "trixie",
+                ["main"],
+                "amd64",
+                keyring=self.fixture.keyring,
+                cache=Path(scratch) / "cache",
+                workdir=Path(scratch) / "work",
+                service=f"file://{self.fixture.root}",
+                read=read_with_updates,
+            )
+            self.assertIn(("lib-a", "1.1", "all"), opened.stanzas, "the security archive's own, newer snapshot")
+            self.assertEqual(len([key for key in opened.stanzas if key[0] == "lib-a"]), 2, "and debian's older one")
+            self.assertEqual(
+                opened.snapshots, {"debian": fixture_archive.FIRST_ID, "debian-security": fixture_archive.SECOND_ID}
+            )
+
+    def test_an_error_names_both_ids(self) -> None:
+        with self.assertRaises(resolve.ResolveError) as caught:
+            resolve.resolve_core(self.first, ["no-such-package"])
+        message = str(caught.exception)
+        self.assertIn("core:", message)
+        self.assertIn(f"the indices are those of debian {FIRST_ID} and debian-security {FIRST_ID}", message)
 
     def test_an_unknown_package_fails_with_apts_message(self) -> None:
         core = resolve.resolve_core(self.first, [])

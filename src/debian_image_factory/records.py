@@ -46,8 +46,8 @@ REPOSITORY: Final = "https://github.com/foreverworks/debian-image-factory"
 
 
 def build_type(version: str) -> str:
-    """The document that says what a build's parameters mean, as of a factory release (docs/build-type-v1.md)."""
-    return f"{REPOSITORY}/blob/v{version}/docs/build-type-v1.md"
+    """The document that says what a build's parameters mean, as of a factory release (docs/build-type-v2.md)."""
+    return f"{REPOSITORY}/blob/v{version}/docs/build-type-v2.md"
 
 
 BUILD_TYPE: Final = build_type(__version__)
@@ -282,7 +282,7 @@ def provenance_statement(
     definition: DefinitionSource | None,
     identity: str,
     engine: int,
-    build_snapshot: str,
+    build_snapshots: Mapping[str, str],
     architecture: str,
     reason: str | None,
     lock: Lock,
@@ -299,7 +299,7 @@ def provenance_statement(
     finished_on: str,
     removed_from_parent: Sequence[str] | None = None,
 ) -> Statement:
-    """The SLSA v1 provenance of one artifact, as an in-toto Statement (DESIGN 8.2, docs/build-type-v1.md).
+    """The SLSA v1 provenance of one artifact, as an in-toto Statement (DESIGN 8.2, docs/build-type-v2.md).
 
     resolvedDependencies come in this order: the definition's commit (when known), `lock.json` and each locked
     download of `entries`, `recipe of <image>`, each InRelease, the builder image, then the ancestors,
@@ -319,7 +319,7 @@ def provenance_statement(
     internal: dict[str, JsonValue] = {
         "identity": _require_sha256(identity, "the identity"),
         "engine": engine,
-        "buildSnapshot": build_snapshot,
+        "buildSnapshots": dict(build_snapshots),
         "architecture": architecture,
     }
     if reason:

@@ -30,7 +30,8 @@ class PlanFileTest(FetchCase):
 
     def test_a_real_plan_parses(self) -> None:
         plan = planfile.parse_plan(json.loads(self.plan_text))
-        self.assertEqual((plan["schema"], plan["engine"], plan["snapshot"], plan["baseline"]), (1, 1, FIRST_ID, None))
+        self.assertEqual((plan["schema"], plan["engine"], plan["baseline"]), (2, 1, None))
+        self.assertEqual(plan["snapshots"], {"debian": FIRST_ID, "debian-security": FIRST_ID})
         self.assertEqual(plan["debian"], {"suite": "trixie", "components": ("main",), "architecture": "amd64"})
         self.assertEqual(sorted(plan["images"]), ["app-a", "app-b", "app-c", "core"])
         core, app_a = plan["images"]["core"], plan["images"]["app-a"]
@@ -84,15 +85,27 @@ class PlanFileTest(FetchCase):
                 planfile.parse_plan(document)
 
     def test_every_top_level_field_is_checked(self) -> None:
-        self.failing(lambda d: d.update(schema=2), "schema must be 1")
-        for key in ("snapshot", "factory", "engine", "baseline", "debian", "params", "images"):
+        self.failing(lambda d: d.update(schema=3), "schema must be 2")
+        for key in ("snapshots", "factory", "engine", "baseline", "debian", "params", "images"):
             self.failing(lambda d, key=key: d.pop(key), f"{key} is missing")  # type: ignore[misc]  # bound per key
-        self.failing(lambda d: d.update(snapshot="../x"), "snapshot is '../x'")
+        self.failing(lambda d: obj(d, "snapshots").update(debian="../x"), r"snapshots\.debian is '../x'")
+        self.failing(
+            lambda d: obj(d, "snapshots").pop("debian-security"), "snapshots must name exactly debian, debian-security"
+        )
+        self.failing(lambda d: obj(d, "snapshots").update(other=FIRST_ID), "snapshots must name exactly")
+        self.failing(lambda d: d.update(snapshots=FIRST_ID), "snapshots must be an object")
         self.failing(lambda d: d.update(engine="1"), "engine must be a whole number")
         self.failing(lambda d: d.update(baseline=3), "baseline must be non-empty text")
         self.failing(lambda d: d.update(params=[]), "params must be an object")
         self.failing(lambda d: d.update(params={"a": [1]}), r"params\.a must be text")
         self.failing(lambda d: d.update(images=[]), "images must be an object")
+
+    def test_a_schema_1_plan_is_refused_and_says_why(self) -> None:
+        document = json.loads(self.plan_text)
+        document["schema"] = 1
+        document["snapshot"] = document.pop("snapshots")["debian"]
+        with self.assertRaisesRegex(ValueError, r"schema 1, which names one snapshot for both archives.*`plan`"):
+            planfile.parse_plan(document)
 
     def test_debian_is_checked(self) -> None:
         self.failing(lambda d: obj(d, "debian").pop("suite"), r"debian\.suite is missing")

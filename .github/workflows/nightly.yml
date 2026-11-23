@@ -1,5 +1,5 @@
 # Every night: the Action (action.yml, run as `uses: ./`) plans .github/nightly/factory.toml at the newest
-# completed snapshot against a target that persists between nights, and builds, tests and publishes only what
+# listed snapshot of each archive against a target that persists between nights, and builds, tests and publishes only what
 # the plan says changed. A night with no relevant upload builds nothing and costs a few index downloads
 # (DESIGN 9.3). It proves the Action on every kind it can without a registry, and the claim that a quiet night builds nothing.
 #

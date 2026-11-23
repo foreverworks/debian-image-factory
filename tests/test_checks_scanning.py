@@ -32,6 +32,19 @@ class NeedleTest(unittest.TestCase):
         self.assertEqual(len(chunks[0]), CHUNK)
         self.assertTrue(scanning.scan(chunks, NEEDLE, False).needle)
 
+    def test_any_of_several_needles_counts_and_none_of_them_does_not(self) -> None:
+        other = b"20261123T141315Z"
+        self.assertTrue(scanning.scan([b"x " + other + b" y"], (NEEDLE, other), False).needle)
+        self.assertTrue(scanning.scan([b"a" * 100, b"b" + NEEDLE], (other, NEEDLE), False).needle)
+        self.assertFalse(scanning.scan([b"nothing"], (NEEDLE, other), False).needle)
+        self.assertFalse(scanning.scan([NEEDLE], (), False).needle)
+
+    def test_needles_of_takes_one_several_or_none(self) -> None:
+        self.assertEqual(scanning.needles_of(None), ())
+        self.assertEqual(scanning.needles_of(""), ())
+        self.assertEqual(scanning.needles_of("a"), ("a",))
+        self.assertEqual(scanning.needles_of(["a", "", "b"]), ("a", "b"))
+
     def test_not_asked_for_is_not_reported(self) -> None:
         self.assertFalse(scanning.scan([NEEDLE + KEY], None, False).needle)
         self.assertFalse(scanning.scan([NEEDLE + KEY], None, False).key)

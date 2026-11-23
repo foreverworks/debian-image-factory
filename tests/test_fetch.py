@@ -13,9 +13,11 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from debian_image_factory import archive, cli, commands, fetch, planfile, remote, resolve
+from debian_image_factory.snapshots import ARCHIVES
 from tests.support.fixture_archive import FIRST_ID
 from tests.test_cli import FACTORY, HOOK, CliCase
 
+FIRST_IDS = dict.fromkeys(ARCHIVES, FIRST_ID)
 TOOL_URL = "https://downloads.example.com/tool-1.0.tar"
 TOOL_BYTES = b"the locked tool\n"
 KEY_URL = "https://downloads.example.com/keys-1.0.pgp"
@@ -103,8 +105,8 @@ class FetchTest(FetchCase):
     def test_lays_out_the_signed_indices_and_every_pool_file(self) -> None:
         cache = self.new_cache()
         summary = self.fetch(self.write_plan(self.plan_text), cache)
-        mirror = fetch.mirror_dir(cache, FIRST_ID)
-        self.assertEqual(mirror, cache / "mirror" / FIRST_ID)
+        mirror = fetch.mirror_dir(cache, FIRST_IDS)
+        self.assertEqual(mirror, cache / "mirror" / f"{FIRST_ID}_{FIRST_ID}")
         served = self.fixture.root / "archive" / "debian" / FIRST_ID
         self.assertEqual(
             (mirror / "debian" / "dists" / "trixie" / "InRelease").read_bytes(),
@@ -142,11 +144,11 @@ class FetchTest(FetchCase):
         cache = self.new_cache()
         plan = self.write_plan(self.plan_text)
         self.fetch(plan, cache)
-        pool = fetch.mirror_dir(cache, FIRST_ID) / "debian" / "pool" / "main" / "l" / "lib-b" / "lib-b_2.0_amd64.deb"
+        pool = fetch.mirror_dir(cache, FIRST_IDS) / "debian" / "pool" / "main" / "l" / "lib-b" / "lib-b_2.0_amd64.deb"
         good = pool.read_bytes()
         pool.unlink()
         pool.write_bytes(b"stale")
-        link = fetch.mirror_dir(cache, FIRST_ID) / "debian" / "pool" / "main" / "d" / "dpkg" / "dpkg_1.0_amd64.deb"
+        link = fetch.mirror_dir(cache, FIRST_IDS) / "debian" / "pool" / "main" / "d" / "dpkg" / "dpkg_1.0_amd64.deb"
         link.unlink()
         link.symlink_to(pool)
         self.fetch(plan, cache)
@@ -164,7 +166,7 @@ class FetchTest(FetchCase):
         message = str(caught.exception)
         self.assertIn(f"{self.mirror}/archive/debian/{FIRST_ID}/pool/main/l/lib-b/lib-b_2.0_amd64.deb", message)
         self.assertIn("does not match the signed index", message)
-        self.assertFalse((fetch.mirror_dir(cache, FIRST_ID) / "debian" / "pool").exists())
+        self.assertFalse((fetch.mirror_dir(cache, FIRST_IDS) / "debian" / "pool").exists())
 
     def test_a_package_the_snapshot_lacks_is_named(self) -> None:
         document = json.loads(self.plan_text)
@@ -191,13 +193,25 @@ class FetchTest(FetchCase):
     def test_the_command_line_names_failures_and_exits_one(self) -> None:
         out, err = io.StringIO(), io.StringIO()
         arguments = [
-            "fetch", str(self.write_plan('{"schema": 2}')),
+            "fetch", str(self.write_plan('{"schema": 3}')),
             "--mirror", self.mirror, "--keyring", str(self.fixture.keyring), "--cache", str(self.new_cache()),
         ]  # fmt: skip
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(arguments)
         self.assertEqual((code, out.getvalue()), (1, ""))
         self.assertIn("schema", err.getvalue())
+
+    def test_a_schema_1_plan_is_refused_and_the_message_says_how_to_get_a_new_one(self) -> None:
+        document = json.loads(self.plan_text)
+        document["schema"] = 1
+        document["snapshot"] = document.pop("snapshots")["debian"]
+        err = io.StringIO()
+        arguments = ["fetch", str(self.write_plan(json.dumps(document))), "--cache", str(self.new_cache())]
+        with contextlib.redirect_stderr(err):
+            code = cli.main(arguments)
+        self.assertEqual(code, 1)
+        self.assertIn("this plan is schema 1, which names one snapshot for both archives", err.getvalue())
+        self.assertIn("make the plan again with `plan`", err.getvalue())
 
     def test_bundle_dir_without_bundle_is_a_usage_error(self) -> None:
         err = io.StringIO()
@@ -219,7 +233,7 @@ class OnlyWhatBuildsTest(FetchCase):
         return self.write_plan(json.dumps(document))
 
     def pool_files(self, cache: Path) -> list[str]:
-        pool = fetch.mirror_dir(cache, FIRST_ID) / "debian" / "pool"
+        pool = fetch.mirror_dir(cache, FIRST_IDS) / "debian" / "pool"
         return sorted(path.name for path in pool.rglob("*.deb")) if pool.exists() else []
 
     def test_a_child_that_builds_on_a_reused_parent_fetches_only_what_it_adds(self) -> None:
@@ -340,7 +354,7 @@ class PlanShapeTest(FetchCase):
 
     def test_the_real_plan_is_read(self) -> None:
         parsed = fetch.fetch_plan(planfile.parse_plan(json.loads(self.plan_text)))
-        self.assertEqual((parsed.snapshot, parsed.suite, parsed.components), (FIRST_ID, "trixie", ("main",)))
+        self.assertEqual((parsed.snapshots, parsed.suite, parsed.components), (FIRST_IDS, "trixie", ("main",)))
         self.assertEqual(parsed.architecture, "amd64")
         self.assertIn(("lib-a", "1.0", "all"), parsed.packages)
         self.assertEqual(parsed.inputs, ())
@@ -360,8 +374,8 @@ class PlanShapeTest(FetchCase):
             self.fetch(plan, self.new_cache())
         with self.assertRaisesRegex(commands.Failed, "not JSON"):
             self.fetch(self.write_plan("{"), self.new_cache())
-        with self.assertRaisesRegex(commands.Failed, "schema must be 1"):
-            self.fetch(self.write_plan('{"schema": 2}'), self.new_cache())
+        with self.assertRaisesRegex(commands.Failed, "schema must be 2"):
+            self.fetch(self.write_plan('{"schema": 3}'), self.new_cache())
         with self.assertRaisesRegex(commands.Failed, "no-such-plan.json"):
             self.fetch(self.new_cache() / "no-such-plan.json", self.new_cache())
 
@@ -431,7 +445,7 @@ class AptReadsTheMirrorTest(FetchCase):
     def test_apt_updates_from_the_mirror_and_downloads_a_package(self) -> None:
         cache = self.new_cache()
         self.fetch(self.write_plan(self.plan_text), cache)
-        mirror = fetch.mirror_dir(cache, FIRST_ID)
+        mirror = fetch.mirror_dir(cache, FIRST_IDS)
         keyring = self.fixture.keyring
         root = Path(tempfile.mkdtemp(dir=self.tmp)) / "apt"
         for directory in (
