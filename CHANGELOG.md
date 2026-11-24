@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- A release publishes the boot checks' container image (`builder/vm.Dockerfile`, what `scripts/builder vm` builds) to
+  `ghcr.io/<owner>/debian-image-factory-vm`, tagged `vX.Y.Z`, signed by digest with the same keyless Sigstore
+  identity as the builder image, and the release notes name it by digest. Pull it and run
+  `test --vm-image ghcr.io/<owner>/debian-image-factory-vm:vX.Y.Z@sha256:<digest>`.
+- When the boot checks' image is missing and `--vm-image` names a reference with a digest, the `not run` message now
+  says to `docker pull` it (`scripts/builder vm` still builds the local one). `test` never pulls it for you.
+- DESIGN 16.2 now says what it always meant: no ready-made Debian images before 1.0, while the builder and VM
+  containers, which are tools, are published with each release.
+
 ## 0.8.0 (2026-11-23)
 
 - The `debian` and `debian-security` archives are pinned separately, so a Debian security fix can be built with as

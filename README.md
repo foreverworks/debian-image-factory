@@ -247,7 +247,7 @@ dir:///srv/images` and the core you just published reads `reuse`.
 What you see on the example: `publish` copies core, the Incus image, the installer and the OS image, and says
 that the two OCI images publish only to `oci://` targets. In the second plan core reads `reuse`, the OCI images
 `build` (nothing holds them yet), and the Incus image, the installer and the OS image `wait`: `test` reported
-their boot checks as `not run` (no Incus host, and no boot image for QEMU, which `scripts/builder vm` builds),
+their boot checks as `not run` (no Incus host, and no boot image for QEMU: `scripts/builder vm` builds it, or `docker pull` the one a release publishes),
 so they are still candidates. A candidate becomes a good build when its required checks have passed (the boot checks are described below), and the plan reuses good builds.
 
 To keep an image's exact inputs, `fetch plan.json --bundle` writes one `.inputs.tar` per image that
@@ -315,7 +315,8 @@ root filesystem tarball, `<name>.tar.gz`, with its kernel and initrd in `/boot`,
 on a disk. Neither holds a machine ID or SSH host keys: both are made at the first boot. An OS image's
 own apt sources come from `apt_sources` (`baseline-except-security` points main and updates at the
 baseline and leaves security live), so moving the baseline rebuilds the OS images and nothing else.
-`scripts/builder vm` gives the image `test` boots them in: `installer-boot` boots the kit's kernel and
+`scripts/builder vm` gives the image `test` boots them in, and each release publishes the same image
+(see [In GitHub Actions](#in-github-actions)): `installer-boot` boots the kit's kernel and
 initrd, `os-boot` the root on a disk by UEFI, and `two-clones` boots each twice and compares their
 identities, all in QEMU (KVM when `/dev/kvm` opens, emulated otherwise).
 
@@ -394,8 +395,27 @@ The inputs are `definition`, `lock`, `params`, `snapshot`, `against`, `steps` (d
 with the build output, when the run ends); the outputs are `changed`, `plan` (the path of
 `plan.json`) and `artifacts` (JSON of image to digest). The runner needs Docker to build, and `apt`
 and `gpgv` to plan (the Action installs the last two when they are missing). The release also
-publishes the builder image to `ghcr.io/foreverworks/debian-image-factory-builder`, signed with Sigstore.
-Until the `.pyz` pins it, the Action builds the builder from its own checkout: pin the Action at the
+publishes two container images to ghcr.io, each signed with Sigstore: the builder image,
+`ghcr.io/foreverworks/debian-image-factory-builder`, and the image the boot checks run in (QEMU and OVMF),
+`ghcr.io/foreverworks/debian-image-factory-vm`. Both are tagged with the release (`vX.Y.Z`), and the release
+notes name each by its digest. Use the digest, not the tag: pull the VM image once and hand it to `test`.
+
+```sh
+docker pull ghcr.io/foreverworks/debian-image-factory-vm:vX.Y.Z@sha256:<digest>
+debian-image-factory test out/ --vm-image ghcr.io/foreverworks/debian-image-factory-vm:vX.Y.Z@sha256:<digest>
+```
+
+To check who made an image, verify its signature. It was made by this repository's release workflow at a
+release tag, so an image pushed by any other workflow, ref or fork does not verify:
+
+```sh
+cosign verify ghcr.io/foreverworks/debian-image-factory-vm@sha256:<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/foreverworks/debian-image-factory/\.github/workflows/release\.yml@refs/tags/v[0-9]'
+```
+
+The same command verifies the builder image. Releases before 0.9.0 publish the builder image only.
+Until the `.pyz` pins the builder, the Action builds it from its own checkout: pin the Action at the
 commit of the release your lock names. `.github/workflows/nightly.yml` is a working example, run on this
 repository's own definition; the inputs, the steps and what happens when nothing changed are in
 [DESIGN.md, section 9.2](DESIGN.md#92-the-github-action).
@@ -483,6 +503,7 @@ Built, in v0.6.3 and later:
 
 Built, in 0.7.0 and later: record signing and parallel builds (`build --jobs`).
 Built, in 0.8.0 and later: one Debian snapshot per archive, so a security fix is buildable as soon as its archive lists it.
+Built, in 0.9.0 and later: the boot checks' container image is published, signed, with each release, so `test --vm-image` can use it by digest.
 
 Planned: the `.pyz` pinning the published builder image, `--builder host`, zstd compression, and for 1.0 a
 full example repository, once a real deployment has run every kind through its own promotion. What is

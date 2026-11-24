@@ -213,7 +213,12 @@ ships them, plus the tools that only move or check bytes (gnupg, gpgv, oras, uti
 recipe is `builder/Dockerfile`; its snapshot is the `debian_snapshot` of the repository's own
 `lock.json`, which also pins input-lock.
 A release publishes that builder image to `ghcr.io/<owner>/debian-image-factory-builder` and signs it
-(`release.yml` does both today); `push_layout` takes any single-image OCI layout and assumes none of
+(`release.yml` does both today), and from 0.9.0 the boot checks' image (`builder/vm.Dockerfile`, 12) to
+`ghcr.io/<owner>/debian-image-factory-vm` in the same way: tagged `vX.Y.Z`, signed by digest with the same
+keyless identity, and named by digest in the release notes, so a consumer pins it and runs `test --vm-image
+ghcr.io/<owner>/debian-image-factory-vm:vX.Y.Z@sha256:<digest>`. Nothing pins it by default: the `.pyz` keeps
+the local tag `scripts/builder vm` gives, and `test` never pulls (a missing image is reported as not run, with
+`docker pull` as the way to get one with a digest); `push_layout` takes any single-image OCI layout and assumes none of
 the factory's annotations. What is **planned** is that the `.pyz` pins
 that image by digest, so a stranger's build uses exactly the builder the release published; the
 subsection below is that design, and nothing in it is published yet.
@@ -1384,7 +1389,7 @@ the images that build. `build` builds core, OCI images (with `--parents`; `plan 
 published ones), Incus images (on core, or on an Incus parent from `dir://`), installer kits and OS roots. `test` runs each
 kind's checks: the OCI checks and `locked-inputs` (`test --definition` gives it the module tables); `incus-boot` and
 `two-clones` where an Incus host answers (`scripts/incus-vm` gives one in a VM); and the boot checks of the installer and
-OS kinds (`test --vm-image` names the image QEMU runs in, `scripts/builder vm` builds it; `test --parent` names a
+OS kinds (`test --vm-image` names the image QEMU runs in, `scripts/builder vm` builds it and a release publishes it, 5.4; `test --parent` names a
 parent artifact outside `out/` for `ancestry`). `publish` writes to `dir://`, `oci://` and `github-release://` targets
 (the GitHub API is `GITHUB_API_URL`, the token `GITHUB_TOKEN` or else `GH_TOKEN`), and `verify` checks an artifact
 against its records. The `deb` and `file` modules come with `lock checksums`: input-lock's `refresh` on a lock the
@@ -1679,7 +1684,7 @@ the Action then verifies that image's signature with cosign and runs `build` wit
 by digest, and the `scripts/builder` step goes; the Action's ref then stops mattering to the bytes.
 
 **Boot checks.** A built installer or OS image runs `test` with the boot checks' image
-(`scripts/builder vm`), which QEMU runs with `/dev/kvm` when it opens and emulated otherwise, slower
+(`scripts/builder vm`, or the release's published one, 5.4, pulled first), which QEMU runs with `/dev/kvm` when it opens and emulated otherwise, slower
 with the same result (12). The Incus checks run only where an Incus host answers; elsewhere they are
 reported as not run, never as passed, and the image stays a candidate.
 
@@ -1998,6 +2003,7 @@ has to show.
 | **Nightly loop**: `plan --against` on every target, `--snapshot latest`, the Action, `prune`, inputs bundles, offline replay | built, in v0.6.3 and later | a night with no relevant upload builds nothing; one with a single upload rebuilds exactly its chain; a bundle rebuilds with snapshot.debian.org unreachable |
 | **Optional signing** of records (8.3) | built, in 0.7.0 and later | records signed keyless or with a key verify with `verify`; an unsigned record stays valid |
 | **Parallel builds** (`build --jobs`, 9.1) | built, in 0.7.0 and later | the artifacts, digests and records equal a serial build's |
+| **The boot checks' VM image published with each release**, signed by digest (5.4) | built, in 0.9.0 and later | the release notes name its digest; `test --vm-image <reference>@sha256:...` boots the installer and OS kinds in it |
 | **The published builder pinned in the `.pyz`** (5.4) | planned | a stranger's build uses exactly the builder the release published |
 | **`--builder host`, zstd compression** (9.1, 8.1) | planned | no criteria written yet |
 | **1.0**: docs for strangers, a full example repository | planned; it needs at least one real deployment that has run every kind through its own promotion | the README's quick start works on a clean machine |
@@ -2097,12 +2103,14 @@ with a recommendation each.
    when a factory release moves its snapshot. This is a deliberate exception to taking the newest
    upstream release, for these tools only. Upstream fixes and features arrive with the next Debian
    release or a deliberate backport.
-2. **No ready-made public images from this repository before 1.0** (decided): it publishes the
-   tool and its builder image, and its release tests build the example definition into a throwaway
-   registry. Strangers build their own images, and nobody depends on images this project would then
-   have to patch forever. Ready-made images, if any, live in a repository of their own.
-3. **The factory's own releases are signed** (decided): the `.pyz` and the builder image are signed
-   with Sigstore keyless from v0.1, while consumer artifacts stay unsigned by default. Strangers
+2. **No ready-made public Debian images from this repository before 1.0** (decided): it publishes the
+   tool and the containers the tool runs in, the builder image and the boot checks' VM image, with each
+   release (5.4), and its release tests build the example definition into a throwaway registry. Those
+   two are tools, not images a consumer deploys. Strangers build their own Debian images (core, OCI,
+   Incus, installer, OS), and nobody depends on images this project would then have to patch forever.
+   Ready-made images, if any, live in a repository of their own.
+3. **The factory's own releases are signed** (decided): the `.pyz`, the builder image and the VM image are signed
+   with Sigstore keyless from v0.1 (the VM image from 0.9.0), while consumer artifacts stay unsigned by default. Strangers
    can verify the tool they run, at no cost to consumers.
 4. **Inputs bundles are off by default** (decided; `--bundle` turns them on). Where they are off,
    replay depends on snapshot.debian.org or the consumer's cache; where they are on, they cost

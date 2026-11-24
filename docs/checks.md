@@ -290,7 +290,10 @@ powers off, and a drop-in that makes `multi-user.target` want it. The artifact i
 never changed. The tests are `kit-json-matches-files` (the members are what kit.json lists),
 `report-arrived` and `running-kernel-is-the-kit-kernel`. From 0.7.0 a boot that does not report names why (QEMU's exit status, and whether a half-written report line
 reached the port) and the end of its console log, and the whole log is kept beside the kit as `<kit>.boot-<n>.serial.log`. The
-check is not run when docker or the boot image (`scripts/builder vm`, `test --vm-image`) is missing.
+check is not run when docker or the boot image is missing. Build the image with `scripts/builder vm`, or, from
+release 0.9.0, pull the one the release publishes (`docker pull ghcr.io/foreverworks/debian-image-factory-vm:vX.Y.Z@sha256:<digest>`,
+the digest is in the release notes) and name it with `test --vm-image`. A reference with a digest is never pulled
+for you: when it is not here, the message says to pull it.
 
 ## os-boot
 
