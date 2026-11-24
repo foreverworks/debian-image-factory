@@ -1,6 +1,6 @@
 # A tag vX.Y.Z on a commit of main publishes debian-image-factory-X.Y.Z.pyz, its .sha256 and its Sigstore
-# bundle as a GitHub release, and the builder image to ghcr.io signed with a keyless signature, once the
-# full matrix, the integration tier (integration.yml, a matrix of shards run side by side) and the Incus boot
+# bundle as a GitHub release, and the builder image and the boot checks' (VM) image to ghcr.io, each signed
+# with a keyless signature, once the full matrix, the integration tier (integration.yml, a matrix of shards run side by side) and the Incus boot
 # contract (incus.yml) passed. The .pyz is reproducible: scripts/build-pyz.
 # Runs on GitHub's hosted runners; see ci.yml. A tag runs every check first, and publishes only when they
 # all pass.
@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write # the GitHub release
-      packages: write # the builder image on ghcr.io
+      packages: write # the builder and VM images on ghcr.io
       id-token: write # keyless Sigstore signing
     env:
       REPOSITORY: ${{ github.repository }}
@@ -131,6 +131,23 @@ jobs:
           test -n "$digest"
           cosign sign --yes "$digest"
           echo "The builder image is $digest, signed keyless with Sigstore." > dist/notes.md
+
+      - name: Build the VM image, push it and sign it by digest, keyless
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repository=$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/$repository-vm"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          # scripts/builder vm prints the local image reference on its last line
+          built=$(scripts/builder vm | tail -n 1)
+          docker tag "$built" "$image:$GITHUB_REF_NAME"
+          docker push "$image:$GITHUB_REF_NAME"
+          digest=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image:$GITHUB_REF_NAME" | grep -F "$image@" | head -n 1)
+          test -n "$digest"
+          cosign sign --yes "$digest"
+          echo "The VM image for the boot checks is $digest, signed keyless with Sigstore. Pass it to \`test --vm-image\`." >> dist/notes.md
 
       - name: Publish the release
         env:
