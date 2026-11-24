@@ -3,9 +3,11 @@
 
 import base64
 import re
+import subprocess
 import unittest
+from collections.abc import Sequence
 
-from debian_image_factory.checks import vm
+from debian_image_factory.checks import vm, vmrun
 
 KERNEL = "6.12.0-1-amd64"
 
@@ -17,6 +19,31 @@ def report(kernel: str = KERNEL, machine: str = "a" * 32, ssh: str = "b" * 64, s
 
 def boot(serial: str, status: int | None = 0) -> vm.Boot:
     return vm.boot_of(status, serial, 600)
+
+
+def missing_image(args: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args, 1, "", "Error: No such image")
+
+
+class ImageMissingTest(unittest.TestCase):
+    def test_a_missing_local_image_is_built_with_scripts_builder_vm(self) -> None:
+        problem = vmrun.problem_with(vmrun.Vm(image="debian-image-factory-vm:20260101T000000Z", run=missing_image))
+        self.assertIsNotNone(problem)
+        self.assertIn("scripts/builder vm builds it", str(problem))
+        self.assertNotIn("docker pull", str(problem))
+
+    def test_a_missing_image_with_a_digest_is_pulled(self) -> None:
+        image = "ghcr.io/example/debian-image-factory-vm:v1.2.3@sha256:" + "a" * 64
+        problem = vmrun.problem_with(vmrun.Vm(image=image, run=missing_image))
+        self.assertIsNotNone(problem)
+        self.assertIn(f"docker pull {image}", str(problem))
+        self.assertNotIn("scripts/builder vm", str(problem))
+
+    def test_an_image_that_is_here_is_no_problem(self) -> None:
+        def present(args: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 0, "sha256:abc", "")
+
+        self.assertIsNone(vmrun.problem_with(vmrun.Vm(run=present)))
 
 
 class CredentialsTest(unittest.TestCase):

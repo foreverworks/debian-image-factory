@@ -223,7 +223,10 @@ def parser() -> argparse.ArgumentParser:
     test.add_argument(
         "--vm-image",
         default=builder.VM_IMAGE,
-        help=f"the boot checks' container image (default {builder.VM_IMAGE}, from scripts/builder vm)",
+        help=(
+            f"the boot checks' container image (default {builder.VM_IMAGE}, from scripts/builder vm); "
+            "a registry reference with a digest, such as the release's published image, must be pulled first"
+        ),
     )
 
     publish_ = commands_.add_parser("publish", help="copy artifacts and their records to targets")

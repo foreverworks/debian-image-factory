@@ -100,7 +100,8 @@ def problem_with(machine: Vm) -> str | None:
     except (OSError, subprocess.SubprocessError) as error:
         return f"docker is not available: {error}"
     if found.returncode != 0:
-        return f"the boot image {machine.image} is not here (scripts/builder vm builds it): {found.stderr.strip()}"
+        how = f"docker pull {machine.image}" if "@sha256:" in machine.image else "scripts/builder vm builds it"
+        return f"the boot image {machine.image} is not here ({how}): {found.stderr.strip()}"
     return None
 
 
