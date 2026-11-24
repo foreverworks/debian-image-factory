@@ -4,7 +4,8 @@ Status: built, in v0.6.3 and later: the lock and definition checks, identities a
 core, OCI, Incus, installer and OS images with their records and checks; publishing to a directory, a
 registry and a GitHub release; `verify`; and the nightly loop (`plan --against`, `--snapshot latest`, the
 GitHub Action, `prune`, inputs bundles and offline replay). Built, in 0.7.0 and later:
-record signing (8.3) and parallel builds; in 0.8.0 and later: one snapshot per archive (7.5). Planned: the published builder pinned in the `.pyz` (5.4),
+record signing (8.3) and parallel builds; in 0.8.0 and later: one snapshot per archive (7.5); in 0.9.0 and
+later: the boot checks' container image published, signed, with each release (12). Planned: the published builder pinned in the `.pyz` (5.4),
 `--builder host`, zstd, and the rest of the 1.0 list in [section 14](#14-what-is-built-and-what-is-planned).
 This document is the design the factory follows and is revised as it changes. Written 2026-11-21; every version
 this document names was read that day at the source listed in

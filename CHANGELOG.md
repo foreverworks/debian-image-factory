@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 (2026-11-24)
 
 - A release publishes the boot checks' container image (`builder/vm.Dockerfile`, what `scripts/builder vm` builds) to
   `ghcr.io/<owner>/debian-image-factory-vm`, tagged `vX.Y.Z`, signed by digest with the same keyless Sigstore
