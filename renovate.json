@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", "helpers:pinGitHubActionDigests", "github>foreverworks/input-lock#v0.3.0"],
+  "extends": ["github>foreverworks/renovate-config", "github>foreverworks/input-lock#v0.3.0"],
   "packageRules": [
     {
       "description": "Every pin of input-lock (the lock.json entry and any other) moves in one pull request.",
